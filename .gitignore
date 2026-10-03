@@ -37,3 +37,9 @@ assets/downloads/
 assets/fonts/KOMIKAX.ttf
 requirements-build.lock.txt
 installer/sizes.iss
+# Personal engineering context, plans, task ledgers and build-session notes.
+/*.md
+!README.md
+!RELEASE_NOTES.md
+!THIRD_PARTY_NOTICES.md
+docs/*.md
