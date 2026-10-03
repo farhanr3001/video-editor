@@ -1,0 +1,39 @@
+.venv/
+__pycache__/
+*.py[cod]
+.test-home/
+build-ui.png
+build/
+dist/
+*.spec
+dist-*/
+release/
+.runtime-home/
+.agents/
+.KineticCut Versions/
+scratch/
+screenshots/
+assets_project/
+assets_docker_guide/
+Soundtracks/
+Sound_Effects/
+exports/
+*.kcut
+/*.mp4
+/*.mp3
+/*.mkv
+/*.png
+/*.log
+scratch_capture_all.py
+PROJECT_STORAGE_AUDIT.csv
+PROJECT_STORAGE_AUDIT.md
+# Private user-provided font; preserve locally, never publish automatically.
+assets/fonts/Geometos.ttf
+assets/fonts/Geometos-license.pdf
+# Vendor phone binaries are versioned release packs, not source history.
+assets/phone-tools/
+assets/downloads/
+# Owner-supplied fonts stay local; the personal-transfer installer includes them.
+assets/fonts/KOMIKAX.ttf
+requirements-build.lock.txt
+installer/sizes.iss

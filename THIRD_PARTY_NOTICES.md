@@ -1,0 +1,130 @@
+# Third-party notices
+
+## Phone Connect
+
+USB backends use pymobiledevice3 11.15.5 (GPL-3.0, upstream
+https://github.com/doronz88/pymobiledevice3) and adbutils 2.12.0 (MIT,
+https://github.com/openatx/adbutils), together with their Python dependencies.
+Their distribution metadata/licenses are retained in the package. This is the
+owner's private build; public redistribution needs a dependency/license review.
+
+The official scrcpy 4.1 Windows x64 distribution is bundled unmodified under
+`assets/phone-tools/scrcpy-win64-v4.1`, including its Apache-2.0 LICENSE.txt, ADB,
+SDL3 and FFmpeg libraries. Upstream source/build/license information:
+https://github.com/Genymobile/scrcpy/releases/tag/v4.1
+and https://github.com/Genymobile/scrcpy/blob/master/doc/windows.md.
+Archive SHA256: 5b12172b3264b2889f4583ee64752ce832e29bc8b1089dca81093459697165db.
+No Apple software, drivers, private branding or mock phone screenshots are bundled.
+
+## Caption fonts
+
+Geometos Regular was supplied by the user for this private build as
+`C:/Users/F/Downloads/geometos/Geometos.ttf`. Copyright (c) 2015 Deepak Singh
+Dogra. Its accompanying document is retained unchanged as
+`assets/fonts/Geometos-license.pdf`. This is not Geometos Soft Ultra and is
+not represented as an OFL font or as cleared for public app redistribution.
+
+Anton, Montserrat, Poppins, Archivo Black, Bebas Neue, Bangers and TikTok Sans
+are bundled unmodified from https://github.com/google/fonts/tree/main/ofl
+under the SIL Open Font License 1.1. Their individual copyright and license
+notices are included in assets/fonts/*-OFL.txt. Total font/license assets: 3.40 MB.
+Windows fonts (including Nirmala UI) are used from the user's installation,
+not redistributed. Geometos Soft is offered when already installed; its
+Creative Fabrica listing does not establish permission to redistribute its
+font files with this application, so it is not bundled.
+
+## Lucide Icons
+
+The interface includes SVG icons from Lucide, distributed under the ISC License.
+
+Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part of
+Feather (MIT). All other copyright (c) for Lucide are held by Lucide Contributors
+2022.
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT,
+OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
+DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS
+ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS
+SOFTWARE.
+
+## Google Noto Color Emoji and Unicode emoji catalogue
+
+The bundled NotoColorEmoji.ttf is provided by Google under the SIL Open Font
+License 1.1. Its licence is included in assets/emoji/OFL.txt; copyright and
+designer notices are retained in the unmodified font.
+Source: https://github.com/googlefonts/noto-emoji/tree/main/fonts
+
+The emoji picker uses Unicode 17.0 emoji-test.txt, including fully-qualified
+sequences and emoji components. The Unicode licence is included in
+assets/emoji/UNICODE-LICENSE.txt.
+Source: https://www.unicode.org/Public/17.0.0/emoji/emoji-test.txt
+
+FontTools (MIT) and uharfbuzz (Apache-2.0) are used to read and shape the bundled
+font. Their package metadata and licences accompany their distributions.
+
+## Optional Vocal Only download (not included in the base application)
+
+The separate CPU runtime uses CPython 3.11.9 (PSF license), pip 24.3.1 (MIT),
+PyTorch 2.0.1 and torchaudio 2.0.2 (BSD-style licenses), NumPy 1.26.4 (BSD),
+Demucs 4.0.1 and its HTDemucs model (MIT), SoundFile 0.13.1 (BSD; libsndfile
+LGPL), and their dependencies. Package licenses/metadata remain in the optional
+installation. No PyTorch runtime or HTDemucs weights are bundled into the EXE.
+
+Official sources:
+- https://www.python.org/downloads/release/python-3119/
+- https://github.com/pytorch/pytorch
+- https://github.com/pytorch/audio
+- https://github.com/facebookresearch/demucs (archived upstream)
+- https://github.com/bastibe/python-soundfile
+- https://numpy.org/doc/stable/license.html
+
+The component uses the pinned official 955717e8 HTDemucs weight file and
+verifies its full SHA-256 hash before installation. Original audio remains
+local. Separation does not grant rights to source music or other recordings.
+
+## Optional face/background download (not included in the base application)
+
+The isolated component uses CPython 3.11.9, pip 24.3.1, MediaPipe 0.10.32
+(Apache-2.0), NumPy 1.26.4 (BSD), OpenCV contrib 4.11.0.86 (Apache-2.0),
+Pillow 11.3.0 (HPND), and their dependencies. Their distribution licenses and
+metadata remain in the optional installation. The version-1 FaceLandmarker
+and SelfieSegmenter models are downloaded from Google's official model store
+and checked against pinned SHA-256 hashes. See their official documentation
+and model cards for intended uses and limitations:
+
+- https://pypi.org/project/mediapipe/0.10.32/
+- https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker
+- https://developers.google.com/edge/mediapipe/solutions/vision/image_segmenter
+
+The hat and mask graphics are drawn by Kinetic Cut code, with no third-party
+filter artwork. MediaPipe and these model files are not included in the EXE.
+
+## 3D/AR face-filter models
+
+`assets/face_filters/ar-plague/source.glb` and its locally rendered pose views
+are based on **Plague master - Instagram AR face filter** by Tombolaso:
+https://sketchfab.com/3d-models/plague-master-instagram-ar-face-filter-b0e6394b0d4f471385836143444a1a8a
+The model is CC BY 4.0. Its original license notice is retained at
+`assets/face_filters/ar-plague/license.txt`. Kinetic Cut removes the model's
+preview backdrop cube and renders transparent angle views for its AR effect.
+
+`assets/face_filters/ar-pixel-glasses/source.glb` is supplied by the app owner
+for this private build. Its source and redistribution terms have not been
+established. On 3 October 2026 the owner explicitly authorized retaining these
+assets for their personal device-transfer build and continuing publication.
+This records that instruction; it does not establish a third-party license.
+
+## Owner-supplied caption fonts
+
+The personal-transfer package retains Geometos.ttf and the supplied
+Geometos-license.pdf. Komika Axis is retained to preserve the existing Emoji and
+Karaoke typography on another device. Its embedded credits identify WolfBainX &
+Apostrophe / Apostrophic Labs, 1999–2001. No license is invented for these files.
+Owner font binaries are excluded from source history; existing available notices
+remain in the installer.
