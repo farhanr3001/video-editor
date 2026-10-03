@@ -19,7 +19,7 @@ try {
     --hidden-import pymobiledevice3.osu.win_util --copy-metadata pymobiledevice3 --copy-metadata adbutils `
     --collect-data faster_whisper --collect-all edge_tts --collect-submodules fontTools.ttLib.tables `
     --copy-metadata fonttools --copy-metadata uharfbuzz --add-data "$assetPath;assets" `
-    --add-data "THIRD_PARTY_NOTICES.md;." main.py
+    --add-data "THIRD_PARTY_NOTICES.txt;." main.py
   if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 } finally {
   $env:PATH = $buildOriginalPath

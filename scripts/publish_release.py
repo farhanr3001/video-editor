@@ -22,7 +22,8 @@ def main():
         return json.load(urllib.request.urlopen(urllib.request.Request(url,data=data,headers=headers,method=method),timeout=120))
     releases=request(f'https://api.github.com/repos/{REPOSITORY}/releases')
     release=next((r for r in releases if r['tag_name']=='v'+VERSION),None)
-    notes=(ROOT/'RELEASE_NOTES.md').read_text(encoding='utf-8')
+    notes_path=ROOT/'RELEASE_NOTES.md' # Maintainer's local release notes, excluded from source history.
+    notes=notes_path.read_text(encoding='utf-8') if notes_path.is_file() else f'Kinetic Cut {VERSION}. See the repository README for details.'
     if release is None:
         release=request(f'https://api.github.com/repos/{REPOSITORY}/releases',dict(tag_name='v'+VERSION,target_commitish='main',name='Kinetic Cut '+VERSION,body=notes,draft=True))
     files=[ROOT/f'release/KineticCut-Setup-{VERSION}.exe',*(ROOT/'release').glob(f'KineticCut-*-{VERSION}.zip'),ROOT/'release/components.json',ROOT/'release/build-report.json']
