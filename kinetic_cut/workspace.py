@@ -130,7 +130,9 @@ class BinMediaList(MediaList):
         if self.bin_drop_hover:
             painter=QPainter(self.viewport()); painter.setPen(QPen(QColor("#ed806f"),2)); painter.drawRect(self.viewport().rect().adjusted(2,2,-3,-3)); painter.end()
         if self.count():return
-        painter=QPainter(self.viewport()); painter.setPen(ui_color('text_sub')); painter.drawText(self.viewport().rect().adjusted(12,16,-12,-16),Qt.AlignCenter|Qt.TextWordWrap,"No media in this bin\n\nImport media · Ctrl+I")
+        message="No media in this bin\n\nImport media · Ctrl+I"
+        if self.panel.is_watch():message="Media added to this folder will appear here automatically."
+        painter=QPainter(self.viewport()); painter.setPen(ui_color('text_sub')); painter.drawText(self.viewport().rect().adjusted(12,16,-12,-16),Qt.AlignCenter|Qt.TextWordWrap,message)
     def mousePressEvent(self,event):
         if self.marquee_controller.begin(event):self.press_position=None; return
         self.press_position=event.position().toPoint() if event.button()==Qt.LeftButton and self.itemAt(event.position().toPoint()) else None
@@ -164,6 +166,7 @@ class BinMediaList(MediaList):
         if hasattr(self,'marquee_controller'):self.marquee_controller.stop()
         super().clear()
     def dragEnterEvent(self,event):
+        if self.panel.is_watch():event.ignore(); return
         if self.panel.is_bin_move(event.mimeData()):self.panel.highlight_drop(self,event); event.acceptProposedAction(); return
         if event.mimeData().hasFormat(binclips.MIME):
             self.bin_drop_hover=self.panel.folder!="project" and self.panel.window.current_page==0; self.viewport().update()
@@ -171,14 +174,17 @@ class BinMediaList(MediaList):
             else:event.ignore()
         else:super().dragEnterEvent(event)
     def dragMoveEvent(self,event):
+        if self.panel.is_watch():event.ignore(); return
         if self.panel.is_bin_move(event.mimeData()):self.panel.highlight_drop(self,event); event.acceptProposedAction(); return
         if event.mimeData().hasFormat(binclips.MIME):self.dragEnterEvent(event); self.panel.highlight_drop(self,event)
         else:super().dragMoveEvent(event)
     def dropEvent(self,event):
+        if self.panel.is_watch():event.ignore(); return
         self.folder_hover_rect=None; self.viewport().update()
         if self.panel.is_bin_move(event.mimeData()):
             item=self.itemAt(event.position().toPoint()); folder=item.data(Qt.UserRole+2) if item and item.data(Qt.UserRole+1)=='folder' else self.panel.folder
-            if self.panel.move_drop(event.mimeData(),folder):event.acceptProposedAction()
+            changed=self.panel.import_to_master(event.mimeData()) if folder=='project' else self.panel.move_drop(event.mimeData(),folder)
+            if changed:event.acceptProposedAction()
             else:event.ignore()
             return
         if event.mimeData().hasFormat(binclips.MIME):
@@ -244,9 +250,30 @@ class PowerFolderTree(QTreeWidget):
         if self.panel.move_drop(event.mimeData(),item.data(0,Qt.UserRole)):event.acceptProposedAction()
 
 
+class ProjectFolderTree(QTreeWidget):
+    """Master accepts reference imports; watch rows never write into disk folders."""
+    def __init__(self,panel):
+        super().__init__(panel); self.panel=panel
+        self.setAcceptDrops(True); self.viewport().setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+    def dragEnterEvent(self,event):
+        if event.mimeData().hasFormat('application/x-kinetic-media-id') and self.panel.window.current_page==0:event.acceptProposedAction()
+        else:event.ignore()
+    def dragMoveEvent(self,event):
+        item=self.itemAt(event.position().toPoint())
+        if item and item.data(0,Qt.UserRole)=='project':self.dragEnterEvent(event)
+        else:event.ignore()
+    def dropEvent(self,event):
+        item=self.itemAt(event.position().toPoint())
+        if item and item.data(0,Qt.UserRole)=='project' and self.panel.import_to_master(event.mimeData()):event.acceptProposedAction()
+        else:event.ignore()
+
+
 class MediaPanel(QWidget):
     def __init__(self,window):
         super().__init__(); self.window=window; self.power=PowerBins(); self.folder="project"
+        from .watch_folders import WatchFolders
+        self.watch_folders=WatchFolders(self)
         self._thumbnail_rebuild_paths={}; self._thumbnail_rebuild_failed=set(); self._thumbnail_rebuild_busy=False; self._thumbnail_rebuild_scheduled=False
         root=QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
         header=QHBoxLayout(); title=QLabel("Media Pool"); title.setObjectName("mediaPoolTitle"); header.addWidget(title); header.addStretch()
@@ -257,7 +284,8 @@ class MediaPanel(QWidget):
         header.addWidget(tool_button("folder-open",window.import_media,"Import media · Ctrl+I")); header.addWidget(tool_button("search",self.toggle_search,"Search media")); root.addLayout(header)
         self.search=PanelSearch(); self.search.setPlaceholderText("Search file name"); self.search.hide(); self.search.textChanged.connect(self.refresh); self.search.dismissed.connect(lambda:self.grid.setFocus()); root.addWidget(self.search)
         split=QSplitter(Qt.Horizontal); navigation=QSplitter(Qt.Vertical); navigation.setMinimumWidth(105); navigation.setMaximumWidth(180); navigation.setChildrenCollapsible(False); navigation.setHandleWidth(5)
-        self.project_tree=QTreeWidget(); self.project_tree.setObjectName("poolFolderTree"); self.project_tree.setHeaderHidden(True); self.project_tree.setMinimumHeight(65); self.project_tree.itemClicked.connect(self.choose_folder); navigation.addWidget(self.project_tree)
+        self.project_tree=ProjectFolderTree(self); self.project_tree.setObjectName("poolFolderTree"); self.project_tree.setHeaderHidden(True); self.project_tree.setMinimumHeight(65); self.project_tree.itemClicked.connect(self.choose_folder); navigation.addWidget(self.project_tree)
+        self.project_tree.setContextMenuPolicy(Qt.CustomContextMenu); self.project_tree.customContextMenuRequested.connect(self.project_context)
         lower=QWidget(); lower.setMinimumHeight(105); lower_layout=QVBoxLayout(lower); lower_layout.setContentsMargins(0,0,0,0); lower_layout.setSpacing(0); lower_layout.addWidget(QLabel("Power Bins",objectName="powerBinsTitle"))
         self.tree=PowerFolderTree(self); self.tree.setObjectName("powerFolderTree"); self.tree.setHeaderHidden(True); lower_layout.addWidget(self.tree); navigation.addWidget(lower); navigation.setSizes([210,160]); self.navigation_split=navigation
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu); self.tree.customContextMenuRequested.connect(self.context); self.tree.itemClicked.connect(self.choose_folder)
@@ -274,6 +302,11 @@ class MediaPanel(QWidget):
         pool=QWidget(); pool_layout=QVBoxLayout(pool); pool_layout.setContentsMargins(0,0,0,0); pool_layout.setSpacing(0)
         from .pool_tools import setup_view
         setup_view(self,pool)
+        self.watch_status=QLabel(pool); self.watch_status.setWordWrap(True); self.watch_status.hide()
+        from .theme_widgets import set_ui_style
+        set_ui_style(self.watch_status,'color: @text_sub; padding: 4px 8px;')
+        pool_layout.addWidget(self.watch_status)
+        self.watch_folders.changed.connect(self.watches_changed)
         split.addWidget(pool); split.setSizes([125,300]); root.addWidget(split,1); self.rebuild_tree()
         from .missing_media_ui import MissingMediaController
         self.missing_media=MissingMediaController(self)
@@ -328,6 +361,10 @@ class MediaPanel(QWidget):
         self.rebuild_tree(); self.refresh(); self.window.statusBar().showMessage('Removed Power Bin folders and entries. Source files are unchanged.',6000)
     def rebuild_tree(self):
         self.tree.clear(); self.project_tree.clear(); project=QTreeWidgetItem(["Master"]); project.setData(0,Qt.UserRole,"project"); self.project_tree.addTopLevelItem(project)
+        for key,folder in self.watch_folders.folders.items():
+            item=QTreeWidgetItem([Path(folder.path).name or folder.path]); item.setData(0,Qt.UserRole,key)
+            item.setIcon(0,lucide_icon('folder')); self.project_tree.addTopLevelItem(item)
+        self.update_watch_rows()
         nodes={}
         for folder in sorted(self.power.data["folders"]):
             parent=None; pieces=[]
@@ -341,11 +378,71 @@ class MediaPanel(QWidget):
                 parent=nodes[path]; parent.setExpanded(True)
     def choose_folder(self,item,*_):
         self.folder=item.data(0,Qt.UserRole) or "project"; self.refresh()
-        (self.tree if self.folder=="project" else self.project_tree).clearSelection()
+        (self.tree if self.folder=="project" or self.is_watch() else self.project_tree).clearSelection()
+    def is_watch(self):return self.folder in self.watch_folders.folders
+    def update_watch_rows(self):
+        for n in range(self.project_tree.topLevelItemCount()):
+            item=self.project_tree.topLevelItem(n); key=item.data(0,Qt.UserRole)
+            if key in self.watch_folders.folders:
+                folder=self.watch_folders.folders[key]
+                item.setToolTip(0,folder.path+'\n'+self.watch_folders.status(key)+'\nWatches this folder; subfolders are not included.')
+            item.setSelected(key==self.folder)
+    def watches_changed(self):
+        self.update_watch_rows()
+        if self.is_watch() and not self.grid.dragging:
+            folder=self.watch_folders.folders[self.folder]
+            signature=(self.folder,self.watch_folders.status(self.folder),tuple((m.id,m.path,m.thumbnail,m.duration,m.width,m.height) for m in folder.media()))
+            if signature!=getattr(self,'_watch_view_signature',None):self.refresh(preserve=True)
+    def project_context(self,pos):
+        target=self.project_tree.itemAt(pos); key=target.data(0,Qt.UserRole) if target else None
+        menu=QMenu(self)
+        if target is None:menu.addAction(lucide_icon('folder'),'Watch Folder…',self.add_watch_folder)
+        if key in self.watch_folders.folders:
+            menu.addAction('Remove Watch Folder',lambda:self.remove_watch_folder(key))
+        if menu.isEmpty():menu.deleteLater(); return
+        menu.popup(self.project_tree.viewport().mapToGlobal(pos)); self._menu=menu
+    def add_watch_folder(self):
+        path=QFileDialog.getExistingDirectory(self,'Watch Folder')
+        if not path:return
+        self.folder=self.watch_folders.add(path); self.rebuild_tree(); self.tree.clearSelection(); self.refresh()
+    def remove_watch_folder(self,key):
+        if self.folder==key:self.folder='project'
+        self.watch_folders.remove(key); self.rebuild_tree(); self.refresh()
+        self.window.statusBar().showMessage('Stopped watching folder. Source files and imported media are unchanged.',5000)
+    def open_watch_folder(self,key):
+        folder=self.watch_folders.folders.get(key)
+        if folder:QDesktopServices.openUrl(QUrl.fromLocalFile(folder.path))
+    def import_to_master(self,mime):
+        if self.window.current_page!=0 or not mime.hasFormat('application/x-kinetic-media-id'):return False
+        try:
+            ids=json.loads(bytes(mime.data('application/x-kinetic-media-ids'))) if mime.hasFormat('application/x-kinetic-media-ids') else [bytes(mime.data('application/x-kinetic-media-id')).decode()]
+            assets=[self.resolve_media(id) for id in ids]
+        except (ValueError,TypeError):return False
+        from .media_insert import source_key
+        changed=False
+        for asset in assets:
+            if not asset or asset.timeline_preset:continue
+            existing=next((m for m in self.window.project.media if source_key(m.path)==source_key(asset.path)),None)
+            if existing:
+                if existing.pool_hidden:existing.pool_hidden=False; changed=True
+            else:
+                media=copy.deepcopy(asset); self.window.project.add_media(media)
+                self.window.request_waveform(media); changed=True
+        if changed:self.window.model_changed(); self.window.refresh_media()
+        return any(asset and not asset.timeline_preset for asset in assets)
     def toggle_search(self):self.search.toggle()
-    def refresh(self,*_):
+    def refresh(self,*_,preserve=False):
+        selected={i.data(Qt.UserRole) for i in self.grid.selectedItems()} if preserve else set()
+        current=self.grid.currentItem(); primary=current.data(Qt.UserRole) if current and preserve else None
+        scroll=self.grid.verticalScrollBar().value(); horizontal=self.grid.horizontalScrollBar().value()
         self.grid.blockSignals(True); self.grid.clear(); media=[m for m in self.window.project.media if not m.timeline_preset and not m.pool_hidden]
-        if self.folder!="project":
+        watching=self.is_watch(); self.watch_status.setVisible(watching)
+        if watching:
+            media=self.watch_folders.folders[self.folder].media()
+            self.watch_status.setText(self.watch_folders.status(self.folder)); self.watch_status.setToolTip(self.watch_folders.folders[self.folder].path)
+            self._watch_view_signature=(self.folder,self.watch_status.text(),tuple((m.id,m.path,m.thumbnail,m.duration,m.width,m.height) for m in media))
+        else:self._watch_view_signature=None
+        if not watching and self.folder!="project":
             media=[MediaItem(**e["media"]) for e in self.power.data["media"] if e["folder"]==self.folder]
             for folder in self.power.child_folders(self.folder):
                 name=folder.rsplit("/",1)[-1]; item=QListWidgetItem(name); item.setToolTip("Power Bin folder · double-click to open")
@@ -364,7 +461,12 @@ class MediaPanel(QWidget):
                 values=metadata(m); values[0]=label(m); item.setData(Qt.UserRole+3,values); item.setData(Qt.UserRole+4,True)
             item.setIcon(self.media_icon(m))
             self.grid.addItem(item)
+            if preserve:
+                if m.id==primary:self.grid.setCurrentItem(item)
+                item.setSelected(m.id in selected)
         self.grid.blockSignals(False)
+        if preserve:
+            self.grid.verticalScrollBar().setValue(scroll); self.grid.horizontalScrollBar().setValue(horizontal)
     def media_icon(self,media):
         from .missing_media import is_missing,offline_icon
         if is_missing(media):return offline_icon(media.kind=='audio')
@@ -424,10 +526,12 @@ class MediaPanel(QWidget):
         worker=Worker(work); worker.signals.result.connect(done); worker.signals.error.connect(failed); self.window.start_worker(worker)
     def displayed_media(self,item):
         id=item.data(Qt.UserRole)
+        if self.is_watch():return self.watch_folders.resolve(id)
         if self.folder=="project":return self.window.project.media_by_id(id)
         entry=next((e for e in self.power.data["media"] if e["folder"]==self.folder and e["media"]["id"]==id),None)
         return MediaItem(**entry["media"]) if entry else None
     def rename_media(self,item):
+        if self.is_watch():return
         media=self.displayed_media(item)
         if not media:return
         name,ok=QInputDialog.getText(self,"Rename Media","Display name (source file is unchanged)",text=media.name)
@@ -450,7 +554,7 @@ class MediaPanel(QWidget):
         if self.tree.viewport().rect().contains(point):
             item=self.tree.itemAt(point); return item.data(0,Qt.UserRole) if item else "Master"
         point=self.grid.viewport().mapFromGlobal(global_position)
-        if self.folder!="project" and self.grid.viewport().rect().contains(point):return self.folder
+        if self.folder!="project" and not self.is_watch() and self.grid.viewport().rect().contains(point):return self.folder
         return None
     def begin_timeline_drag(self,timeline):
         timeline.cancel_drag()
@@ -483,10 +587,12 @@ class MediaPanel(QWidget):
     def resolve_media(self,media_id):
         media=self.window.project.media_by_id(media_id)
         if media:return media
+        media=self.watch_folders.resolve(media_id)
+        if media:return media
         entry=next((e for e in self.power.data["media"] if e["media"]["id"]==media_id),None)
         return MediaItem(**entry["media"]) if entry else None
     def on_import(self,items):
-        if self.folder!="project":
+        if self.folder!="project" and not self.is_watch():
             for item in items:self.power.add(item,self.folder)
     def context(self,pos):
         target=self.tree.itemAt(pos)
@@ -497,7 +603,7 @@ class MediaPanel(QWidget):
             menu.addAction('Delete Folder',lambda:self.delete_folders([folder]))
         menu.popup(self.tree.viewport().mapToGlobal(pos)); self._menu=menu
     def new_folder(self):
-        parent=self.folder if self.folder!="project" else "Master"; name,ok=QInputDialog.getText(self,"New Power Bin","Folder name")
+        parent=self.folder if self.folder in self.power.data['folders'] else "Master"; name,ok=QInputDialog.getText(self,"New Power Bin","Folder name")
         if ok and name.strip():self.power.add_folder(parent+"/"+name.strip()); self.rebuild_tree(); self.refresh()
     def rename_folder(self,folder):
         old_name=folder.rsplit("/",1)[-1]; name,ok=QInputDialog.getText(self,"Rename Power Bin","Folder name",text=old_name)
@@ -520,6 +626,11 @@ class MediaPanel(QWidget):
         selected=self.selected_media_items()
         from .missing_media import is_missing
         target=self.displayed_media(item) if item and item.data(Qt.UserRole+1)=='media' else None
+        if self.is_watch():
+            key=self.folder
+            menu.clear(); menu.addAction('Open Folder in Explorer',lambda:self.open_watch_folder(key))
+            menu.addAction('Refresh Folder',self.watch_folders.schedule)
+            menu.popup(self.grid.viewport().mapToGlobal(pos)); self._menu=menu; return
         if target and is_missing(target):
             menu.clear()
             menu.addAction('Remove from '+('Media Pool' if self.folder=='project' else 'Power Bin'),self.remove_selected)
@@ -549,6 +660,7 @@ class MediaPanel(QWidget):
         self.window.add_media_batch(ids,"",self.window.project.duration)
     def remove_selected(self):
         if getattr(self.window,"current_page",0):return
+        if self.is_watch():return
         ids={i.data(Qt.UserRole) for i in self.selected_media_items()}
         if self.folder=="project":
             in_use={i.media_id for i in self.window.project.timeline}&ids; removable=ids-in_use
@@ -572,6 +684,7 @@ class MediaPanel(QWidget):
         media=self.resolve_media(item.data(Qt.UserRole))
         if media:self.power.add(media,folder)
     def remove(self,id):
+        if self.is_watch():return
         if self.folder=="project":self.window.remove_media(id)
         else:self.power.data["media"]=[e for e in self.power.data["media"] if not(e["folder"]==self.folder and e["media"]["id"]==id)]; self.power.save(); self.refresh()
 

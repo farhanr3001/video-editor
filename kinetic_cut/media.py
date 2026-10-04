@@ -37,7 +37,7 @@ def _rate(value: str) -> float:
             return 0.0
 
 
-def probe(path: str | Path, ffprobe: str = "ffprobe", ffmpeg: str = "ffmpeg") -> MediaItem:
+def probe(path: str | Path, ffprobe: str = "ffprobe", ffmpeg: str = "ffmpeg", *, timeout=None) -> MediaItem:
     path = Path(path).resolve()
     kind = media_kind(path)
     if kind == "unknown":
@@ -45,18 +45,18 @@ def probe(path: str | Path, ffprobe: str = "ffprobe", ffmpeg: str = "ffmpeg") ->
     if kind == "image":
         with Image.open(path) as image:
             width, height = image.size
-        thumb = make_thumbnail(path, kind, ffmpeg)
+        thumb = make_thumbnail(path, kind, ffmpeg, timeout=timeout)
         return MediaItem(uid(), str(path), kind, path.name, 5.0, width, height, 0, False, thumb)
     command = [ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)]
     result = run_process(command, capture_output=True, text=True, check=True,
-                            encoding="utf-8", errors="replace")
+                            encoding="utf-8", errors="replace", timeout=timeout)
     payload = json.loads(result.stdout)
     video = next((s for s in payload.get("streams", []) if s.get("codec_type") == "video"), {})
     audio = any(s.get("codec_type") == "audio" for s in payload.get("streams", []))
     duration = float(payload.get("format", {}).get("duration") or video.get("duration") or 0)
     width, height = int(video.get("width", 0)), int(video.get("height", 0))
     fps = _rate(video.get("avg_frame_rate", "0/1"))
-    thumb = make_thumbnail(path, kind, ffmpeg) if kind == "video" else ""
+    thumb = make_thumbnail(path, kind, ffmpeg, timeout=timeout) if kind == "video" else ""
     media=MediaItem(uid(), str(path), kind, path.name, duration, width, height, fps, audio, thumb)
     media.video_codec = str(video.get("codec_name") or "").lower()
     for stream in payload.get('streams',[]):
@@ -78,9 +78,10 @@ def video_codec(path: str | Path, ffprobe: str = "ffprobe") -> str:
     return result.stdout.strip().splitlines()[0].lower() if result.stdout.strip() else ""
 
 
-def make_thumbnail(path: str | Path, kind: str, ffmpeg: str = "ffmpeg") -> str:
+def make_thumbnail(path: str | Path, kind: str, ffmpeg: str = "ffmpeg", *, timeout=None) -> str:
     source=Path(path).resolve()
-    signature=str(source)+(str(source.stat().st_mtime_ns)+":rgba-v2" if kind=="image" else "")
+    stat=source.stat()
+    signature=str(source)+f':{stat.st_size}:{stat.st_mtime_ns}:rgba-v3'
     digest = hashlib.sha1(signature.encode()).hexdigest()[:16]
     target = CACHE_DIR / "thumbs" / (digest+(".png" if kind=="image" else ".jpg"))
     if target.exists():
@@ -95,7 +96,7 @@ def make_thumbnail(path: str | Path, kind: str, ffmpeg: str = "ffmpeg") -> str:
         run_process([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", "0.5",
                         "-i", str(path), "-frames:v", "1", "-vf",
                         "scale=320:180:force_original_aspect_ratio=decrease", str(target)],
-                       check=False, capture_output=True)
+                       check=False, capture_output=True, timeout=timeout)
     return str(target) if target.exists() else ""
 
 

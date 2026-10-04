@@ -2110,6 +2110,7 @@ class MainWindow(QMainWindow):
                 event.ignore(); return
             self.phone_connect.shutdown()
         self.compounds.cancel()
+        self.media_panel.watch_folders.stop()
         self.preview_quality.cancel()
         if hasattr(self,'assistant_connection'):self.assistant_connection.stop()
         self.delivery.clock.stop()
