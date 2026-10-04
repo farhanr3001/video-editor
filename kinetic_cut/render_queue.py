@@ -50,6 +50,6 @@ class RenderJobCard(QWidget):
         for value in (f'Job {number} · {job["state"]}',job['project'].name,job['output']):
             label=QLabel(value); label.setTextFormat(Qt.PlainText); label.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Preferred); label.setToolTip(value); column.addWidget(label)
         self.timer=QLabel(elapsed_text(job)); set_ui_style(self.timer, 'color:@text_main'); column.addWidget(self.timer)
-        self.remove_button=QToolButton(); self.remove_button.setText('×'); self.remove_button.setAccessibleName('Remove queued render'); self.remove_button.setToolTip('Remove this queued job'); self.remove_button.setFixedSize(22,22)
+        self.remove_button=QToolButton(self); self.remove_button.setText('×'); self.remove_button.setAccessibleName('Remove queued render'); self.remove_button.setToolTip('Remove this queued job'); self.remove_button.setFixedSize(22,22)
         self.remove_button.setVisible(job['state'] in {'Queued','Cancelled','Failed'}); self.remove_button.clicked.connect(lambda:remove(job)); root.addWidget(self.remove_button,0,Qt.AlignTop)
     def update_elapsed(self):self.timer.setText(elapsed_text(self.job))

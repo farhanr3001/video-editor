@@ -86,12 +86,13 @@ if __name__ == "__main__":
     elif len(sys.argv)==3 and sys.argv[1]=='--assistant-selftest':
         from kinetic_cut.assistant_diagnostics import run
         sys.exit(run(sys.argv[2]))
-    elif len(sys.argv)==3 and sys.argv[1]=='--startup-selftest':
+    elif len(sys.argv)==3 and sys.argv[1] in ('--startup-selftest','--startup-windows-selftest'):
         import os
         target=Path(sys.argv[2]).resolve(); target.mkdir(parents=True,exist_ok=True)
-        os.environ['KINETIC_CUT_HOME']=str(target/'home'); os.environ['QT_QPA_PLATFORM']='offscreen'
+        native_windows = sys.argv[1] == '--startup-windows-selftest'
+        os.environ['KINETIC_CUT_HOME']=str(target/'home'); os.environ['QT_QPA_PLATFORM']='windows' if native_windows else 'offscreen'
         from kinetic_cut.startup import run
-        sys.exit(run(target))
+        sys.exit(run(target, native_window_test=native_windows))
     elif len(sys.argv) >= 2 and sys.argv[1] == '--mcp-bridge':
         try:
             from kinetic_cut.mcp_bridge import run_bridge

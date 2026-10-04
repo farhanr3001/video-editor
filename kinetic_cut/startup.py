@@ -61,7 +61,7 @@ class StartupSplash(QWidget):
         p.drawRect(self.rect().adjusted(0, 0, -1, -1))
 
 
-def run(selftest_output=None):
+def run(selftest_output=None, native_window_test=False):
     import threading,time,json
     from pathlib import Path
     started=time.monotonic(); audit=[]; beats=[]
@@ -72,6 +72,14 @@ def run(selftest_output=None):
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("Kinetic Cut")
     app.setOrganizationName("Kinetic Cut")
+    window_audit = None
+    native_audit = None
+    if selftest_output is not None:
+        from .window_audit import WindowShowAudit
+        window_audit = WindowShowAudit(app)
+        if native_window_test and sys.platform == 'win32':
+            from .window_audit import NativeWindowShowAudit
+            native_audit = NativeWindowShowAudit()
     from PySide6.QtGui import QIcon
     from .icons import resource_path
     app.setWindowIcon(QIcon(str(resource_path("assets","kinetic-cut.svg"))))
@@ -79,6 +87,7 @@ def run(selftest_output=None):
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("KineticCut.Editor")
     splash = StartupSplash()
+    if window_audit is not None:window_audit.allow(splash)
     splash.show()
     splash.report(5, "Starting desktop services")
     from .config import DATA_DIR
@@ -115,6 +124,7 @@ def run(selftest_output=None):
             saved_theme = load_settings().get("ui_theme", "default")
             splash.report(38, "Applying workspace theme"); app.setStyle('Fusion'); app.setStyleSheet(get_theme_stylesheet(saved_theme))
             window=loaded['window'](startup_progress=splash.report); app._kinetic_window=window
+            if window_audit is not None:window_audit.allow(window)
             splash.report(100,'Workspace ready'); window.show(); QTimer.singleShot(0,splash.close)
             # No networking during source/isolated diagnostics or normal editing.
             if getattr(sys, 'frozen', False) and selftest_output is None and not os.environ.get('KINETIC_CUT_HOME'):
@@ -124,9 +134,27 @@ def run(selftest_output=None):
                 configure_startup_connection(window,sys.argv)
             if selftest_output is not None:
                 def finish_test():
+                    QApplication.processEvents()
+                    native_startup = list(native_audit.events) if native_audit else []
+                    # Windows injects input-indicator windows into this host's
+                    # GUI processes. Record these separately; they are not Qt
+                    # controls or editor-created subprocess windows.
+                    input_indicators = [e for e in native_startup if e['window_class'] in ('UAC_InputIndicatorOverlayWnd', 'UAC Input Indicator')]
+                    unexpected_native = [e for e in native_startup if e not in input_indicators and e['title'] not in ('Kinetic Cut', 'Kinetic Cut — Loading')]
+                    exercised = []
+                    if native_window_test:
+                        from .startup_window_diagnostics import workflows
+                        exercised = workflows(window, window_audit)
                     window.grab().save(str(Path(selftest_output)/'startup-workspace.png'))
-                    report=dict(passed=True,seconds=time.monotonic()-started,event_loop_ticks=len(beats),subprocesses=audit)
-                    (Path(selftest_output)/'report.json').write_text(json.dumps(report,indent=2)); window.close(); app.quit()
+                    report=dict(passed=not window_audit.unexpected and not unexpected_native,seconds=time.monotonic()-started,
+                                event_loop_ticks=len(beats),subprocesses=audit,
+                                window_shows=window_audit.events,unexpected_windows=window_audit.unexpected,
+                                native_startup_shows=native_startup,unexpected_native_startup=unexpected_native,
+                                platform_input_indicators=input_indicators,
+                                native_window_test=native_window_test,workflows=exercised,
+                                frozen=bool(getattr(sys,'frozen',False)))
+                    if native_audit:native_audit.close()
+                    (Path(selftest_output)/'report.json').write_text(json.dumps(report,indent=2)); window.close(); app.exit(0 if report['passed'] else 1)
                 QTimer.singleShot(300,finish_test)
         except Exception:
             splash.close()

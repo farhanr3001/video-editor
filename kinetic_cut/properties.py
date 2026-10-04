@@ -28,7 +28,9 @@ class ValueRow(QWidget):
         super().__init__(); self.updating=False; self.previous=default; self.mixed=False
         self.setFixedHeight(28)
         layout=QHBoxLayout(self); layout.setContentsMargins(0,0,0,0); layout.setSpacing(5)
-        self.slider=SafeSlider(Qt.Horizontal); self.slider.setRange(0,1000); self.slider.setVisible(slider)
+        # A visible parentless control is a native top-level window, even if a
+        # layout adopts it immediately afterwards. Own it before visibility.
+        self.slider=SafeSlider(Qt.Horizontal,self); self.slider.setRange(0,1000); self.slider.setVisible(slider)
         self.spin=SafeDoubleSpinBox(); self.spin.setRange(low,high); self.spin.setDecimals(3 if step<.1 else 2 if step<1 else 0); self.spin.setSingleStep(step); self.spin.setFixedWidth(81)
         layout.addWidget(self.slider,1); layout.addWidget(self.spin)
         reset=QToolButton(); self.reset=reset; reset.setIcon(lucide_icon("rotate-ccw","#96989f",13)); reset.setToolTip("Reset to default"); layout.addWidget(reset)

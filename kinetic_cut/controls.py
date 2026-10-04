@@ -170,7 +170,7 @@ class InspectorSection(QWidget):
         self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.toggle.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Fixed); self.toggle.setMinimumHeight(30)
         self.toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
-        self.content = content; self.content.setVisible(expanded)
+        self.content = content
         self.toggle.toggled.connect(self._toggle)
         header_layout.addWidget(self.toggle,1)
         self.reset_button=QToolButton(); self.reset_button.setObjectName("sectionResetAll"); self.reset_button.setIcon(lucide_icon("rotate-ccw","#96989f",14)); self.reset_button.setToolTip(f"Reset all {title} properties")
@@ -179,6 +179,9 @@ class InspectorSection(QWidget):
         else:self.reset_button.setEnabled(False)
         header_layout.addWidget(self.reset_button)
         header.setMinimumHeight(30); layout.addWidget(header); layout.addWidget(content)
+        # Adopt first: show() on unattached content briefly creates a separate
+        # desktop window during startup and when constructing inspector dialogs.
+        self.content.setVisible(expanded)
 
     def _toggle(self, expanded: bool):
         self.toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
