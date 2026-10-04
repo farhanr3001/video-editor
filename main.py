@@ -21,6 +21,9 @@ if __name__ == "__main__":
     install_desktop_process_policy()
     import multiprocessing
     multiprocessing.freeze_support()
+    if len(sys.argv)==3 and sys.argv[1]=='--update-menu-selftest':
+        from kinetic_cut.update_menu_diagnostics import run
+        sys.exit(run(sys.argv[2]))
     if len(sys.argv)==4 and sys.argv[1]=='--caption-followup-selftest':
         from kinetic_cut.caption_followup_diagnostics import run
         sys.exit(run(sys.argv[2],sys.argv[3]))

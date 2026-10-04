@@ -276,8 +276,7 @@ class MainWindow(QMainWindow):
 
     def build_actions(self):
         self.editing_actions=[]
-        file_menu=self.menuBar().addMenu("File"); edit_menu=self.menuBar().addMenu("Edit"); view_menu=self.menuBar().addMenu("View"); workflow=self.menuBar().addMenu("Workflow")
-        add_subtitle=QAction("Add Subtitle",self); add_subtitle.triggered.connect(self.inspector.add_caption); workflow.addAction(add_subtitle); self.editing_actions.append(add_subtitle)
+        file_menu=self.menuBar().addMenu("File"); edit_menu=self.menuBar().addMenu("Edit"); workflow=self.menuBar().addMenu("Workflow")
 
         # File menu
         act_new = QAction("New project", self); act_new.triggered.connect(self.new_project); act_new.setShortcut(QKeySequence("Ctrl+N")); file_menu.addAction(act_new)
@@ -289,7 +288,6 @@ class MainWindow(QMainWindow):
         act_save = QAction("Save project", self); act_save.triggered.connect(self.save_project); act_save.setShortcut(QKeySequence("Ctrl+S")); file_menu.addAction(act_save); self.shortcut_actions["save"]=act_save
         act_save_as = QAction("Save project as…", self); act_save_as.triggered.connect(lambda:self.save_project(True)); act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S")); file_menu.addAction(act_save_as)
         act_versions = QAction("Restore saved version…", self); act_versions.triggered.connect(self.restore_saved_version); file_menu.addAction(act_versions)
-        act_collect = QAction("Collect project and media…", self); act_collect.triggered.connect(self.collect_project_media); file_menu.addAction(act_collect)
         file_menu.addSeparator()
         manager=QAction("Project Manager…",self); manager.triggered.connect(self.open_project_manager); file_menu.addAction(manager)
         self.project_settings_action=QAction("Project Settings…",self); self.project_settings_action.triggered.connect(self.open_project_settings); file_menu.addAction(self.project_settings_action); self.editing_actions.append(self.project_settings_action)
@@ -300,9 +298,6 @@ class MainWindow(QMainWindow):
         act_updates = QAction("Check for updates…", self)
         act_updates.triggered.connect(self.check_for_updates); file_menu.addAction(act_updates)
         act_themes = QAction("UI Themes…", self); act_themes.triggered.connect(self.open_ui_themes_dialog); file_menu.addAction(act_themes)
-
-        # View menu
-        act_themes_view = QAction("UI Themes & Appearance…", self); act_themes_view.triggered.connect(self.open_ui_themes_dialog); view_menu.addAction(act_themes_view)
 
         # Preserved application shortcuts (removed from File menu per design)
         act_import = QAction("Import Media", self); act_import.triggered.connect(self.import_media); act_import.setShortcut(QKeySequence(self.settings.get("shortcuts", {}).get("import", "Ctrl+I"))); self.addAction(act_import); self.shortcut_actions["import"]=act_import; self.editing_actions.append(act_import)
@@ -315,7 +310,10 @@ class MainWindow(QMainWindow):
             action=QAction(text,self); action.triggered.connect(callback)
             if shortcut:action.setShortcut(QKeySequence(self.settings.get("shortcuts",{}).get(logical,shortcut) if logical else shortcut))
             if logical:self.shortcut_actions[logical]=action
-            menu.addAction(action)
+            # Keep existing keyboard shortcuts/actions while simplifying the
+            # visible Workflow menu to Settings alone.
+            if menu is workflow and text != "Settings…":self.addAction(action)
+            else:menu.addAction(action)
             if text not in {"Settings…"}:self.editing_actions.append(action)
         edit_menu.addSeparator()
         for command,key in (("cut","Ctrl+X"),("copy","Ctrl+C"),("paste","Ctrl+V")):

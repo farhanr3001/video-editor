@@ -5,29 +5,53 @@ from dataclasses import replace
 from pathlib import Path
 import sys
 from PySide6.QtCore import QObject, QThreadPool, Qt
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QProgressDialog
+from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
+                             QProgressDialog, QGridLayout, QTextBrowser, QSizePolicy)
+from .theme_widgets import set_ui_style, set_ui_icon
 from . import updates
 from .version import VERSION
 
 
 class UpdateDialog(QDialog):
-    def __init__(self, parent, release=None, message="", startup=False):
+    def __init__(self, parent, release=None, message="", startup=False, state="info"):
         super().__init__(parent)
         self.setWindowTitle("Kinetic Cut updates")
-        self.resize(510, 260)
+        self.setMinimumWidth(360)
         self.choice = "cancel"
         layout = QVBoxLayout(self)
-        title = QLabel(f"Kinetic Cut {release.version} is available" if release else "Check for updates")
-        title.setWordWrap(True); layout.addWidget(title)
-        self.detail = QLabel((f"Installed: {VERSION}\nDownload: {release.size / 1e6:.1f} MB\n\n" +
-                             ("Only changed application files will download. Your settings, Power Bin and optional downloads stay in place."
-                              if release.incremental else "Press OK to download the installer. Your work stays open during the download."))
-                            if release else message)
-        self.detail.setWordWrap(True); layout.addWidget(self.detail)
+        layout.setContentsMargins(20, 18, 20, 16); layout.setSpacing(10)
+        header = QHBoxLayout(); header.setSpacing(10)
+        icon = QLabel(self); icon.setFixedSize(24, 24)
+        set_ui_icon(icon, 'download' if release else 'check' if state == 'current' else 'refresh-cw', size=24)
+        header.addWidget(icon, 0, Qt.AlignTop)
+        headings = dict(current="You're up to date", checking="Checking for updates", error="Unable to check for updates")
+        self.heading = QLabel("Update available" if release else headings.get(state, "Check for updates"))
+        self.heading.setTextFormat(Qt.PlainText); self.heading.setWordWrap(True)
+        set_ui_style(self.heading, 'font-size:16px; font-weight:600; color:@text_main;')
+        header.addWidget(self.heading, 1); layout.addLayout(header)
+        self.versions = QGridLayout(); self.versions.setHorizontalSpacing(16); self.versions.setVerticalSpacing(5)
+        self.versions.setColumnStretch(1, 1)
+        if release:
+            for row, (label, value) in enumerate((('Installed version', VERSION),
+                                                ('Available version', release.version),
+                                                ('Download size', f'{release.size / 1e6:.1f} MB'))):
+                key = QLabel(label); set_ui_style(key, 'color:@text_sub;')
+                self.versions.addWidget(key, row, 0); self.versions.addWidget(QLabel(value), row, 1)
+            layout.addLayout(self.versions)
+        self.detail = QLabel(("Only changed application files will download. Your settings, Power Bin and optional downloads stay in place."
+                              if release.incremental else "Press OK to download the installer. Your work stays open during the download.")
+                             if release else message)
+        self.detail.setTextFormat(Qt.PlainText); self.detail.setWordWrap(True)
+        self.detail.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        layout.addWidget(self.detail)
+        self.notes = None
         if release and release.notes:
-            from PySide6.QtWidgets import QTextBrowser
-            notes = QTextBrowser(); notes.setPlainText(release.notes); layout.addWidget(notes)
-        actions = QHBoxLayout(); layout.addLayout(actions)
+            caption = QLabel("What's new"); set_ui_style(caption, 'font-weight:600; color:@text_main;'); layout.addWidget(caption)
+            self.notes = QTextBrowser(); self.notes.setPlainText(release.notes)
+            self.notes.setMinimumHeight(90); self.notes.setMaximumHeight(140)
+            layout.addWidget(self.notes)
+        layout.addStretch()
+        actions = QHBoxLayout(); actions.setContentsMargins(0, 6, 0, 0); actions.setSpacing(8); layout.addLayout(actions)
         if release and startup:
             ignore = QPushButton("Don't show again")
             ignore.setToolTip("Hide this version's startup notice. Later versions will still be offered.")
@@ -38,6 +62,7 @@ class UpdateDialog(QDialog):
         if release:
             okay = QPushButton("OK"); okay.setDefault(True)
             okay.clicked.connect(lambda: self.choose("download")); actions.addWidget(okay)
+        self.resize(460, max(130, layout.totalHeightForWidth(460)))
 
     def choose(self, choice):
         self.choice = choice; self.accept()
@@ -53,7 +78,7 @@ class UpdateController(QObject):
         from .ui import Worker
         self.busy = True
         if not startup:
-            self.dialog = UpdateDialog(self.window, message="Checking GitHub for updates…")
+            self.dialog = UpdateDialog(self.window, message="Contacting GitHub for the latest release…", state="checking")
             self.dialog.show()
         worker = Worker(updates.check)
         worker.signals.result.connect(lambda release: self.checked(release, startup))
@@ -68,7 +93,7 @@ class UpdateController(QObject):
             self.dialog.close(); self.dialog = None
         if not release:
             if not startup:
-                UpdateDialog(self.window, message=f"You're up to date.\nInstalled version: {VERSION}").exec()
+                UpdateDialog(self.window, message=f"Installed version: {VERSION}", state="current").exec()
             return
         if startup and self.window.settings.get("updates_ignored_version") == release.version:
             return
@@ -104,7 +129,7 @@ class UpdateController(QObject):
             self.dialog.close(); self.dialog = None
         if not startup:
             UpdateDialog(self.window, message="Unable to check for updates. Check your connection and try again.\n\n"
-                         + error.splitlines()[-1][:240]).exec()
+                         + error.splitlines()[-1][:240], state="error").exec()
         else:
             logging.info("Startup update check unavailable: %s", error.splitlines()[-1])
 
