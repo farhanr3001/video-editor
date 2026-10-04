@@ -11,8 +11,11 @@ def main():
     for key,prefix in [('android','Android'),('iphone','IPhone'),('vision','Vision'),('vocals','Vocals')]:
         item=metadata[key];lines.extend([f'#define {prefix}Bytes {item["installed_bytes"]}',f'#define {prefix}Download {item["download_bytes"]}',f'#define {prefix}MB "{item["installed_bytes"]/1e6:.1f}"'])
     (ROOT/'installer/sizes.iss').write_text('\n'.join(lines)+'\n')
-    result=subprocess.run([str(args.compiler),str(ROOT/'installer/KineticCut.iss')],cwd=ROOT)
-    if result.returncode:return result.returncode
-    (ROOT/'release/build-report.json').write_text(json.dumps(dict(version=VERSION,core_installed_bytes=core,installer_bytes=(ROOT/f'release/KineticCut-Setup-{VERSION}.exe').stat().st_size,components=metadata),indent=2));return 0
+    for defines in ([], ['/DMigration']):
+        result=subprocess.run([str(args.compiler),*defines,str(ROOT/'installer/KineticCut.iss')],cwd=ROOT)
+        if result.returncode:return result.returncode
+    (ROOT/'release/build-report.json').write_text(json.dumps(dict(version=VERSION,core_installed_bytes=core,
+        installer_bytes=(ROOT/f'release/KineticCut-FullSetup-{VERSION}.exe').stat().st_size,
+        migration_bytes=(ROOT/f'release/KineticCut-Setup-{VERSION}.exe').stat().st_size,components=metadata),indent=2));return 0
 
 if __name__=='__main__':sys.exit(main())

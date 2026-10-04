@@ -37,6 +37,9 @@ class Release:
     sha256: str
     size: int
     notes: str = ""
+    manifest: dict | None = None
+    selection: dict | None = None
+    incremental: bool = False
 
 
 def parse_release(data, current=VERSION):
@@ -45,8 +48,12 @@ def parse_release(data, current=VERSION):
     remote = str(data.get("tag_name", ""))
     if version_tuple(remote) <= version_tuple(current):
         return None
-    name = f"KineticCut-Setup-{remote.lstrip('v')}.exe"
+    name = f"KineticCut-Update-{remote.lstrip('v')}.json"
     asset = next((a for a in data.get("assets", []) if a.get("name") == name), None)
+    incremental = asset is not None
+    if not asset:
+        name = f"KineticCut-Setup-{remote.lstrip('v')}.exe"
+        asset = next((a for a in data.get("assets", []) if a.get("name") == name), None)
     if not asset:
         raise ValueError("The new release does not contain a Windows installer yet.")
     digest = str(asset.get("digest", ""))
@@ -59,7 +66,7 @@ def parse_release(data, current=VERSION):
     if size <= 0 or size > 4 * 1024**3:
         raise ValueError("Invalid installer size")
     return Release(remote.lstrip("v"), url, digest.split(":", 1)[1].lower(), size,
-                   str(data.get("body", ""))[:12000])
+                   str(data.get("body", ""))[:12000], incremental=incremental)
 
 
 def check(current=VERSION, opener=urllib.request.urlopen):
@@ -74,7 +81,17 @@ def check(current=VERSION, opener=urllib.request.urlopen):
         raise RuntimeError(f"Update server returned HTTP {error.code}. Please try again later.") from error
     if len(raw) > MAX_METADATA:
         raise ValueError("Update information is too large")
-    return parse_release(json.loads(raw), current)
+    release = parse_release(json.loads(raw), current)
+    if release and release.incremental:
+        from dataclasses import replace
+        from .update_files import MAX_MANIFEST, validate_manifest
+        if release.size > MAX_MANIFEST:raise ValueError('Update manifest exceeds size limit')
+        with opener(urllib.request.Request(release.url, headers={'User-Agent':'KineticCut-Updater'}), timeout=12) as response:
+            raw = response.read(release.size + 1)
+        if len(raw) != release.size or hashlib.sha256(raw).hexdigest() != release.sha256:
+            raise ValueError('Update manifest verification failed')
+        release = replace(release, manifest=validate_manifest(json.loads(raw), release.version))
+    return release
 
 
 def download(release, directory, cancel, progress=lambda *_: None,

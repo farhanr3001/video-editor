@@ -6,6 +6,9 @@ from kinetic_cut.process import install_desktop_process_policy
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 1:
+        from kinetic_cut.update_helper import recover_on_startup
+        if recover_on_startup():sys.exit(0)
     if len(sys.argv) == 2 and sys.argv[1] == '--uninstall-data':
         from kinetic_cut.uninstall_data import run
         sys.exit(run())

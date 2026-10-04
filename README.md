@@ -9,5 +9,7 @@ Projects and media stay local.
 Editing and offline English caption generation are included. Optional phone
 mirroring, face/background tools and vocal separation can be installed during
 setup or downloaded later inside the app.
+Use **FullSetup** for a new installation. Installed copies download changed files
+for updates; settings, Power Bins and optional downloads are preserved.
 
 Built with Python, PySide6 and FFmpeg. See [dependency notices](THIRD_PARTY_NOTICES.txt).

@@ -21,6 +21,10 @@ try {
     --copy-metadata fonttools --copy-metadata uharfbuzz --add-data "$assetPath;assets" `
     --add-data "THIRD_PARTY_NOTICES.txt;." main.py
   if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
+  & $python -m PyInstaller --noconfirm --clean --onefile --windowed --name KineticCutUpdater --distpath "$distPath/update-helper" updater_main.py
+  if ($LASTEXITCODE -ne 0) { throw "Updater build failed" }
+  Copy-Item -LiteralPath "$distPath/update-helper/KineticCutUpdater.exe" -Destination "$distPath/KineticCut/KineticCutUpdater.exe" -Force
+  Remove-Item -LiteralPath "$distPath/update-helper" -Recurse -Force
 } finally {
   $env:PATH = $buildOriginalPath
 }
