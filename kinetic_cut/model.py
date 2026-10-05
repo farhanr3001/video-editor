@@ -113,6 +113,7 @@ class TimelineItem:
     graphic_data: dict[str, Any] = field(default_factory=dict)
     source_mismatch: bool = False
     source_requirement: dict = field(default_factory=dict)
+    video_preset_id: str = ""
 
     def __post_init__(self):
         from .keyframes import clean

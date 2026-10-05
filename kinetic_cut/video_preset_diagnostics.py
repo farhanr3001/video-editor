@@ -94,7 +94,15 @@ def run(output):
         window.undo(); assert window.project.item_by_id('second') == before
         window.redo(); same_values(capture(window.inspector, window.project.item_by_id('second')))
         assert load_settings()[KEY][0]['name'] == 'Webcam crop'
-        strip.reload(); assert strip.combo.currentIndex() == 0 and not strip.delete.isEnabled()
+        strip.reload(); assert strip.combo.currentIndex() == 1 and strip.delete.isEnabled()
+        window.timeline.select_ids({'second'}, 'second'); window.select_item('second')
+        assert strip.combo.currentIndex() == 1
+        fresh = TimelineItem('unassigned', 'm', 'video_1', 6, 2)
+        window.project.timeline.append(fresh)
+        window.timeline.select_ids({'unassigned'}, 'unassigned'); window.select_item('unassigned')
+        assert strip.combo.currentIndex() == 0 and not strip.delete.isEnabled()
+        window.timeline.select_ids({'v'}, 'v'); window.select_item('v')
+        assert strip.combo.currentIndex() == 1
         QTest.mouseClick(window.inspector.video_preset_section.toggle, Qt.LeftButton)
         assert load_settings()[HIDDEN_KEY] is True
         window.close(); app.processEvents(); window.deleteLater()

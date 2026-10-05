@@ -1,4 +1,6 @@
 import copy
+import tempfile
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 from PySide6.QtCore import QEvent, QThreadPool, QTimer, Qt
@@ -52,10 +54,43 @@ class VideoPresetTests(unittest.TestCase):
         self.save('Webcam')
         self.assertEqual(self.strip.combo.itemText(0), 'No preset selected')
         self.assertEqual(self.strip.combo.currentText(), 'Webcam'); self.assertTrue(self.strip.delete.isEnabled())
-        self.assertEqual(len(self.w._history), history)
+        self.assertEqual(len(self.w._history), history + 1)
         self.assertEqual(load_settings()[KEY], self.w.settings[KEY])
         self.strip.reload()
-        self.assertEqual(self.strip.combo.currentIndex(), 0); self.assertFalse(self.strip.delete.isEnabled())
+        self.assertEqual(self.strip.combo.currentText(), 'Webcam'); self.assertTrue(self.strip.delete.isEnabled())
+
+    def test_selection_tracks_each_clip_without_applying_on_selection(self):
+        self.save('Webcam'); identity = self.strip.records[0]['id']
+        self.assertEqual(self.w.project.item_by_id('v').video_preset_id, identity)
+        before = copy.deepcopy(self.w.project.to_dict()); history = len(self.w._history)
+        self.w.timeline.select_ids({'v2'}, 'v2'); self.w.select_item('v2')
+        self.assertEqual(self.strip.combo.currentText(), 'No preset selected')
+        self.assertFalse(self.strip.delete.isEnabled())
+        self.w.timeline.select_ids({'v'}, 'v'); self.w.select_item('v')
+        self.assertEqual(self.strip.combo.currentText(), 'Webcam')
+        self.assertEqual(self.w.project.to_dict(), before); self.assertEqual(len(self.w._history), history)
+        self.w.timeline.select_ids({'v2'}, 'v2'); self.w.select_item('v2')
+        self.strip.apply_selected(1)
+        self.assertEqual(self.w.project.item_by_id('v2').video_preset_id, identity)
+        self.w.undo(); self.assertEqual(self.strip.combo.currentText(), 'No preset selected')
+        self.w.redo(); self.assertEqual(self.strip.combo.currentText(), 'Webcam')
+        restored = Project.from_dict(self.w.project.to_dict())
+        self.assertEqual(restored.item_by_id('v2').video_preset_id, identity)
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'preset-association.kcut'
+            restored.save(path); restored = Project.load(path)
+            self.assertEqual(restored.item_by_id('v2').video_preset_id, identity)
+        self.w.set_project(restored); self.w.timeline.select_ids({'v2'}, 'v2'); self.w.select_item('v2')
+        self.assertEqual(self.strip.combo.currentText(), 'Webcam')
+
+    def test_different_clips_keep_different_preset_names(self):
+        self.save('Webcam')
+        self.w.timeline.select_ids({'v2'}, 'v2'); self.w.select_item('v2')
+        self.w.project.item_by_id('v2').transform.scale = 2.
+        self.save('Gameplay')
+        for identity, name in (('v', 'Webcam'), ('v2', 'Gameplay'), ('v', 'Webcam')):
+            self.w.timeline.select_ids({identity}, identity); self.w.select_item(identity)
+            self.assertEqual(self.strip.combo.currentText(), name)
 
     def test_full_video_values_multi_apply_undo_and_unrelated_data(self):
         item = self.w.project.item_by_id('v'); panel = self.w.inspector

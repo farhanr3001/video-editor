@@ -146,9 +146,14 @@ class VideoPresetStrip(QWidget):
     def current(self):
         return next((r for r in self.records if r['id'] == self.combo.currentData()), None)
 
-    def refresh(self):
+    def refresh(self, sync_selection=True):
         primary = self.window.project.item_by_id(self.panel.item_id)
         valid = compatible(self.window.project, primary)
+        if sync_selection:
+            selected = primary.video_preset_id if valid else None
+            self.combo.blockSignals(True)
+            self.combo.setCurrentIndex(max(0, self.combo.findData(selected)))
+            self.combo.blockSignals(False)
         editable = getattr(self.window, 'current_page', 0) == 0
         self.save.setEnabled(valid and editable)
         self.combo.setEnabled(valid and editable and bool(self.records))
@@ -183,6 +188,13 @@ class VideoPresetStrip(QWidget):
         except OSError as error:
             QMessageBox.warning(self, 'Preset could not be saved', str(error))
             return False
+        item = self.window.project.item_by_id(self.panel.item_id)
+        if (selected and compatible(self.window.project, item)
+                and not self.window.project.track_states.get(item.track, {}).get('locked')
+                and item.video_preset_id != selected):
+            item.video_preset_id = selected
+            self.panel.changed.emit()
+        self.refresh()
         return True
 
     @edit_only
@@ -218,11 +230,13 @@ class VideoPresetStrip(QWidget):
 
     @edit_only
     def apply_selected(self, index):
-        self.combo.setCurrentIndex(index); self.refresh(); current = self.current()
+        self.combo.setCurrentIndex(index); self.refresh(sync_selection=False); current = self.current()
         if current is None: return
         project = self.window.project
         targets = [item for item in self.panel.targets(False) if compatible(project, item)]
         if not targets: return
         values = validate(current['values'])
-        for item in targets: apply(project, item, values)
+        for item in targets:
+            apply(project, item, values)
+            item.video_preset_id = current['id']
         self.panel.changed.emit()
