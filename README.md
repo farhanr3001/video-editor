@@ -6,6 +6,8 @@ timelines, transforms, effects, graphics, captions, Power Bins and export tools.
 Projects and media stay local.
 Editable motion compositions add parented layers, animated typography, masks,
 vector reveals and morphs, Bézier easing and motion blur with matching exports.
+Typewriter text, animated counters, corner radii and soft shape shadows support
+interface motion design. Project frame rates include 120 fps export.
 
 [Download the Windows installer](https://github.com/farhanr3001/video-editor/releases/latest).
 Editing and offline English caption generation are included. Optional phone

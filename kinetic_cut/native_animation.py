@@ -87,7 +87,7 @@ def prepare(project,progress,cancel):
                 source=Path(node.get('source',''))
                 if not source.is_file():raise ValueError('Motion image is missing: '+str(source))
                 stat=source.stat(); assets.append((str(source),stat.st_size,stat.st_mtime_ns))
-        key=hashlib.sha256(json.dumps([2,asdict(item),asdict(project.settings),assets],sort_keys=True).encode()).hexdigest()
+        key=hashlib.sha256(json.dumps([3,asdict(item),asdict(project.settings),assets],sort_keys=True).encode()).hexdigest()
         target=directory/(key+'.mkv')
         if not target.is_file():
             if shutil.disk_usage(directory).free<256*1024**2:raise RuntimeError('Free at least 256 MB for native animation preparation')

@@ -69,6 +69,27 @@ def run(output):
         for n in (0,30):
             rgb=curve_frames[n].to_ndarray(format='rgb24'); _,x=np.where(rgb[:,:,2]>150); centers.append(float(x.mean()))
         assert centers[1]>centers[0]+50; report['simultaneous_media_curves']=True
+        # New UI-design controls: native typing/counter/shadow UI in all themes,
+        # and actual high-rate encoded output rather than an fps label alone.
+        design=validate(dict(canvas=[320,320],nodes=[dict(id='panel',kind='rectangle',x=160,y=160,width=270,height=140,radius=28,fill='#f5f6f3',shadow=dict(enabled=True,blur=15,opacity=25,y=10)),dict(id='typing',kind='text',text='find a moment',x=48,y=130,font_size=24,bold=False,fill='#101315',text_mode='typewriter',text_align='left',caret=True,stagger=.05),dict(id='counter',kind='text',x=48,y=190,font_size=23,fill='#12866c',text_mode='counter',text_align='left',number_suffix=' views',keyframes={'number':[dict(time=0,value=0),dict(time=.8,value=12480)]})]))
+        ui_item=TimelineItem('ui-design','','video_1',0,1,role='graphic',graphic_type='Motion Composition',graphic_data={'scene':design},transform=Transform(.5,.5))
+        ui_project=Project(timeline=[ui_item]); ui_project.settings.width=ui_project.settings.height=320; ui_project.settings.fps=120; w.set_project(ui_project)
+        from .project_settings import ProjectSettingsDialog
+        report['ui_design_themes']=[]
+        for theme in ('default','final_cut_obsidian','ableton_gray'):
+            w.apply_theme(theme,save=False); d=MotionEditor(w,ui_item); d.show(); d.node_id='typing'; d.time.setValue(.4); d.refresh(); d.resize(950,720); settle()
+            assert d.caret.isVisible() and d.text_align.currentText()=='left'; image=output/f'typing-{theme}.png'; assert d.grab().save(str(image)); report['ui_design_themes'].append(image.name)
+            d.node_id='panel'; d.refresh(); settle(); assert d.shadow.isChecked(); assert d.grab().save(str(output/f'shadow-{theme}.png')); d.reject(); settle()
+            settings=ProjectSettingsDialog(ui_project,w); settings.show(); settle(); assert settings.fps.findText('120')>=0; assert settings.grab().save(str(output/f'fps-{theme}.png')); settings.reject(); settle()
+        target=output/'ui-120.mp4'; export(ui_project,str(target),PRESETS['TikTok · Fast'],False,'CPU',export_audio=False)
+        with av.open(str(target)) as movie:
+            assert str(movie.streams.video[0].average_rate)=='120'; high_rate=list(movie.decode(video=0))
+        assert len(high_rate)==120
+        errors=[]
+        for n in (0,24,72,108):
+            expected=array(frame(ui_project,ui_item,n/120)).astype(float); rgb=expected[:,:,:3]*expected[:,:,3:]/255
+            error=float(np.abs(high_rate[n].to_ndarray(format='rgb24')-rgb).mean()); assert error<4; errors.append(error)
+        report['ui_120fps_frames']=len(high_rate); report['ui_design_rgb_errors']=errors
         # Measure software drawing separately, without build/test concurrency.
         started=time.perf_counter()
         for n in range(30):draw(scene,.4+n/60,(360,640),30)

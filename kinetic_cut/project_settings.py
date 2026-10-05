@@ -29,7 +29,7 @@ class ProjectSettingsDialog(QDialog):
         selected=next((i for i,(_,size) in enumerate(self.FORMATS) if size==(project.settings.width,project.settings.height)),len(self.FORMATS)-1)
         self.format.setCurrentIndex(selected); self.format.currentIndexChanged.connect(self.format_changed)
         self.width.valueChanged.connect(self.custom_dimensions); self.height.valueChanged.connect(self.custom_dimensions)
-        self.fps=SafeComboBox(); self.fps.addItems([str(v) for v in sorted({24,25,30,50,60,project.settings.fps})]); self.fps.setCurrentText(str(project.settings.fps)); form.addRow("Timeline frame rate",self.fps)
+        self.fps=SafeComboBox(); self.fps.addItems([str(v) for v in sorted({24,25,30,50,60,120,project.settings.fps})]); self.fps.setCurrentText(str(project.settings.fps)); form.addRow("Timeline frame rate",self.fps)
         if not new_project:
             self.normalize=QCheckBox("Normalize export audio to −14 LUFS"); self.normalize.setChecked(project.settings.normalize_audio); form.addRow("Audio",self.normalize)
             self.noise=QCheckBox("Global noise reduction on export"); self.noise.setChecked(project.settings.noise_reduction); form.addRow("",self.noise)

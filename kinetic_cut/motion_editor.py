@@ -3,7 +3,7 @@ import copy,json
 from pathlib import Path
 from PySide6.QtCore import Qt,QTimer,Signal,QSignalBlocker
 from PySide6.QtGui import QPainter,QColor
-from PySide6.QtWidgets import (QDialog,QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QSplitter,QTreeWidget,QTreeWidgetItem,QLabel,QPushButton,QComboBox,QCheckBox,QPlainTextEdit,QScrollArea,QDialogButtonBox,QMessageBox,QFileDialog,QColorDialog)
+from PySide6.QtWidgets import (QDialog,QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QSplitter,QTreeWidget,QTreeWidgetItem,QLabel,QPushButton,QComboBox,QCheckBox,QPlainTextEdit,QLineEdit,QScrollArea,QDialogButtonBox,QMessageBox,QFileDialog,QColorDialog)
 from .controls import SafeDoubleSpinBox
 from .motion import validate,default_scene,KINDS,CHANNELS,curve,draw
 from .easing import MODES,controls
@@ -45,18 +45,31 @@ class MotionEditor(QDialog):
         self.font=QComboBox(right)
         from PySide6.QtGui import QFontDatabase
         self.font.addItems(QFontDatabase.families()); self.font.currentTextChanged.connect(lambda v:self.change('font',v)); form.addRow('Font',self.font)
-        self.text_mode=QComboBox(right); self.text_mode.addItems(('none','character','word')); self.text_mode.currentTextChanged.connect(lambda v:self.change('text_mode',v)); form.addRow('Text animation',self.text_mode)
+        self.text_mode=QComboBox(right); self.text_mode.addItems(('none','character','word','typewriter','counter')); self.text_mode.currentTextChanged.connect(self.text_mode_changed); form.addRow('Text animation',self.text_mode)
+        self.text_align=QComboBox(right); self.text_align.addItems(('left','center','right')); self.text_align.currentTextChanged.connect(lambda v:self.change('text_align',v)); form.addRow('Text alignment',self.text_align)
+        self.caret=QCheckBox('Blinking typing caret',right); self.caret.toggled.connect(lambda v:self.change('caret',v)); form.addRow(self.caret)
+        self.number_grouping=QCheckBox('Group thousands',right); self.number_grouping.toggled.connect(lambda v:self.change('number_grouping',v)); form.addRow(self.number_grouping)
+        self.counter_affixes=[]
+        for key,label in [('number_prefix','Counter prefix'),('number_suffix','Counter suffix')]:
+            edit=QLineEdit(right); edit.setMaxLength(256); edit.textChanged.connect(lambda v,k=key:self.change(k,v)); form.addRow(label,edit); self.counter_affixes.append((key,edit))
         self.entry_easing=QComboBox(right); self.entry_easing.addItems(MODES); self.entry_easing.currentTextChanged.connect(lambda v:self.change('entry_easing',v)); form.addRow('Text entry easing',self.entry_easing)
         self.bold=QCheckBox('Bold',right); self.bold.toggled.connect(lambda v:self.change('bold',v)); form.addRow(self.bold)
         self.visible=QCheckBox('Visible',right); self.visible.toggled.connect(lambda v:self.change('visible',v)); form.addRow(self.visible)
         self.spins={}
-        for name in (*CHANNELS,'start','end','anchor_x','anchor_y','stroke_width','radius','stagger','entry_duration','entry_y','entry_rotation','entry_scale'):
+        for name in (*CHANNELS,'start','end','anchor_x','anchor_y','stagger','entry_duration','entry_y','entry_rotation','entry_scale','caret_period','number_decimals'):
             spin=SafeDoubleSpinBox(right); spin.setRange(-100000,100000); spin.setDecimals(3); spin.setSingleStep(.01 if name in ('scale','scale_y','trim','morph','stagger','entry_duration') else 1)
             spin.setObjectName('motion_'+name); spin.valueChanged.connect(lambda v,n=name:self.change(n,v)); form.addRow(name.replace('_',' ').title(),spin); self.spins[name]=spin
+        self.spins['number'].setRange(-1e12,1e12); self.spins['number_decimals'].setRange(0,6); self.spins['number_decimals'].setDecimals(0)
+        self.spins['caret_period'].setRange(.1,10); self.spins['reveal'].setRange(0,1)
         for channel in ('fill','stroke'):
             row=QWidget(right); buttons=QHBoxLayout(row); buttons.setContentsMargins(0,0,0,0)
             button=QPushButton('Choose colour…',row); button.clicked.connect(lambda _,c=channel:self.choose_colour(c)); buttons.addWidget(button)
             clear=QPushButton('None',row); clear.clicked.connect(lambda _,c=channel:self.change(c,'none')); buttons.addWidget(clear); form.addRow(channel.title(),row)
+        self.shadow=QCheckBox('Soft shape shadow',right); self.shadow.toggled.connect(lambda v:self.shadow_changed('enabled',v)); form.addRow(self.shadow)
+        self.shadow_color=QPushButton('Choose shadow colour…',right); self.shadow_color.clicked.connect(self.choose_shadow_colour); form.addRow(self.shadow_color)
+        self.shadow_spins={}
+        for name,default,low,high in [('opacity',20,0,100),('blur',20,0,128),('x',0,-10000,10000),('y',8,-10000,10000)]:
+            spin=SafeDoubleSpinBox(right); spin.setRange(low,high); spin.setValue(default); spin.valueChanged.connect(lambda v,n=name:self.shadow_changed(n,v)); form.addRow('Shadow '+name,spin); self.shadow_spins[name]=spin
         self.channel=QComboBox(right); self.channel.addItems(CHANNELS); self.channel.currentTextChanged.connect(lambda _:self.refresh()); form.addRow('Animation channel',self.channel)
         self.auto=QCheckBox('Auto-key numeric changes',right); form.addRow(self.auto)
         self.mode=QComboBox(right); self.mode.addItems(MODES); self.mode.currentTextChanged.connect(self.change_mode); form.addRow('To next key',self.mode)
@@ -97,20 +110,37 @@ class MotionEditor(QDialog):
         self.updating=True; node=self.node() or {}
         self.name.setPlainText(node.get('text','')); self.name.setEnabled(node.get('kind')=='text')
         self.font.setCurrentText(node.get('font','Arial')); self.text_mode.setCurrentText(node.get('text_mode','none'))
+        self.text_align.setCurrentText(node.get('text_align','center')); self.caret.setChecked(node.get('caret',False)); self.number_grouping.setChecked(node.get('number_grouping',True))
+        for key,edit in self.counter_affixes:edit.setText(node.get(key,''))
         self.entry_easing.setCurrentText(node.get('entry_easing','Ease Out')); self.bold.setChecked(node.get('bold',True)); self.visible.setChecked(node.get('visible',True))
         self.parent.clear(); self.parent.addItem('None','')
         for n in self.scene['nodes']:
             if n['id']!=self.node_id:self.parent.addItem(n['id'],n['id'])
         self.parent.setCurrentIndex(max(0,self.parent.findData(node.get('parent',''))))
-        defaults={'end':self.original.in_point+self.original.source_duration,'entry_duration':.4,'entry_y':60,'entry_scale':.85,'stagger':.04,'stroke_width':3}
-        for name,spin in self.spins.items():spin.setValue(curve(node,name,self.position) if name in CHANNELS else node.get(name,defaults.get(name,0)))
+        defaults={'end':self.original.in_point+self.original.source_duration,'entry_duration':.4,'entry_y':60,'entry_scale':.85,'stagger':.04,'caret_period':.8}
+        for name,spin in self.spins.items():
+            value=curve(node,name,self.position) if name in CHANNELS else node.get(name,defaults.get(name,0))
+            if name=='reveal' and node.get('text_mode')=='typewriter' and 'reveal' not in node and not node.get('keyframes',{}).get('reveal'):
+                from .motion_text import graphemes,revealed_text
+                value=len(graphemes(revealed_text(node,self.position)))/max(1,len(graphemes(node.get('text',''))))
+            spin.setValue(value)
         kind=node.get('kind'); text=kind=='text'
-        for field in (self.name,self.font,self.text_mode,self.entry_easing,self.bold):
+        for field in (self.name,self.font,self.text_mode,self.text_align,self.entry_easing,self.bold):
             field.setVisible(text); label=self.form.labelForField(field)
             if label:label.setVisible(text)
         for name,spin in self.spins.items():
             visible=(text if name in ('font_size','tracking','stagger','entry_duration','entry_y','entry_rotation','entry_scale') else kind!='group' if name in ('stroke_width','width','height') else kind in ('path','ellipse','rectangle') if name=='trim' else kind=='path' if name=='morph' else kind=='rectangle' if name=='radius' else True)
+            if name in ('number','number_decimals'):visible=text and node.get('text_mode')=='counter'
+            if name in ('reveal','caret_period'):visible=text and node.get('text_mode')=='typewriter'
             spin.setVisible(visible); self.form.labelForField(spin).setVisible(visible)
+        for field in (self.caret,):field.setVisible(text and node.get('text_mode')=='typewriter')
+        for field in (self.number_grouping,*[edit for _,edit in self.counter_affixes]):
+            field.setVisible(text and node.get('text_mode')=='counter'); label=self.form.labelForField(field)
+            if label:label.setVisible(field.isVisibleTo(self))
+        shape=kind in ('rectangle','ellipse','path'); self.shadow.setVisible(shape); self.shadow.setChecked(node.get('shadow',{}).get('enabled',False))
+        self.shadow_color.setVisible(shape and self.shadow.isChecked())
+        for name,spin in self.shadow_spins.items():
+            spin.setValue(node.get('shadow',{}).get(name,{'opacity':20,'blur':20,'x':0,'y':8}[name])); spin.setVisible(shape and self.shadow.isChecked()); self.form.labelForField(spin).setVisible(shape and self.shadow.isChecked())
         key=self.selected_key(); self.mode.setCurrentText((key or {}).get('interpolation','Linear')); self.mode.setEnabled(bool(key))
         handles=controls((key or {}).get('bezier'))
         for spin,v in zip(self.bezier,handles):spin.setValue(v); spin.setEnabled(bool(key and key.get('interpolation')=='Bezier'))
@@ -132,6 +162,16 @@ class MotionEditor(QDialog):
         else:node[name]=value
         self.preview.update(); self.graph.update()
     def text_changed(self):self.change('text',self.name.toPlainText())
+    def text_mode_changed(self,value):
+        if not self.updating:self.change('text_mode',value); self.refresh()
+    def shadow_changed(self,name,value):
+        if not self.updating and self.node():
+            self.node().setdefault('shadow',{})[name]=value; self.preview.update()
+            if name=='enabled':self.refresh()
+    def choose_shadow_colour(self):
+        if not self.node():return
+        color=QColorDialog.getColor(QColor(self.node().get('shadow',{}).get('color','#000000')),self,'Shadow colour')
+        if color.isValid():self.shadow_changed('color',color.name())
     def selected_key(self):
         node=self.node() or {}; return next((k for k in node.get('keyframes',{}).get(self.channel.currentText(),[]) if abs(k['time']-self.position)<.00001),None)
     def put_key(self,name,value):

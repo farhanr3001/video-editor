@@ -11,7 +11,7 @@ from .image_cache import FileImageCache
 _images=FileImageCache(64*1024**2,max_entries=16)
 
 KINDS=('group','text','rectangle','ellipse','path','image')
-CHANNELS={'x':0.,'y':0.,'scale':1.,'scale_y':1.,'rotation':0.,'opacity':100.,'width':300.,'height':180.,'trim':1.,'morph':0.,'tracking':0.,'font_size':100.}
+CHANNELS={'x':0.,'y':0.,'scale':1.,'scale_y':1.,'rotation':0.,'opacity':100.,'width':300.,'height':180.,'trim':1.,'morph':0.,'tracking':0.,'font_size':100.,'radius':0.,'stroke_width':3.,'reveal':1.,'number':0.}
 ARITY={'M':2,'L':2,'C':6,'Q':4,'Z':0}
 
 def path_data(raw):
@@ -22,9 +22,9 @@ def path_data(raw):
         result.append([command[0],*[finite(x) for x in command[1:]]])
     return result
 
-def finite(v):
+def finite(v,limit=100000):
     n=float(v)
-    if not math.isfinite(n) or abs(n)>100000:raise ValueError('Motion values must be finite and within -100000–100000')
+    if not math.isfinite(n) or abs(n)>limit:raise ValueError('Motion values must be finite and within ±'+str(limit))
     return n
 
 def clean_curves(curves):
@@ -37,7 +37,7 @@ def clean_curves(curves):
             if not isinstance(key,dict) or 'time' not in key or 'value' not in key:raise ValueError('Keys require time and value')
             t=finite(key['time']); mode=key.get('interpolation','Linear')
             if mode not in MODES:raise ValueError('Unknown easing mode')
-            cleaned[t]=dict(time=t,value=finite(key['value']),interpolation=mode)
+            cleaned[t]=dict(time=t,value=finite(key['value'],1e12 if channel=='number' else 100000),interpolation=mode)
             if mode=='Bezier':cleaned[t]['bezier']=controls(key.get('bezier'))
         result[channel]=[cleaned[t] for t in sorted(cleaned)]
     return result
@@ -58,7 +58,7 @@ def validate(raw):
         if not isinstance(node.get('parent',''),str):raise ValueError('Parent must be a layer ID')
         if node.get('kind') not in KINDS:raise ValueError('Unknown motion layer kind')
         for key in (*CHANNELS,'start','end','stroke_width','radius','anchor_x','anchor_y','stagger','entry_duration','entry_y','entry_rotation','entry_scale'):
-            if key in node:node[key]=finite(node[key])
+            if key in node:node[key]=finite(node[key],1e12 if key=='number' else 100000)
         if node.get('end',1e5)<node.get('start',0):raise ValueError('Layer end precedes its start')
         if 'path' in node:node['path']=path_data(node['path'])
         if 'path_to' in node:
@@ -74,7 +74,22 @@ def validate(raw):
                 if [c[0] for c in node['mask'].get('path',[])]!=[c[0] for c in node['mask']['path_to']]:raise ValueError('Mask morph paths must have matching command structure')
             node['mask']['keyframes']=clean_curves(node['mask'].get('keyframes',{}))
         if node.get('kind')=='text' and (not isinstance(node.get('text',''),str) or len(node.get('text',''))>4096):raise ValueError('Text layer exceeds 4096 characters')
-        if node.get('text_mode','none') not in ('none','character','word'):raise ValueError('Text mode must be none, character or word')
+        if node.get('text_mode','none') not in ('none','character','word','typewriter','counter'):raise ValueError('Unknown text animation mode')
+        if node.get('text_align','center') not in ('left','center','right'):raise ValueError('Text alignment must be left, center or right')
+        for key in ('caret_period',):
+            if key in node:node[key]=finite(node[key])
+        if not .1<=node.get('caret_period',.8)<=10:raise ValueError('Caret period must be .1–10 seconds')
+        for key in ('caret','number_grouping'):
+            if key in node and not isinstance(node[key],bool):raise ValueError(key+' must be boolean')
+        if 'number_decimals' in node:
+            v=finite(node['number_decimals'])
+            if v!=int(v) or not 0<=v<=6:raise ValueError('Counter decimals must be 0–6')
+            node['number_decimals']=int(v)
+        for key in ('number_prefix','number_suffix'):
+            if key in node and (not isinstance(node[key],str) or len(node[key])>256):raise ValueError('Counter prefix/suffix must be short text')
+        if 'shadow' in node:
+            from .motion_shadow import validate_shadow
+            node['shadow']=validate_shadow(node['shadow'])
         if node.get('entry_easing','Ease Out') not in MODES:raise ValueError('Unknown text easing mode')
         if node.get('entry_easing')=='Bezier':node['entry_bezier']=controls(node.get('entry_bezier'))
         for key in ('fill','stroke','font','source'):
@@ -121,7 +136,7 @@ def geometry(node,t):
             commands=[[a[0],*[x+(y-x)*mix for x,y in zip(a[1:],b[1:])]] for a,b in zip(commands,other)]
         p=make_path(commands)
     elif kind=='ellipse':p.addEllipse(QRectF(-w/2,-h/2,w,h))
-    else:p.addRoundedRect(QRectF(-w/2,-h/2,w,h),max(0,node.get('radius',0)),max(0,node.get('radius',0)))
+    else:p.addRoundedRect(QRectF(-w/2,-h/2,w,h),max(0,curve(node,'radius',t)),max(0,curve(node,'radius',t)))
     trim=max(0,min(1,curve(node,'trim',t)))
     if trim<1:
         partial=QPainterPath(); length=p.length(); samples=max(2,min(512,math.ceil(length*trim/3)))
@@ -133,7 +148,7 @@ def geometry(node,t):
     return p
 
 @lru_cache(maxsize=128)
-def text_parts(text,font_name,size,bold,mode,tracking):
+def text_parts(text,font_name,size,bold,mode,tracking,alignment='center'):
     font=QFont(font_name); font.setPixelSize(max(1,round(size))); font.setBold(bold); font.setLetterSpacing(QFont.AbsoluteSpacing,tracking)
     metrics=QFontMetricsF(font); parts=[]; y=0.; widest=0.
     for line in text.split('\n'):
@@ -143,7 +158,8 @@ def text_parts(text,font_name,size,bold,mode,tracking):
         widths=[metrics.horizontalAdvance(''.join(strings[:n])) for n in range(len(strings)+1)]
         total=widths[-1]; widest=max(widest,total)
         for n,token in enumerate(strings):
-            path=QPainterPath(); path.addText(QPointF(widths[n]-total/2,y),font,token); parts.append(path)
+            offset=0 if alignment=='left' else total if alignment=='right' else total/2
+            path=QPainterPath(); path.addText(QPointF(widths[n]-offset,y),font,token); parts.append(path)
         y+=metrics.height()
     offset=metrics.ascent()-(max(1,len(text.split('\n')))*metrics.height())/2
     for path in parts:path.translate(0,offset)
@@ -151,7 +167,15 @@ def text_parts(text,font_name,size,bold,mode,tracking):
 
 def draw_text(painter,node,t):
     from .easing import ease
-    mode=node.get('text_mode','none'); paths=text_parts(node.get('text',''),node.get('font','Arial'),curve(node,'font_size',t),bool(node.get('bold',True)),mode,curve(node,'tracking',t))
+    mode=node.get('text_mode','none')
+    if mode=='typewriter':
+        from .motion_text import draw_typewriter
+        draw_typewriter(painter,node,t); return
+    text=node.get('text','')
+    if mode=='counter':
+        from .motion_text import counter_text
+        text=counter_text(node,t); mode='none'
+    paths=text_parts(text,node.get('font','Arial'),curve(node,'font_size',t),bool(node.get('bold',True)),mode,curve(node,'tracking',t),node.get('text_align','center'))
     duration=max(.001,node.get('entry_duration',.4)); stagger=max(0,node.get('stagger',.04)); local=t-node.get('start',0)
     for n,path in enumerate(paths):
         q=max(0,min(1,(local-n*stagger)/duration)) if mode!='none' else 1.
@@ -199,14 +223,19 @@ def draw_sample(scene,t,size):
                 for n,color in enumerate(gradient):g.setColorAt(n/(len(gradient)-1),QColor(color))
                 brush=g
             painter.setBrush(brush); stroke=node.get('stroke','none')
-            painter.setPen(QPen(QColor(stroke),max(0,node.get('stroke_width',3)),Qt.SolidLine,Qt.RoundCap,Qt.RoundJoin) if stroke!='none' else Qt.NoPen)
+            painter.setPen(QPen(QColor(stroke),max(0,curve(node,'stroke_width',t)),Qt.SolidLine,Qt.RoundCap,Qt.RoundJoin) if stroke!='none' else Qt.NoPen)
             kind=node['kind']
             if kind=='text':draw_text(painter,node,t)
             elif kind=='image':
                 pic=_images.load(node.get('source',''))
                 if not pic.isNull():
                     w=max(.01,curve(node,'width',t)); h=max(.01,curve(node,'height',t)); painter.drawImage(QRectF(-w/2,-h/2,w,h),pic)
-            elif kind!='group':painter.drawPath(geometry(node,t))
+            elif kind!='group':
+                shape=geometry(node,t)
+                if node.get('shadow',{}).get('enabled',False):
+                    from .motion_shadow import paint_shadow
+                    paint_shadow(painter,shape,node['shadow'],fill!='none' or bool(gradient),max(0,curve(node,'stroke_width',t)) if stroke!='none' else 0)
+                painter.drawPath(shape)
             for child in children.get(node['id'],[]):render(child)
         finally:painter.restore()
     try:
@@ -216,4 +245,4 @@ def draw_sample(scene,t,size):
 
 def schema():
     return dict(version=1,kinds=KINDS,channels=CHANNELS,easing=MODES,path_commands=ARITY,
-                guidance='Nodes use project pixels; parent IDs form groups. Key times are composition seconds. Text: text_mode character/word, stagger, entry_duration/y/rotation/scale/easing. Mask uses local rectangle/ellipse/path geometry. Path trim 0–1 and matching path_to/morph. motion_blur samples 1–12, shutter 0–360. Templates are scene JSON.')
+                guidance='Nodes use project pixels; parent IDs form groups. Key times are composition seconds. Text: text_mode character/word/typewriter/counter, text_align left/center/right. Typewriter uses stagger seconds/grapheme or reveal 0–1 keys, optional caret/caret_period. Counters use number keys, number_decimals/grouping/prefix/suffix. radius/stroke_width animate. Shape shadow: enabled, color, opacity, blur, x, y. Mask uses local geometry. Path trim 0–1 and matching path_to/morph. motion_blur samples 1–12, shutter 0–360. Templates are scene JSON.')
