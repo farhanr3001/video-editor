@@ -35,6 +35,18 @@ def stop(process,job):
 
 
 def render(command,duration,progress=None,cancel=None,stall_timeout=90):
+    # Rich curves can exceed Windows' command-line length even on a single clip.
+    # Keep the filter graph in a temporary UTF-8 file for the child's lifetime.
+    if '-filter_complex' in command and len(subprocess.list2cmdline(command))>28000:
+        from .config import CACHE_DIR
+        directory=CACHE_DIR/'render-logs'; directory.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='filter-',dir=directory) as temporary:
+            graph=Path(temporary)/'graph.txt'; index=command.index('-filter_complex'); graph.write_text(command[index+1],encoding='utf-8')
+            command=list(command); command[index:index+2]=['-filter_complex_script',str(graph)]
+            return _render(command,duration,progress,cancel,stall_timeout)
+    return _render(command,duration,progress,cancel,stall_timeout)
+
+def _render(command,duration,progress=None,cancel=None,stall_timeout=90):
     from .config import CACHE_DIR
     directory=CACHE_DIR/'render-logs'; directory.mkdir(parents=True,exist_ok=True)
     log=directory/(str(time.time_ns())+'.log'); tail=[]; last_frame=-1; rendered=-1.; advanced=time.monotonic(); last_notice=0.; ended=False

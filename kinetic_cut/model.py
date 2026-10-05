@@ -122,6 +122,9 @@ class TimelineItem:
             elif isinstance(self.title_style,dict):self.title_style=CaptionStyle(**self.title_style)
         elif self.role=="graphic":
             if not isinstance(self.graphic_data,dict):self.graphic_data={}
+            if self.graphic_type.lower() in ('motion','motion composition'):
+                from .motion import validate,default_scene
+                self.graphic_data['scene']=validate(self.graphic_data.get('scene',default_scene()))
 
     def source_time(self, timeline_time: float) -> float:
         return self.in_point+(timeline_time-self.start)*self.speed
@@ -354,7 +357,8 @@ class Project:
                 shift(item,delta)
                 item.start+=delta; item.duration-=delta
                 media=self.media_by_id(item.media_id)
-                if item.role not in {"title", "graphic"} and media and media.kind!="image":item.in_point=max(0,item.in_point+delta*item.speed)
+                if (item.role=='graphic' and item.graphic_type.lower() in ('motion','motion composition')) or (item.role not in {"title", "graphic"} and media and media.kind!="image"):
+                    item.in_point=max(0,item.in_point+delta*item.speed)
             else:item.duration+=delta
             item.fade_in=min(item.fade_in,item.duration); item.fade_out=min(item.fade_out,item.duration)
         self.touch()
@@ -575,6 +579,11 @@ class Project:
         if self.portable_media:
             import os
             def relative_sources(body):
+                for item in body.get('timeline',body.get('items',[])):
+                    for node in item.get('graphic_data',{}).get('scene',{}).get('nodes',[]):
+                        if node.get('kind')=='image' and node.get('source'):
+                            try:node['source']=os.path.relpath(node['source'],target.parent)
+                            except ValueError:pass
                 for media in body.get("media", []):
                     if media.get("compound"):
                         relative_sources(media["compound"])
@@ -598,6 +607,9 @@ class Project:
         if raw.get("portable_media"):
             base = Path(path).resolve().parent
             def absolute_sources(body):
+                for item in body.get('timeline',body.get('items',[])):
+                    for node in item.get('graphic_data',{}).get('scene',{}).get('nodes',[]):
+                        if node.get('kind')=='image' and node.get('source') and not Path(node['source']).is_absolute():node['source']=str((base/node['source']).resolve())
                 for media in body.get("media", []):
                     if media.get("compound"):
                         absolute_sources(media["compound"])

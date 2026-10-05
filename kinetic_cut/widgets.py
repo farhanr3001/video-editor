@@ -414,6 +414,26 @@ class PreviewCanvas(QWidget):
         if item_a and unavailable(self.project.media_by_id(item_a.media_id),item_a):item_a=None
         if item_b and unavailable(self.project.media_by_id(item_b.media_id),item_b):item_b=None
 
+        from .native_animation import required,frame as native_frame
+        if any(i and required(i) for i in (item_a,item_b)):
+            def raster(item):
+                if not item:return None
+                t=min(item.duration-1/self.project.settings.fps,max(0,self.project.playhead-item.start))
+                if required(item):return native_frame(self.project,item,max(0,t),(max(2,round(frame_rect.width())),max(2,round(frame_rect.height()))))
+                from .keyframes import evaluated
+                item=evaluated(item,max(0,t)); media=self.project.media_by_id(item.media_id)
+                raw=self.still_cache.load(media.path) if media and media.kind=='image' else self.frames.get(self.active_frames.get(item.id),getattr(self,'fallback_frames',{}).get(item.id,QImage()))
+                if raw.isNull():return None
+                image=QImage(max(2,round(frame_rect.width())),max(2,round(frame_rect.height())),QImage.Format_RGBA8888); image.fill(Qt.transparent)
+                p=QPainter(image); p.setRenderHints(QPainter.Antialiasing|QPainter.SmoothPixmapTransform); rect=QRectF(0,0,image.width(),image.height())
+                try:self._draw_layer_item(p,item,raw,rect if item.role=='background' else self._layer_rect(item,raw,rect),rect)
+                finally:p.end()
+                return image
+            painter.save(); painter.setClipRect(frame_rect)
+            try:composite_transition(painter,frame_rect,raster(item_a),raster(item_b),trans,trans.progress(self.project.playhead))
+            finally:painter.restore()
+            return
+
         img_a = None
         target_a = None
         if item_a:
@@ -589,6 +609,13 @@ class PreviewCanvas(QWidget):
                 item = self._active(track)
                 if not item:
                     continue
+                from .native_animation import required,draw_title
+                if required(item):
+                    from .graphics import draw_graphic
+                    bounds=(draw_title(painter,self.project,item,frame_rect,self.project.playhead) if item.role=='title' else draw_graphic(painter,self.project,item,frame_rect,self.project.playhead))
+                    if bounds:self.text_rects[(item.role,item.id)]=bounds
+                    if bounds and item.role=='graphic' and item.id==self.selected_item_id and not item.keyframes:overlay=(item,self._graphic_rect(item,frame_rect))
+                    continue
                 from .keyframes import evaluated
                 item = evaluated(item, self.project.playhead - item.start)
                 from .visual_fx import evaluate_visual_fx, apply_visual_fx_to_transform
@@ -613,13 +640,15 @@ class PreviewCanvas(QWidget):
         from .visuals import draw_caption
         for item in self.project.timeline:
             if item.role!="title" or item.track not in self.project.video_tracks or item.muted or not self.project.track_states.get(item.track,{}).get("visible",True) or not item.start<=self.project.playhead<item.start+item.duration:continue
-            caption=Caption(item.id,item.start,item.start+item.duration,item.title_text,item.title_style,False,True)
-            from .title_fades import opacity as title_opacity
-            painter.save(); painter.setOpacity(title_opacity(item,self.project.playhead))
-            bounds=draw_caption(painter,self.project,caption,frame_rect); painter.restore(); self.text_rects[("title",item.id)]=bounds
+            from .native_animation import required
+            if required(item):continue
+            from .native_animation import draw_title
+            bounds=draw_title(painter,self.project,item,frame_rect,self.project.playhead); self.text_rects[("title",item.id)]=bounds
         from .graphics import draw_graphic
         for item in self.project.timeline:
             if item.role!="graphic" or item.track not in self.project.video_tracks or item.muted or not self.project.track_states.get(item.track,{}).get("visible",True) or not item.start<=self.project.playhead<item.start+item.duration:continue
+            from .native_animation import required
+            if required(item):continue
             bounds=draw_graphic(painter,self.project,item,frame_rect,self.project.playhead)
             if bounds:self.text_rects[("graphic",item.id)]=bounds
             if bounds and item.id==self.selected_item_id and not item.keyframes:

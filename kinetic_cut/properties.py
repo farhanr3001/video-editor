@@ -1435,6 +1435,9 @@ class PropertiesPanel(QWidget):
         self.graphic_duration.spin.setMaximum(3600)
         self.graphic_duration.edited.connect(lambda v, d: self.edit_graphic_duration(v))
         top_layout.addRow("Duration", self.graphic_duration)
+        self.motion_edit=QPushButton('Edit Motion Composition…',top_box)
+        self.motion_edit.clicked.connect(lambda:self.window.open_motion_composition(self.item_id))
+        top_layout.addRow(self.motion_edit)
         root.addWidget(top_box)
 
         def color_btn(key, default="#00e5ff"):
@@ -1624,6 +1627,7 @@ class PropertiesPanel(QWidget):
 
         self.graphic_type_badge.setText(item.graphic_type or "Graphic")
         self.graphic_duration.set_values([item.duration])
+        self.motion_edit.setVisible(kind in ('motion','motion composition'))
 
         self.sec_circle.setVisible("circle" in kind)
         self.sec_arrow.setVisible("arrow" in kind)

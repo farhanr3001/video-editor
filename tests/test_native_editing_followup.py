@@ -89,6 +89,23 @@ class NativeEditingFollowupTests(unittest.TestCase):
                 item=TimelineItem('g','','video_1',0,5,role='graphic',graphic_type=name,graphic_data=default_graphic_data(name))
                 item.transform.scale=1.4; item.transform.scale_y=1.8; item.transform.rotation=37
                 events=graphic_to_ass_events(Project(timeline=[item]),item)
+                if name=='Motion Composition':
+                    # Compositions use lossless alpha frames rather than ASS.
+                    # Keep the same independent-axis/clockwise-rotation contract.
+                    import math,numpy as np,av
+                    from unittest.mock import patch
+                    from kinetic_cut.native_animation import frame,prepare,required
+                    item.duration=.2; item.transform.y=.5
+                    item.graphic_data['scene']={'canvas':[320,568],'nodes':[dict(id='box',kind='rectangle',x=160,y=284,width=80,height=40,fill='#ffffff')]}
+                    p=Project(timeline=[item]); p.settings.width=320; p.settings.height=568; p.settings.fps=10
+                    self.assertTrue(required(item)); self.assertFalse(events)
+                    image=frame(p,item,0); pixels=np.frombuffer(image.constBits(),np.uint8).reshape(568,320,4).copy(); yy,xx=np.where(pixels[:,:,3]>128)
+                    angle=math.radians(37); self.assertAlmostEqual(xx.max()-xx.min()+1,112*math.cos(angle)+72*math.sin(angle),delta=2)
+                    self.assertAlmostEqual(yy.max()-yy.min()+1,112*math.sin(angle)+72*math.cos(angle),delta=2)
+                    with tempfile.TemporaryDirectory() as temp,patch('kinetic_cut.config.CACHE_DIR',Path(temp)):
+                        stage=prepare(p,None,None)
+                        with av.open(stage.media[-1].path) as video:np.testing.assert_array_equal(next(video.decode(video=0)).to_ndarray(format='rgba'),pixels)
+                    continue
                 self.assertTrue(events)
                 self.assertTrue(all('\\fscx140.000\\fscy180.000\\frz-37.000' in event for event in events))
 

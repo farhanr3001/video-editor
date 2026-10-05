@@ -26,7 +26,7 @@ COMMANDS=('add_title_object','apply_effect_to','viewer_command','timeline_comman
     'remove_silence','highlight_reel','instant_package',
     'toggle_play','stop','mark_in','mark_out','add_video_track','add_audio_track',
     'frame_source','download_media','apply_transition','remove_transition',
-    'add_graphic_object','remove_media','open_keyframes')
+    'add_graphic_object','remove_media','open_keyframes','open_motion_composition')
 TOOLS=[
     tool('get_state','Read current project, revision, selection, playback and task status. section=summary omits the full project.',{'section':{'type':'string','enum':['all','summary']}},readonly=True),
     tool('get_capabilities','Discover every editable data field, edit operation, available effect and tool workflow.',readonly=True),
@@ -34,7 +34,7 @@ TOOLS=[
     tool('synthesize_dialogue','Synthesize voiceover speech using local neural TTS (Adam Narrator or other voices) and place it directly on the timeline with waveform and caption-ready role="source_audio".',{'text':S,'voice':{'type':'string','default':'adam-narrator'},'start':N,'track':S,'rate':{'type':'integer','minimum':-50,'maximum':50},'pitch':{'type':'integer','minimum':-20,'maximum':20},'gain_db':N},('text',)),
     tool('apply_visual_fx','Apply and configure a Visual FX (Punch Zoom, Camera Shake, Crash Zoom, etc.) with custom parameters on any timeline clip in one call.',{'item_id':S,'effect':S,'properties':O},('item_id','effect')),
     tool('apply_transition','Apply and configure a video transition (Cross Dissolve, Dip to Color / White Flash, Wipe Left/Right/Up/Down, Push Left/Right/Up/Down, Slide In/Out, Zoom In, Digital Glitch, etc.) between clips or on an edit cut in one call.',{'name':S,'track':S,'left_item_id':S,'right_item_id':S,'cut_time':N,'duration':N,'alignment':{'type':'string','enum':['center','start','end']},'properties':O},('name',)),
-    tool('add_graphic','Add a vector graphic overlay (Circle, Pointing Arrow, Square, Rectangle, Timer / Countdown, Speech Bubble / Quote Card, Progress Bar, Callout Badge) to the timeline with custom parameters and timing.',{'graphic_type':{'type':'string','enum':['Circle','Pointing Arrow','Square','Rectangle','Timer / Countdown','Speech Bubble / Quote Card','Progress Bar','Callout Badge']},'track':S,'start':N,'duration':N,'properties':O},('graphic_type',)),
+    tool('add_graphic','Add a vector graphic or editable Motion Composition. For compositions use properties.scene; discover its schema with get_capabilities.',{'graphic_type':{'type':'string','enum':['Motion Composition','Circle','Pointing Arrow','Square','Rectangle','Timer / Countdown','Speech Bubble / Quote Card','Progress Bar','Callout Badge']},'track':S,'start':N,'duration':N,'properties':O},('graphic_type',)),
     tool('set_caption_style','Apply curated viral subtitle style presets (crime_red, viral_yellow, cyber_cyan, mrbeast_gold, clean_card) or customize font, colors, animation, size, glow, and lower-third position across captions in one call.',{'preset':{'type':'string','enum':['crime_red','viral_yellow','cyber_cyan','mrbeast_gold','clean_card']},'properties':O,'caption_ids':{'type':'array','items':S}}),
     tool('apply_vertical_framing','Format and align clips for 9:16 vertical video shorts: vertically center foreground clips (y=0.5), configure ambient background fill layers (role="background"), and optionally adjust framing scale.',{'mode':{'type':'string','enum':['center_and_fill','fit_width','fill_916']},'foreground_track':S,'background_track':S,'scale':N}),
     tool('get_timeline_summary','Return a concise structured summary of timeline tracks, clips, in/out timings, audio levels, active effects, subtitle cards, and video transitions.',readonly=True),
@@ -108,6 +108,9 @@ def validate(project):
         if not .001<=item.transform.scale<=100 or not .001<=item.transform.effective_scale_y<=100:raise ValueError('Invalid transform scale')
         if item.role in {'title', 'graphic'}:
             if item.track not in project.video_tracks:raise ValueError('Titles and graphics require video tracks')
+            if item.role=='graphic' and item.graphic_type.lower() in ('motion','motion composition'):
+                from .motion import validate
+                item.graphic_data['scene']=validate(item.graphic_data.get('scene',{}))
         else:
             media=project.media_by_id(item.media_id)
             if media is None:raise ValueError('Clip references missing media')
@@ -134,6 +137,7 @@ def edited(project, operations):
                 identifier=identifier or uid()
                 if collection=='timeline':
                     base=asdict(TimelineItem(identifier,'',stage.video_tracks[-1],0,5,role='title'))
+                    if values.get('graphic_type','').lower() in ('motion','motion composition'):base['transform']['y']=.5
                 elif collection=='captions':
                     base=asdict(Caption(identifier,0,1,''))
                 else:
@@ -323,6 +327,7 @@ class EditorAPI:
         from .effects import CATALOG
         from .transitions import TRANSITION_SUBSECTIONS
         from .graphics import GRAPHICS_CATALOG
+        from .motion import schema
         import inspect
         return dict(effects=CATALOG,transitions=TRANSITION_SUBSECTIONS,graphics=list(GRAPHICS_CATALOG.keys()),commands={name:str(inspect.signature(getattr(self.w,name))) for name in COMMANDS},fields={c.__name__:{f.name:str(f.type) for f in fields(c)} for c in (ProjectSettings,TimelineItem,MediaItem,Caption,CaptionStyle,Crop,Transform)},
             operations={'add/update/remove':'collection: timeline|captions|transitions, id, values (partial fields; nested dictionaries merge). New timeline entries default to title; media clips require role=normal and media_id; transitions require name, duration, track.',
@@ -333,7 +338,7 @@ class EditorAPI:
                 'insert_transition':'name, track, duration, alignment (center/start/end), optional left_item_id, right_item_id, cut_time, properties',
                 'set_caption_style':'preset (crime_red, viral_yellow, cyber_cyan, mrbeast_gold, clean_card), properties (partial dict), optional caption_ids',
                 'apply_vertical_framing':'mode (center_and_fill, fit_width, fill_916), foreground_track, background_track, optional scale'},
-            guidance='Use inspect_ui/ui_control for all remaining inspector, effects, captions, optional analysis, Power Bin and menu workflows. These use the same controls as the user. Dialogs may require another ui_control call. Models are not downloaded silently. apply_edits is atomic; inspect updated state after every batch.')
+            motion_composition=schema(),guidance='Use inspect_ui/ui_control for all remaining inspector, effects, captions, optional analysis, Power Bin and menu workflows. These use the same controls as the user. Dialogs may require another ui_control call. Models are not downloaded silently. apply_edits is atomic; inspect updated state after every batch.')
     def call_apply_edits(self,revision,operations):
         self.editing()
         if revision!=globals()['revision'](self.w.project):raise ValueError('Project changed. Refresh get_state before editing.')

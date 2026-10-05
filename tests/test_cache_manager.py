@@ -18,12 +18,12 @@ class CacheManagerTests(unittest.TestCase):
             file_menu=window.menuBar().actions()[0].menu()
             self.assertEqual([action.text() for action in file_menu.actions()[-4:]],
                              ['Cache Manager…','Optional downloads…','Check for updates…','UI Themes…'])
-            for theme in ('default','obsidian','ableton_gray'):
+            for theme in ('default','final_cut_obsidian','ableton_gray'):
                 window.apply_theme(theme,save=False)
                 dialog=CacheManagerDialog(window)
                 self.assertEqual(dialog.palette().color(QPalette.Window),
                                  QApplication.instance().palette().color(QPalette.Window))
-                self.assertEqual(len(dialog.rows),7)
+                self.assertEqual(set(dialog.rows),{'motion-renders','thumbs','proxies','waveforms','compounds','vision-renders','projects','audio-preview'})
                 dialog.close()
         finally:
             window.close()
@@ -32,15 +32,17 @@ class CacheManagerTests(unittest.TestCase):
             root = Path(directory)
             for name in ('thumbs/a.jpg','thumbs/notes.txt','tts/voice.mp3',
                          'recovered/project.kcut','vision-analysis/1/faces.json',
+                         'motion-renders/overlay.mkv','motion-renders/scene.json',
                          'audio-preview-123.wav','ordinary.wav'):
                 target = root/name
                 target.parent.mkdir(parents=True,exist_ok=True)
                 target.write_bytes(b'abc')
             self.assertEqual(scan(root)['thumbs'],(1,3))
             self.assertEqual(scan(root)['audio-preview'],(1,3))
-            self.assertEqual(clear(['thumbs','audio-preview'],root),(2,6))
+            self.assertEqual(scan(root)['motion-renders'],(1,3))
+            self.assertEqual(clear(['thumbs','audio-preview','motion-renders'],root),(3,9))
             for name in ('thumbs/notes.txt','tts/voice.mp3','recovered/project.kcut',
-                         'vision-analysis/1/faces.json','ordinary.wav'):
+                         'vision-analysis/1/faces.json','motion-renders/scene.json','ordinary.wav'):
                 self.assertTrue((root/name).is_file(), name)
             with self.assertRaises(ValueError):
                 clear(['recovered'],root)

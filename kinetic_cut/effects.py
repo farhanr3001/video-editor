@@ -19,7 +19,7 @@ CATALOG = {
     "Colour": ["Black & White", "Light Boost", "Cinematic Contrast", "Warm Tone", "Cool Tone", "Sepia", "Channel Swap"],
     "Titles": ["Text", "Headline"],
     "Audio": ["Noise Clean", "Voice Clarity", "Low Cut", "Auto Duck", "Fade In / Out", "Cut curse words", "Remove Silence", "Vocal Only"],
-    "Graphics": ["Circle", "Pointing Arrow", "Square", "Rectangle", "Timer / Countdown", "Speech Bubble / Quote Card", "Progress Bar", "Callout Badge"],
+    "Graphics": ["Motion Composition", "Circle", "Pointing Arrow", "Square", "Rectangle", "Timer / Countdown", "Speech Bubble / Quote Card", "Progress Bar", "Callout Badge"],
 }
 # Browser-only grouping: keep the established Face Filters catalog and effect
 # names intact so saved projects, drag/drop, and automation remain compatible.
@@ -39,6 +39,7 @@ EFFECT_ICONS = {
     "AR Pixel Glasses": "smile",
     "Custom Face": "smile",
     # Graphics
+    "Motion Composition": "layers",
     "Circle": "circle",
     "Pointing Arrow": "arrow-up-right",
     "Square": "square",

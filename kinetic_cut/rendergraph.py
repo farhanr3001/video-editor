@@ -71,15 +71,15 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
         def rotation_filter(base_w,base_h):
             from .keyframes import base
             def largest(name):
-                keys=vfx_item.keyframes.get(name,vfx_item.keyframes.get('scale',[]) if name=='scale_y' and vfx_item.transform.scale_y is None else [])
-                return max([base(vfx_item,name)]+[k['value'] for k in keys])
+                from .keyframes import maximum
+                return maximum(vfx_item,name)
             side=math.ceil(math.hypot(min(8192,max(32,base_w*largest('scale'))),min(8192,max(32,base_h*largest('scale_y'))))/2)*2
             return f",rotate='({curve('rotation')})*PI/180':ow={side}:oh={side}:c=none"
         def stable_canvas(base_w,base_h):
             from .keyframes import base
             def maximum(name,dimension):
-                keys=vfx_item.keyframes.get(name,vfx_item.keyframes.get('scale',[]) if name=='scale_y' and vfx_item.transform.scale_y is None else [])
-                return math.ceil(min(8192,max(32,dimension*max([base(vfx_item,name)]+[k['value'] for k in keys])))/2)*2+2
+                from .keyframes import maximum as curve_maximum
+                return math.ceil(min(8192,max(32,dimension*curve_maximum(vfx_item,name)))/2)*2+2
             return f",pad={maximum('scale',base_w)}:{maximum('scale_y',base_h)}:(ow-iw)/2:(oh-ih)/2:color=black@0:eval=frame"
         from .vision_effects import active as vision_active
         processed=(prepared or {}).get(item.id)

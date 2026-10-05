@@ -120,6 +120,11 @@ def export(project: Project, output: str, preset: ExportPreset,
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     from .compounds import prepare as prepare_compounds
     project=prepare_compounds(project,ffmpeg,progress,cancel)
+    from .native_animation import prepared
+    with prepared(project,progress,cancel) as native_project:
+        return _export_prepared(native_project,output,preset,burn_captions,hardware,ffmpeg,progress,cancel,export_audio,lossless)
+
+def _export_prepared(project,output,preset,burn_captions,hardware,ffmpeg,progress,cancel,export_audio,lossless):
     automatic=hardware=="Auto"
     if hardware=="Auto":
         if progress:progress(0,"Checking available hardware encoders…")

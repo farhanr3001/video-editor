@@ -12,6 +12,7 @@ from PySide6.QtGui import (
 
 # Catalog display names mapped to metadata
 GRAPHICS_CATALOG: dict[str, dict[str, Any]] = {
+    "Motion Composition": {"kind": "motion", "default_duration": 5.0},
     "Circle": {"kind": "circle", "default_duration": 2.0},
     "Pointing Arrow": {"kind": "arrow", "default_duration": 2.0},
     "Square": {"kind": "square", "default_duration": 2.0},
@@ -115,6 +116,9 @@ DEFAULT_GRAPHIC_DATA: dict[str, dict[str, Any]] = {
 
 
 def default_graphic_data(kind: str) -> dict[str, Any]:
+    if kind.lower() in ('motion','motion composition'):
+        from .motion import default_scene
+        return {'scene':default_scene()}
     """Return a deep copy of default settings for the given graphic type."""
     k = kind.lower()
     if "circle" in k: return copy.deepcopy(DEFAULT_GRAPHIC_DATA["circle"])
@@ -213,6 +217,8 @@ def draw_graphic(
     elapsed = playhead - item.start
     if elapsed < 0 or elapsed >= item.duration:
         return QRectF()
+    from .keyframes import evaluated
+    item=evaluated(item,elapsed)
 
     # Fade calculation
     fade = min(1.0, max(0.0, elapsed / item.fade_in)) if getattr(item, "fade_in", 0) > 0 else 1.0
@@ -226,6 +232,7 @@ def draw_graphic(
     kind = getattr(item, "graphic_type", "circle").lower()
 
     painter.save()
+    if kind in ('motion','motion composition'):painter.setClipRect(frame_rect,Qt.IntersectClip)
     painter.setRenderHint(QPainter.Antialiasing, True)
     painter.setOpacity(painter.opacity() * opacity)
 
@@ -248,8 +255,14 @@ def draw_graphic(
 
     local_bounds = QRectF()
 
+    if kind in ('motion','motion composition'):
+        from .motion import draw
+        scene=data.get('scene',{}); scene={**scene,'canvas':scene.get('canvas',[project.settings.width,project.settings.height])}
+        image=draw(scene,item.in_point+elapsed*item.speed,(max(2,round(frame_rect.width())),max(2,round(frame_rect.height()))),project.settings.fps)
+        local_bounds=QRectF(-project.settings.width/2,-project.settings.height/2,project.settings.width,project.settings.height)
+        painter.drawImage(local_bounds,image)
     # 1. Circle
-    if "circle" in kind:
+    elif "circle" in kind:
         r = float(data.get("radius", 140.0))
         th = float(data.get("thickness", 8.0))
         col = QColor(data.get("color", "#ff3b30"))

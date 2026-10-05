@@ -16,6 +16,7 @@ from .theme_widgets import set_ui_style
 
 
 CATEGORIES = (
+    ('motion-renders', 'Rendered motion graphics', 'motion-renders', {'.mkv'}),
     ('thumbs', 'Media thumbnails', 'thumbs', {'.jpg', '.jpeg', '.png'}),
     ('proxies', 'Playback proxies', 'proxies', {'.mp4'}),
     ('waveforms', 'Audio waveforms', 'waveforms', {'.npz'}),

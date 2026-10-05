@@ -1120,10 +1120,14 @@ class MainWindow(QMainWindow):
         cat=GRAPHICS_CATALOG.get(name,{})
         dur=float(duration) if duration is not None else float(cat.get("default_duration",2.0))
         graphic_data=default_graphic_data(name)
+        if name.lower() in ('motion','motion composition'):
+            from .motion import default_scene
+            graphic_data['scene']=default_scene([self.project.settings.width,self.project.settings.height])
         if properties and isinstance(properties,dict):
             import copy
             graphic_data.update(copy.deepcopy(properties))
         item=TimelineItem(uid(),"",track,start,dur,group_id=uid(),role="graphic",graphic_type=name,graphic_data=graphic_data)
+        if name.lower() in ('motion','motion composition'):item.transform.y=.5
         self.project.timeline.append(item); self.timeline.select_ids({item.id},item.id); self.model_changed(); self.select_item(item.id); self.seek(start)
         return item
 
@@ -1249,14 +1253,21 @@ class MainWindow(QMainWindow):
     def update_keyframe_button(self):
         if not hasattr(self,'keyframe_button'):return
         item=self.project.item_by_id(self.timeline.selected_id); media=self.project.media_by_id(item.media_id) if item else None
-        self.keyframe_button.setEnabled(bool(item and media and media.kind in {'video','image'} and item.track in self.project.video_tracks and item.role!='title' and not self.project.track_states.get(item.track,{}).get('locked') and self.current_page==0))
+        self.keyframe_button.setEnabled(bool(item and (item.role in ('title','graphic') or media and media.kind in {'video','image'}) and item.track in self.project.video_tracks and not self.project.track_states.get(item.track,{}).get('locked') and self.current_page==0))
 
     @edit_only
     def open_keyframes(self,item_id=None):
         item=self.project.item_by_id(item_id or self.timeline.selected_id); media=self.project.media_by_id(item.media_id) if item else None
-        if not item or not media or media.kind not in {'video','image'} or item.track not in self.project.video_tracks or item.role=='title' or self.project.track_states.get(item.track,{}).get('locked'):return
+        if not item or not (item.role in ('title','graphic') or media and media.kind in {'video','image'}) or item.track not in self.project.video_tracks or self.project.track_states.get(item.track,{}).get('locked'):return
         from .keyframe_editor import KeyframeEditor
         self.transport.pause(); dialog=KeyframeEditor(self,item); dialog.setAttribute(Qt.WA_DeleteOnClose); dialog.show(); self._keyframe_dialog=dialog
+
+    @edit_only
+    def open_motion_composition(self,item_id=None):
+        item=self.project.item_by_id(item_id or self.timeline.selected_id)
+        if not item or item.role!='graphic' or item.graphic_type.lower() not in ('motion','motion composition') or self.project.track_states.get(item.track,{}).get('locked'):return
+        from .motion_editor import MotionEditor
+        self.transport.pause(); dialog=MotionEditor(self,item); dialog.setAttribute(Qt.WA_DeleteOnClose); dialog.show(); self._motion_dialog=dialog
 
     def select_caption(self,caption_id):
         if hasattr(self,'keyframe_button'):self.keyframe_button.setEnabled(False)

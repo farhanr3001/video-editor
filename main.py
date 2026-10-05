@@ -21,6 +21,9 @@ if __name__ == "__main__":
     install_desktop_process_policy()
     import multiprocessing
     multiprocessing.freeze_support()
+    if len(sys.argv)==3 and sys.argv[1]=='--motion-selftest':
+        from kinetic_cut.motion_diagnostics import run
+        sys.exit(run(sys.argv[2]))
     if len(sys.argv)==3 and sys.argv[1]=='--watch-folder-selftest':
         from kinetic_cut.watch_diagnostics import run
         sys.exit(run(sys.argv[2]))

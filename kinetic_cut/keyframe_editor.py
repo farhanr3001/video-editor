@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QDialog,QWidget,QVBoxLayout,QHBoxLayout,QFormLayo
     QLabel,QPushButton,QComboBox,QCheckBox,QScrollArea,QDialogButtonBox,QMessageBox)
 from .controls import SafeDoubleSpinBox
 from .widgets import PreviewCanvas
-from .model import TimelineItem
+from .model import TimelineItem,MediaItem
 from .keyframes import PROPERTIES,MODES,base,value,put,clean
 
 
@@ -67,11 +67,12 @@ class KeyframeEditor(QDialog):
         super().__init__(owner); self.owner=owner; self.original=copy.deepcopy(item); self.project=copy.copy(owner.project)
         self.project.settings=copy.deepcopy(owner.project.settings)
         self.item=copy.deepcopy(item); self.item.start=0; self.item.muted=False; self.media=copy.deepcopy(owner.project.media_by_id(item.media_id))
+        if self.media is None:self.media=MediaItem('__native__','','image',item.title_text or item.graphic_type or 'Native layer',item.duration,owner.project.settings.width,owner.project.settings.height)
         self.project.timeline=[self.item]; self.project.captions=[]; self.project.media=[self.media]; self.project.playhead=0
         self.project.video_tracks=[item.track]; self.project.audio_tracks=['__source_audio']
         self.project.track_states={item.track:{'visible':True},'__source_audio':{'visible':True}}
         if self.media.has_audio:self.project.timeline.append(TimelineItem('__source_audio',item.media_id,'__source_audio',0,item.duration,item.in_point,speed=item.speed,gain_db=item.gain_db))
-        self.settings=owner.settings; self.proxies=owner.proxies; self.position=0.; self.property='scale'; self.updating=False
+        self.settings=owner.settings; self.proxies=owner.proxies; self.position=0.; self.property='scale'; self.updating=False; self._finished=False
         self.setWindowTitle('Manage Keyframes · '+self.media.name); self.resize(1100,740); self.setWindowModality(Qt.WindowModal)
         root=QVBoxLayout(self); split=QSplitter(Qt.Horizontal); root.addWidget(split,1)
         left=QWidget(); content=QVBoxLayout(left); self.preview=PreviewCanvas(); self.preview.set_project(self.project); self.preview.set_read_only(True); self.preview.set_transform_controls_visible(False); content.addWidget(self.preview,1)
@@ -93,6 +94,8 @@ class KeyframeEditor(QDialog):
         self.time.setObjectName('keyframe_time'); self.link.setObjectName('keyframe_link_zoom')
         self.interpolation=QComboBox(); self.interpolation.addItems(MODES); self.interpolation.currentTextChanged.connect(self.change_mode); form.addRow('To next key',self.interpolation)
         self.interpolation.setObjectName('keyframe_interpolation')
+        from .easing_graph import EasingGraph
+        self.graph=EasingGraph(lambda:self.at_key(self.property),right); self.graph.changed.connect(self.graph_changed); form.addRow(self.graph)
         self.property_label=QLabel(); form.addRow('Selected lane',self.property_label)
         for label,callback in [('Add / Update Keyframe',lambda:self.add_key(self.property)),('Remove Keyframe',self.remove_key),('Remove All Keyframes',self.remove_all)]:
             b=QPushButton(label); b.clicked.connect(callback); form.addRow(b)
@@ -103,7 +106,7 @@ class KeyframeEditor(QDialog):
         self.transport=TimelineTransport(self); self.transport.changed.connect(self.position_changed); self.transport.stateChanged.connect(lambda playing:self.play.setText('Pause' if playing else 'Play'))
         self.lanes.seekRequested.connect(self.seek); self.lanes.propertySelected.connect(self.select_property); self.lanes.changed.connect(self.refresh)
         self.space=QShortcut(QKeySequence(Qt.Key_Space),self); self.space.setContext(Qt.WindowShortcut); self.space.activated.connect(self.toggle_play)
-        self.refresh(); QTimer.singleShot(0,lambda:self.seek(0))
+        self.refresh(); QTimer.singleShot(0,self,lambda:None if self._finished else self.seek(0))
     def start_worker(self,worker):self.owner.start_worker(worker)
     def statusBar(self):return self.owner.statusBar()
     def toggle_play(self):self.transport.pause() if self.transport.playing else self.transport.play()
@@ -120,7 +123,7 @@ class KeyframeEditor(QDialog):
             spin.setValue(value(self.item.keyframes.get(name,[]),self.position,base(self.item,name))); spin.setReadOnly(self.at_key(name) is None)
             add.setText('◆' if self.at_key(name) else '◇')
         self.property_label.setText(PROPERTIES[self.property][0]); key=self.at_key(self.property); self.interpolation.setEnabled(key is not None)
-        self.interpolation.setCurrentText(key.get('interpolation','Linear') if key else 'Linear'); self.updating=False; self.lanes.update(); self.preview.update()
+        self.interpolation.setCurrentText(key.get('interpolation','Linear') if key else 'Linear'); self.updating=False; self.lanes.update(); self.preview.update(); self.graph.update()
     def add_key(self,name):
         self.transport.pause(); self.property=name
         names=['scale','scale_y'] if name in {'scale','scale_y'} and self.link.isChecked() else [name]
@@ -142,9 +145,16 @@ class KeyframeEditor(QDialog):
             for n in ('scale','scale_y'):
                 key=self.at_key(n)
                 if key:key['interpolation']=mode
+        self.graph.update(); self.preview.update()
     def next_key(self,direction):
         keys=self.item.keyframes.get(self.property,[]); candidates=[k['time'] for k in keys if (k['time']-self.position)*direction>1e-6 and 0<=k['time']<=self.item.duration]
         if candidates:self.seek(min(candidates) if direction>0 else max(candidates))
+    def graph_changed(self):
+        key=self.at_key(self.property)
+        if key and self.property in {'scale','scale_y'} and self.link.isChecked():
+            other=self.at_key('scale_y' if self.property=='scale' else 'scale')
+            if other:other['bezier']=copy.deepcopy(key.get('bezier'))
+        self.refresh()
     def remove_key(self):
         names=['scale','scale_y'] if self.property in {'scale','scale_y'} and self.link.isChecked() else [self.property]
         for name in names:
@@ -159,4 +169,4 @@ class KeyframeEditor(QDialog):
             QMessageBox.warning(self,'Clip changed','The clip changed or its track is locked. Cancel and reopen this editor to avoid overwriting newer edits.'); return
         current.keyframes=clean(self.item.keyframes); current.transform.scale_linked=self.link.isChecked(); self.owner.model_changed(); super().accept()
     def done(self,result):
-        self.transport.shutdown(); super().done(result); self.owner.activateWindow(); self.owner.timeline.viewport().setFocus()
+        self._finished=True; self.transport.shutdown(); super().done(result); self.owner.activateWindow(); self.owner.timeline.viewport().setFocus()
