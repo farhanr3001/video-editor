@@ -21,6 +21,12 @@ if __name__ == "__main__":
     install_desktop_process_policy()
     import multiprocessing
     multiprocessing.freeze_support()
+    if len(sys.argv)>1 and sys.argv[1].endswith('-selftest') and sys.argv[1]!='--close-guard-selftest':
+        from kinetic_cut import close_guard
+        close_guard.DIAGNOSTIC_CLEANUP=True  # Existing diagnostic fixture shutdown only.
+    if len(sys.argv)==3 and sys.argv[1]=='--close-guard-selftest':
+        from kinetic_cut.close_diagnostics import run
+        sys.exit(run(sys.argv[2]))
     if len(sys.argv)==3 and sys.argv[1]=='--video-presets-selftest':
         from kinetic_cut.video_preset_diagnostics import run
         sys.exit(run(sys.argv[2]))

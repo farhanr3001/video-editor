@@ -761,11 +761,15 @@ class EditorAPI:
             backup=self.checkpoint(); self.w.set_project(Project(name=name)); return dict(checkpoint=backup,revision=revision(self.w.project))
         if operation=='open':
             project=Project.load(path); validate(project); backup=self.checkpoint(); self.w.set_project(project)
-            self.w._saved_project_key=self.w._history_key(project); return dict(checkpoint=backup,revision=revision(project))
+            self.w._saved_project_key=self.w._history_key(project)
+            from .close_guard import mark_saved
+            mark_saved(self.w,project); return dict(checkpoint=backup,revision=revision(project))
         if operation=='save':
             if not path or Path(path).suffix.lower()!='.kcut':raise ValueError('Provide a .kcut output path')
             if Path(path).exists() and not overwrite:raise ValueError('File exists; explicitly set overwrite=true to replace it')
             self.w.compounds.root().save(path); self.w._saved_project_key=self.w._history_key(self.w.project)
+            from .close_guard import mark_saved
+            mark_saved(self.w)
             from .project_manager import remember
             remember(self.w,path,capture=True); return dict(path=str(Path(path).resolve()))
         raise ValueError('Unknown project operation')

@@ -878,7 +878,9 @@ class MainWindow(QMainWindow):
         try:project=Project.load(path)
         except Exception as error:QMessageBox.critical(self,"Open failed",str(error)); return False
         if not self.confirm_project_switch():return False
-        self.set_project(project); self._saved_project_key=self._history_key(project); remember(self,path)
+        self.set_project(project); self._saved_project_key=self._history_key(project)
+        from .close_guard import mark_saved
+        mark_saved(self,project); remember(self,path)
         self.settings["last_open_project_dir"] = str(Path(path).parent)
         save_settings(self.settings)
         return True
@@ -904,7 +906,10 @@ class MainWindow(QMainWindow):
             start_dir = self.settings.get("last_open_project_dir") or str(folder(self.settings))
             if not Path(start_dir).is_dir():
                 start_dir = str(folder(self.settings))
-            root=Path(start_dir); root.mkdir(parents=True,exist_ok=True)
+            root=Path(start_dir)
+            try:root.mkdir(parents=True,exist_ok=True)
+            except OSError as error:
+                QMessageBox.warning(self,"Save failed",str(error)); return False
             name="".join(c if c not in '<>:"/\\|?*' else '_' for c in self.project.name)
             path,_=QFileDialog.getSaveFileName(self,"Save project",str(root/(name+".kcut")),"Kinetic Cut (*.kcut)")
         if path:
@@ -914,6 +919,8 @@ class MainWindow(QMainWindow):
                 document.save(path)
             except Exception as error:QMessageBox.warning(self,"Save failed",str(error)); return False
             self._saved_project_key=self._history_key(self.project)
+            from .close_guard import mark_saved
+            mark_saved(self,document)
             self.settings["last_open_project_dir"] = str(Path(path).parent)
             save_settings(self.settings)
             try:remember(self,path,capture=True)
@@ -2122,6 +2129,9 @@ class MainWindow(QMainWindow):
     def dropEvent(self,event):self.add_media_paths([u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]); event.acceptProposedAction()
 
     def closeEvent(self,event:QCloseEvent):
+        from .close_guard import confirm_close
+        if not confirm_close(self):
+            event.ignore(); return
         if hasattr(self,'phone_connect'):
             if self.phone_connect.active_job and QMessageBox.question(self,'Cancel phone transfers?','A phone transfer is running. Cancel it and close Kinetic Cut?')!=QMessageBox.Yes:
                 event.ignore(); return

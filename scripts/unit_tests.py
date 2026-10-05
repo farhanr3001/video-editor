@@ -11,6 +11,7 @@ import shiboken6
 faulthandler.enable()
 if os.environ.get('KINETIC_TEST_WATCHDOG'):faulthandler.dump_traceback_later(20,repeat=True)
 app=QApplication([]); app.setQuitOnLastWindowClosed(False)
+app.setProperty('kineticTestDiscardUnsaved',True)  # Fixture teardown; close-guard tests explicitly clear it.
 result=unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.discover(str(ROOT/"tests"),pattern=sys.argv[1] if len(sys.argv)>1 else "test*.py"))
 workers_done=QThreadPool.globalInstance().waitForDone(10000)
 app.processEvents()
