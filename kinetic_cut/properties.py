@@ -117,6 +117,13 @@ class PropertiesPanel(QWidget):
 
     def build_video(self):
         panel=QWidget(); root=QVBoxLayout(panel); root.setContentsMargins(0,0,0,0)
+        from .video_presets import VideoPresetStrip, HIDDEN_KEY
+        self.video_presets=VideoPresetStrip(self)
+        self.video_preset_section=InspectorSection('Presets',self.video_presets,expanded=not bool(self.window.settings.get(HIDDEN_KEY,False)))
+        self.video_preset_section.reset_button.hide()
+        self.video_preset_section.toggle.setToolTip('Show or hide video preset controls')
+        self.video_preset_section.toggle.toggled.connect(self.video_presets.expansion_changed)
+        root.addWidget(self.video_preset_section)
         transform_body=QWidget(); grid=QGridLayout(transform_body); grid.setContentsMargins(8,7,7,10); grid.setHorizontalSpacing(4); grid.setVerticalSpacing(7)
         grid.setColumnMinimumWidth(1,12); grid.setColumnMinimumWidth(2,66); grid.setColumnMinimumWidth(3,28); grid.setColumnMinimumWidth(4,12); grid.setColumnMinimumWidth(5,66); grid.setColumnMinimumWidth(6,24); grid.setColumnStretch(0,1)
         root.addWidget(InspectorSection("Transform",transform_body,reset_callback=lambda:self.reset_clip_section("transform")))
@@ -491,7 +498,7 @@ class PropertiesPanel(QWidget):
             effect_index=self.effect_picker.currentIndex(); self.effect_picker.clear()
             for effect in item.effects:self.effect_picker.addItem(effect.get("name","Gaussian Blur"))
             self.effect_picker.setCurrentIndex(max(0,min(effect_index,len(item.effects)-1)))
-        self.updating=False; self.refresh_effect()
+        self.updating=False; self.video_presets.refresh(); self.refresh_effect()
 
     def effect(self):
         item=self.window.project.item_by_id(self.item_id); index=self.effect_picker.currentIndex()
