@@ -344,6 +344,8 @@ class PropertiesPanel(QWidget):
         root.addWidget(self.vfx_panel)
 
         self.effect_note=QLabel(); self.effect_note.setWordWrap(True); self.effect_note.setObjectName("emptyState"); root.addWidget(self.effect_note)
+        from .tracking_ui import TrackingPanel
+        self.tracking_panel=TrackingPanel(self); root.addWidget(self.tracking_panel); self.tracking_panel.hide()
         self.vision_reanalyse=QPushButton('Re-analyse current crop'); self.vision_reanalyse.clicked.connect(self.reanalyse_vision); root.addWidget(self.vision_reanalyse); self.vision_reanalyse.hide()
         self.vision_customize=QPushButton('Customize Face…'); self.vision_customize.clicked.connect(self.customize_vision); root.addWidget(self.vision_customize); self.vision_customize.hide()
         root.addStretch(); return panel
@@ -498,10 +500,17 @@ class PropertiesPanel(QWidget):
         from .effects import ADJUSTABLE, DESCRIPTIONS
         from .visual_fx import VISUAL_FX_SET, SUBSECTION_BY_EFFECT
         effect=self.effect()
+        tracking=bool(effect and effect.get('name')=='Object Tracking')
+        self.tracking_panel.setVisible(tracking)
         self.vision_reanalyse.hide()
         self.vision_customize.hide()
         if not effect:
             self.vfx_panel.hide(); return
+        if tracking:
+            self.vfx_panel.hide(); self.effect_detail.hide(); self.key_panel.hide(); self.effect_amount_panel.hide(); self.effect_note.hide()
+            self.updating=True
+            self.effect_enabled.setText('Object Tracking'); self.effect_enabled.setChecked(effect.get('enabled',True))
+            self.updating=False; self.tracking_panel.refresh(effect); return
         is_vfx=effect.get("category")=="Visual FX" or effect.get("name") in VISUAL_FX_SET
         self.vfx_panel.setVisible(is_vfx)
         if is_vfx:

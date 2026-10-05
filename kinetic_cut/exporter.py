@@ -121,7 +121,8 @@ def export(project: Project, output: str, preset: ExportPreset,
     from .compounds import prepare as prepare_compounds
     project=prepare_compounds(project,ffmpeg,progress,cancel)
     from .native_animation import prepared
-    with prepared(project,progress,cancel) as native_project:
+    from .tracking_effect import prepared as tracking_prepared
+    with tracking_prepared(project), prepared(project,progress,cancel) as native_project:
         return _export_prepared(native_project,output,preset,burn_captions,hardware,ffmpeg,progress,cancel,export_audio,lossless)
 
 def _export_prepared(project,output,preset,burn_captions,hardware,ffmpeg,progress,cancel,export_audio,lossless):

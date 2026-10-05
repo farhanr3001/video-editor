@@ -1740,6 +1740,12 @@ class MainWindow(QMainWindow):
         from .effects import TITLES, GRAPHICS, ADJUSTABLE, compatible, preset_owner
         if name in TITLES:self.add_title_object(name); return
         if name in GRAPHICS:self.add_graphic_object(name); return
+        if name=='Object Tracking':
+            item=self.project.item_by_id(self.timeline.selected_id)
+            if not compatible(name,item,self.project):
+                self.statusBar().showMessage('Select an unlocked video or image clip to track.',5000); return
+            from .tracking_ui import begin
+            begin(self); return
         from .vision_effects import NAMES as VISION_NAMES
         if name in VISION_NAMES:
             item=self.project.item_by_id(self.timeline.selected_id)
@@ -2126,6 +2132,7 @@ class MainWindow(QMainWindow):
         if hasattr(self,'assistant_connection'):self.assistant_connection.stop()
         self.delivery.clock.stop()
         if getattr(self,'_vision_cancel',None):self._vision_cancel.set()
+        if getattr(self,'_tracking_cancel',None):self._tracking_cancel.set()
         if getattr(self.delivery,'render_cancel',None):self.delivery.render_cancel.set()
         if getattr(self,"_vocal_cancel",None):self._vocal_cancel.set()
         if hasattr(self, 'update_controller') and hasattr(self.update_controller, '_cancel'):

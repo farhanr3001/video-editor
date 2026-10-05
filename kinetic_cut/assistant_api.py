@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QApplication, QAbstractButton, QAbstractSlider,
     QComboBox, QDoubleSpinBox, QSpinBox, QLineEdit, QTextEdit, QPlainTextEdit, QLabel,
     QDialog, QTabWidget, QWidget)
 from .model import Project, ProjectSettings, TimelineItem, MediaItem, Caption, CaptionStyle, Crop, Transform, uid
+from .tracking_effect import MODES as TRACKING_MODES
 
 
 def tool(name, description, properties=None, required=(), readonly=False):
@@ -33,6 +34,17 @@ TOOLS=[
     tool('apply_edits','Apply an atomic batch as ONE undo step. Requires the revision from get_state. See get_capabilities for operations. All times in seconds.',{'revision':S,'operations':{'type':'array','items':O,'minItems':1,'maxItems':500}},('revision','operations')),
     tool('synthesize_dialogue','Synthesize voiceover speech using local neural TTS (Adam Narrator or other voices) and place it directly on the timeline with waveform and caption-ready role="source_audio".',{'text':S,'voice':{'type':'string','default':'adam-narrator'},'start':N,'track':S,'rate':{'type':'integer','minimum':-50,'maximum':50},'pitch':{'type':'integer','minimum':-20,'maximum':20},'gain_db':N},('text',)),
     tool('apply_visual_fx','Apply and configure a Visual FX (Punch Zoom, Camera Shake, Crash Zoom, etc.) with custom parameters on any timeline clip in one call.',{'item_id':S,'effect':S,'properties':O},('item_id','effect')),
+    tool('track_object','Analyse a selected source region asynchronously and add an Object Tracking effect as ONE undo step. Requires a current revision and unlocked video/image clip. Region and correction boxes are [x,y,width,height] normalized to the FULL source, before crop. Times are source seconds. No models/downloads. Poll get_jobs; Complete is success. Cancel with tracking_job_control. Censor loss uses Full frame protection by default; unsafe unreviewed censor loss refuses the edit.',
+         {'revision':S,'item_id':S,'reference_source_time':N,
+          'region':{'type':'array','items':{'type':'number','minimum':0,'maximum':1},'minItems':4,'maxItems':4},
+          'anchors':{'type':'array','maxItems':128,'items':{'type':'object','properties':{'time':N,'box':{'type':'array','items':{'type':'number','minimum':0,'maximum':1},'minItems':4,'maxItems':4}},'required':['time','box'],'additionalProperties':False}},
+          'mode':{'type':'string','enum':list(TRACKING_MODES),'default':'Censor Bar'},
+          'properties':O,'sample_fps':{'type':'number','minimum':1,'maximum':60,'default':15},
+          'search_radius':{'type':'number','minimum':.02,'maximum':.6,'default':.22},
+          'confidence_threshold':{'type':'number','minimum':.2,'maximum':.95,'default':.58},
+          'existing_effect_index':{'type':'integer','minimum':0}},
+         ('revision','item_id','reference_source_time','region')),
+    tool('tracking_job_control','Cancel one running Object Tracking job. No partial trajectory is applied. Poll get_jobs until Cancelled; source files are unchanged.',{'job_id':S,'operation':{'type':'string','enum':['cancel']}},('job_id','operation')),
     tool('apply_transition','Apply and configure a video transition (Cross Dissolve, Dip to Color / White Flash, Wipe Left/Right/Up/Down, Push Left/Right/Up/Down, Slide In/Out, Zoom In, Digital Glitch, etc.) between clips or on an edit cut in one call.',{'name':S,'track':S,'left_item_id':S,'right_item_id':S,'cut_time':N,'duration':N,'alignment':{'type':'string','enum':['center','start','end']},'properties':O},('name',)),
     tool('add_graphic','Add a vector graphic or editable Motion Composition. For compositions use properties.scene; discover its schema with get_capabilities.',{'graphic_type':{'type':'string','enum':['Motion Composition','Circle','Pointing Arrow','Square','Rectangle','Timer / Countdown','Speech Bubble / Quote Card','Progress Bar','Callout Badge']},'track':S,'start':N,'duration':N,'properties':O},('graphic_type',)),
     tool('set_caption_style','Apply curated viral subtitle style presets (crime_red, viral_yellow, cyber_cyan, mrbeast_gold, clean_card) or customize font, colors, animation, size, glow, and lower-third position across captions in one call.',{'preset':{'type':'string','enum':['crime_red','viral_yellow','cyber_cyan','mrbeast_gold','clean_card']},'properties':O,'caption_ids':{'type':'array','items':S}}),
@@ -300,7 +312,7 @@ def edited(project, operations):
 
 
 class EditorAPI:
-    def __init__(self,window):self.w=window; self.jobs={}; self.targets={}
+    def __init__(self,window):self.w=window; self.jobs={}; self.targets={}; self._tracking_jobs={}
     def dispatch(self,name,args):
         method=getattr(self,'call_'+name,None)
         if method is None:raise ValueError('Unknown editor tool')
@@ -328,6 +340,7 @@ class EditorAPI:
         from .transitions import TRANSITION_SUBSECTIONS
         from .graphics import GRAPHICS_CATALOG
         from .motion import schema
+        from .tracking_effect import default_effect, MODES, LOSS_POLICIES
         import inspect
         return dict(effects=CATALOG,transitions=TRANSITION_SUBSECTIONS,graphics=list(GRAPHICS_CATALOG.keys()),commands={name:str(inspect.signature(getattr(self.w,name))) for name in COMMANDS},fields={c.__name__:{f.name:str(f.type) for f in fields(c)} for c in (ProjectSettings,TimelineItem,MediaItem,Caption,CaptionStyle,Crop,Transform)},
             operations={'add/update/remove':'collection: timeline|captions|transitions, id, values (partial fields; nested dictionaries merge). New timeline entries default to title; media clips require role=normal and media_id; transitions require name, duration, track.',
@@ -338,7 +351,13 @@ class EditorAPI:
                 'insert_transition':'name, track, duration, alignment (center/start/end), optional left_item_id, right_item_id, cut_time, properties',
                 'set_caption_style':'preset (crime_red, viral_yellow, cyber_cyan, mrbeast_gold, clean_card), properties (partial dict), optional caption_ids',
                 'apply_vertical_framing':'mode (center_and_fill, fit_width, fill_916), foreground_track, background_track, optional scale'},
-            motion_composition=schema(),guidance='Use inspect_ui/ui_control for all remaining inspector, effects, captions, optional analysis, Power Bin and menu workflows. These use the same controls as the user. Dialogs may require another ui_control call. Models are not downloaded silently. apply_edits is atomic; inspect updated state after every batch.')
+            motion_composition=schema(),
+            object_tracking=dict(tool='track_object',cancel_tool='tracking_job_control',
+                coordinates='Full-source normalized [x,y,width,height], before crop/transform; source seconds = in_point + (timeline time - start) * speed',
+                modes=list(MODES),loss_policies=list(LOSS_POLICIES),defaults=default_effect(),
+                analysis='Model-free, asynchronous local region tracking. Sample rate 1–60 fps, 10,000 samples / 1 MiB maximum. Includes forward/backward tracking and manual source-time corrections. Image clips use static/manual regions. Rotation is an appearance property, not automatically tracked.',
+                workflow='Read get_state revision. Submit track_object; poll get_jobs. Only Complete changes the project, as one undo step. Changed/locked/closed projects reject late results. No silent downloads. Censor losses require Full frame protection; fresh analysis resets loss review.'),
+            guidance='Use inspect_ui/ui_control for all remaining inspector, effects, captions, optional analysis, Power Bin and menu workflows. These use the same controls as the user. Dialogs may require another ui_control call. Models are not downloaded silently. apply_edits is atomic; inspect updated state after every batch.')
     def call_apply_edits(self,revision,operations):
         self.editing()
         if revision!=globals()['revision'](self.w.project):raise ValueError('Project changed. Refresh get_state before editing.')
@@ -495,6 +514,114 @@ class EditorAPI:
             old=next((k for k,v in self.jobs.items() if v['state']!='Running'),None)
             if old:self.jobs.pop(old)
         return self.jobs[key]
+    def call_track_object(self,revision,item_id,reference_source_time,region,anchors=None,
+                          mode=None,properties=None,sample_fps=15,search_radius=.22,
+                          confidence_threshold=.58,existing_effect_index=None):
+        self.editing()
+        if getattr(self.w.transport,'closed',False):raise ValueError('The editor is closing; object tracking cannot start.')
+        project=self.w.project
+        if revision!=globals()['revision'](project):raise ValueError('Project changed. Refresh get_state before tracking.')
+        item=project.item_by_id(item_id)
+        if not item or item.track not in project.video_tracks or project.track_states.get(item.track,{}).get('locked'):
+            raise ValueError('Select an unlocked video/image clip before tracking.')
+        media=project.media_by_id(item.media_id)
+        if not media or media.kind not in ('video','image') or not Path(media.path).is_file():
+            raise ValueError('Object tracking requires an available video or still-image source.')
+        if getattr(self.w,'_tracking_cancel',None) is not None:
+            raise ValueError('Another object analysis is running. Cancel it or wait for completion.')
+        from .object_tracking import analyze, validate as validate_analysis, _box
+        from .tracking_effect import NAME, default_effect, validate as validate_effect, export_error
+        if existing_effect_index is not None:
+            if (isinstance(existing_effect_index,bool) or not isinstance(existing_effect_index,int)
+                    or not 0<=existing_effect_index<len(item.effects) or item.effects[existing_effect_index].get('name')!=NAME):
+                raise ValueError('existing_effect_index must identify an Object Tracking effect on this clip.')
+            effect=copy.deepcopy(item.effects[existing_effect_index])
+            if mode is None:mode=effect.get('mode','Censor Bar')
+            previous_mode=effect.get('mode','Censor Bar')
+            effect['mode']=mode
+            if mode!=previous_mode:effect['loss_policy']=default_effect(mode)['loss_policy']
+        else:
+            mode=mode or 'Censor Bar'; effect=default_effect(mode)
+        if properties is None:properties={}
+        protected={'name','analysis','mode','enabled','loss_reviewed'}
+        if not isinstance(properties,dict) or set(properties)-set(default_effect(mode)) or set(properties)&protected:
+            raise ValueError('Unknown or protected tracking property. Supply appearance/loss-policy properties; analysis is generated locally.')
+        effect.update(copy.deepcopy(properties)); effect['analysis']={}; effect['loss_reviewed']=False
+        effect=validate_effect(effect)
+        region=_box(region)
+        def bounded_number(value,low,high,label):
+            if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or not low<=value<=high:
+                raise ValueError('Invalid object tracking '+label)
+            return float(value)
+        start=item.in_point; end=start+item.source_duration
+        reference_source_time=bounded_number(reference_source_time,start,end,'reference source time')
+        sample_fps=bounded_number(sample_fps,1,60,'sample rate')
+        search_radius=bounded_number(search_radius,.02,.6,'search radius')
+        confidence_threshold=bounded_number(confidence_threshold,.2,.95,'confidence threshold')
+        if anchors is None:anchors=[]
+        if not isinstance(anchors,list) or len(anchors)>128:raise ValueError('Provide at most 128 source-time correction anchors.')
+        anchors=copy.deepcopy(anchors)
+        for anchor in anchors:
+            if not isinstance(anchor,dict) or set(anchor)-{'time','box'} or 'box' not in anchor:
+                raise ValueError('Correction anchors require source time and normalized box only.')
+            anchor['time']=bounded_number(anchor.get('time'),start,end,'correction source time'); anchor['box']=_box(anchor['box'])
+        import threading
+        from .ui import Worker
+        snapshot=copy.deepcopy(item); media_snapshot=copy.deepcopy(media)
+        cancel=threading.Event(); job=self.new_job('Object Tracking'); job.update(progress=0.,message='Starting local object analysis',item_id=item.id,cancellable=True)
+        self._tracking_jobs[job['id']]=cancel; self.w._tracking_cancel=cancel
+        worker=Worker(lambda:analyze(media_snapshot,snapshot,reference_source_time,region,anchors,
+            lambda percent,message:worker.signals.progress.emit((percent,message)),cancel,
+            sample_fps=sample_fps,search_radius=search_radius,confidence_threshold=confidence_threshold))
+        def progress(value):
+            if job['state']=='Running':job.update(progress=max(0.,min(100.,float(value[0]))),message=str(value[1])[:500])
+        def done(analysis):
+            try:
+                if cancel.is_set():job.update(state='Cancelled',message='Tracking cancelled; clip unchanged.'); return
+                current=project.item_by_id(item.id)
+                source=project.media_by_id(item.media_id)
+                if (getattr(self.w.transport,'closed',False) or self.w.project is not project
+                        or current is not item or current!=snapshot or source is not media or source!=media_snapshot
+                        or self.w.current_page!=0 or self.w.delivery.running or QApplication.activeModalWidget()
+                        or project.track_states.get(item.track,{}).get('locked')
+                        or globals()['revision'](project)!=revision):
+                    raise ValueError('The project, clip, source, track or editor state changed during tracking. No changes were applied; refresh get_state and retry.')
+                if not validate_analysis(analysis):raise ValueError('Tracking returned an invalid or incomplete trajectory; no changes were applied.')
+                result_effect=copy.deepcopy(effect); result_effect.update(analysis=analysis,anchors=anchors,
+                    sample_fps=sample_fps,search_radius=search_radius,confidence_threshold=confidence_threshold,loss_reviewed=False)
+                stage=copy.deepcopy(project); target=stage.item_by_id(item.id)
+                if existing_effect_index is None:target.effects.append(result_effect); index=len(target.effects)-1
+                else:target.effects[existing_effect_index]=result_effect; index=existing_effect_index
+                # Validate the final effect combination, including a proposed
+                # Follow Crop, before touching the live project/history.
+                error=export_error(result_effect,stage.media_by_id(item.media_id),target)
+                if error:raise ValueError(error)
+                validate(stage)
+                self.install(stage)
+                job.update(state='Complete',progress=100.,message='Object Tracking applied; Undo available.',
+                    effect_index=index,mode=mode,sample_count=len(analysis['frames']),
+                    lost_samples=sum(frame['status']=='lost' for frame in analysis['frames']),
+                    revision=globals()['revision'](stage),undoable=True)
+            except Exception as error:job.update(state='Failed',error=str(error)[-2000:])
+        def failed(detail):
+            job.update(state='Cancelled' if cancel.is_set() else 'Failed',
+                       error='' if cancel.is_set() else str(detail)[-2000:],message='Tracking cancelled; clip unchanged.' if cancel.is_set() else 'Object analysis failed; clip unchanged.')
+        def finished():
+            if getattr(self.w,'_tracking_cancel',None) is cancel:self.w._tracking_cancel=None
+            self._tracking_jobs.pop(job['id'],None); job.update(cancellable=False,finished=time.time())
+        worker.signals.progress.connect(progress); worker.signals.result.connect(done)
+        worker.signals.error.connect(failed); worker.signals.finished.connect(finished)
+        try:self.w.start_worker(worker)
+        except Exception:
+            cancel.set(); finished(); job.update(state='Failed',error='Could not start object tracking worker.'); raise
+        return dict(job)
+    def call_tracking_job_control(self,job_id,operation):
+        if operation!='cancel':raise ValueError('Use cancel for an Object Tracking job.')
+        cancel=self._tracking_jobs.get(job_id); job=self.jobs.get(job_id)
+        if cancel is None or job is None or job['state'] not in ('Running','Cancelling'):
+            raise ValueError('This Object Tracking job is not running.')
+        cancel.set(); job.update(state='Cancelling',message='Cancelling object analysis; waiting for source handles to close.')
+        return dict(job)
     def call_import_media(self,paths):
         self.editing()
         if not isinstance(paths,list) or not 1<=len(paths)<=100:raise ValueError('Provide 1–100 local media paths')

@@ -336,6 +336,7 @@ class PreviewCanvas(QWidget):
         from types import SimpleNamespace
         from .preview_raster import RasterContext
         from .vision_effects import active
+        from .tracking_effect import active as tracking_active
         from .visual_fx import evaluate_visual_fx
         project=self.project
         if not project or getattr(self,'caption_focus',False):return None
@@ -343,7 +344,7 @@ class PreviewCanvas(QWidget):
         for track in project.video_tracks:
             item=self._active(track)
             if not item or self.active_frames.get(item.id)!=key:continue
-            if item.keyframes or active(item):continue
+            if item.keyframes or active(item) or tracking_active(item):continue
             if project.transition_at_time(track,project.playhead):continue
             if evaluate_visual_fx(item,project.playhead-item.start,project.settings.width,project.settings.height).is_active:continue
             if item.role!='background' and not self._has_pixel_effects(item):continue
@@ -632,6 +633,8 @@ class PreviewCanvas(QWidget):
                 target = frame_rect if item.role == "background" else self._layer_rect(item, image, frame_rect, item.role == "facecam")
                 from .vision_effects import status as vision_status
                 notice = vision_status(item, media, item.source_time(self.project.playhead))
+                from .tracking_effect import status as tracking_status
+                notice = tracking_status(item, media, item.source_time(self.project.playhead)) or notice
                 if notice:
                     vision_notice = notice
                 self._draw_layer_item(painter, item, image, target, frame_rect)

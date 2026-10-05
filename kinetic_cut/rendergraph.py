@@ -82,8 +82,10 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
                 return math.ceil(min(8192,max(32,dimension*curve_maximum(vfx_item,name)))/2)*2+2
             return f",pad={maximum('scale',base_w)}:{maximum('scale_y',base_h)}:(ow-iw)/2:(oh-ih)/2:color=black@0:eval=frame"
         from .vision_effects import active as vision_active
+        from .tracking_effect import active as tracking_active
         processed=(prepared or {}).get(item.id)
         if vision_active(item) and not processed:raise ValueError('Face/background effects must be prepared before building the render command.')
+        if tracking_active(item) and not processed:raise ValueError('Object tracking effects must be analysed and prepared before building the render command.')
         from .chroma import NAMES
         opaque=(media.kind=='video' and item.composite_mode=='Normal' and item.opacity==100 and item.fade_in==0 and item.fade_out==0 and item.crop_softness==0 and item.transform.shape!='circle' and abs(item.transform.rotation)<.01 and abs(item.transform.pitch)<.01 and abs(item.transform.yaw)<.01 and not any(e.get('enabled',True) and e.get('name') in NAMES for e in item.effects))
         opaque=opaque and not processed and not animated and not media.has_alpha and not media.compound

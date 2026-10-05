@@ -13,6 +13,7 @@ CATALOG = {
     "Video Transitions": TRANSITION_NAMES,
     "Open FX / Blur": ["Gaussian Blur"],
     "Transform": ["Circle Facecam"],
+    "Tracking": ["Object Tracking"],
     "Keying": ["Chroma Key", "Green Screen"],
     "Person / Background": ["Remove Person Background"],
     "Face Filters": ["Big Eyes", "Big Nose", "Big Lips", "Face Twist", "Custom Face", "Puppy Ears & Nose", "Cat Ears & Whiskers", "AR Plague Mask", "AR Pixel Glasses"],
@@ -33,6 +34,7 @@ TITLES = set(CATALOG["Titles"])
 GRAPHICS = set(CATALOG["Graphics"])
 
 EFFECT_ICONS = {
+    "Object Tracking": "crosshair",
     "Puppy Ears & Nose": "smile",
     "Cat Ears & Whiskers": "smile",
     "AR Plague Mask": "smile",
@@ -99,6 +101,7 @@ MATRICES = {
 }
 ADJUSTABLE = set(MATRICES) | {"Voice Clarity", "Low Cut"}
 DESCRIPTIONS = {
+    "Object Tracking": "Follow a selected region with censor blur, pixelation, a censor bar, arrows, outlines, labels, an image or a following crop. Analyse locally and refine with correction points.",
     **TRANSITION_DESCRIPTIONS,
     # Visual FX - Zooms
     "Punch Zoom": "Dynamic quick punch-in zoom to emphasize a punchline or moment. Fully adjustable duration, scale, and focal center.",
@@ -196,6 +199,7 @@ CATEGORY_STYLE = {
     "Keying": ("palette", "#7ab6a0"),
     "Open FX / Blur": ("wand-sparkles", "#a6a0d8"),
     "Transform": ("crop", "#7eafdc"),
+    "Tracking": ("crosshair", "#7eafdc"),
     "Colour": ("sparkles", "#d8ad78"),
     "Titles": ("captions", "#d5bd87"),
     "Audio": ("audio-waveform", "#7ab6a0"),

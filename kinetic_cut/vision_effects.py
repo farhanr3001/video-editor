@@ -209,7 +209,8 @@ def decoded_frames(stream,size,cancel,timeout=90):
     finally:finished.set()
 
 def prepare_export(project,ffmpeg,progress,cancel):
-    if not any(active(item) for item in project.timeline):return {}
+    from .tracking_effect import render_effects as tracking_active, apply as apply_tracking, export_error as tracking_export_error, prune as prune_tracking, follow_effect, effective_crop, crop_source, VISION_CONFLICT_ERROR
+    if not any(active(item) or tracking_active(item) for item in project.timeline):return {}
     import threading
     cancel=cancel or threading.Event()
     from .config import CACHE_DIR
@@ -222,24 +223,39 @@ def prepare_export(project,ffmpeg,progress,cancel):
     result={}
     for item in project.timeline:
         effects=active(item)
-        if not effects or item.muted or not project.track_states.get(item.track,{}).get('visible',True):continue
+        tracking=tracking_active(item)
+        if not (effects or tracking) or item.muted or not project.track_states.get(item.track,{}).get('visible',True):continue
+        if effects and follow_effect(item):raise ValueError(VISION_CONFLICT_ERROR)
         media=project.media_by_id(item.media_id)
         if not media or any(not valid_effect(e,media,item) for e in effects):raise ValueError('Face/background analysis is missing or the crop/source changed. Select the clip and click Re-analyse in Effects before exporting.')
+        for effect in tracking:
+            error=tracking_export_error(effect,media,item)
+            if error:raise ValueError(error)
         if any(e['name']=='Remove Person Background' for e in effects):
             analysis=effects[0]['analysis']
             for index in range(frame_index(analysis,item.in_point),frame_index(analysis,item.in_point+item.source_duration)+1):
                 check_cancel(cancel)
                 if mask_image(analysis['root'],index).isNull():raise ValueError('Background analysis cache is missing or damaged. Select the clip and click Re-analyse in Effects.')
-        fps=max(1,min(60,project.settings.fps/max(.05,item.speed))); crop=item.crop.clamped(); width=max(2,int(media.width*crop.width)//2*2); height=max(2,int(media.height*crop.height)//2*2)
-        key=hashlib.sha256(json.dumps([fingerprint(media),vars(crop),item.in_point,item.source_duration,fps,effects],sort_keys=True).encode()).hexdigest()
-        target=CACHE_DIR/'vision-renders'/(key+'.mkv'); target.parent.mkdir(parents=True,exist_ok=True)
+        fps=max(1,project.settings.fps/max(.05,item.speed)) if tracking else max(1,min(60,project.settings.fps/max(.05,item.speed)))
+        from .model import Crop
+        crop=Crop() if tracking and item.role=='background' and not effects else item.crop.clamped()
+        width=max(2,int(media.width*crop.width)//2*2); height=max(2,int(media.height*crop.height)//2*2)
+        assets=[]
+        for effect in tracking:
+            if effect.get('mode')=='Image':
+                asset=Path(effect['image']); stat=asset.stat(); assets.append((str(asset),stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns))
+        follow=bool(follow_effect(item))
+        key=hashlib.sha256(json.dumps([fingerprint(media),vars(crop),item.in_point,item.source_duration,fps,effects]+([2,tracking,assets] if tracking else []),sort_keys=True).encode()).hexdigest()
+        target=CACHE_DIR/'vision-renders'/(('track-' if tracking else '')+key+'.mkv'); target.parent.mkdir(parents=True,exist_ok=True)
         if target.is_file():result[item.id]=str(target); continue
         import shutil
         needed=max(50*1024**2,int(width*height*4*item.source_duration*fps/3))
         if shutil.disk_usage(target.parent).free<needed:raise RuntimeError(f'Please free about {needed/1024**3:.1f} GB for this lossless effect render cache.')
-        if progress:progress(0,'Preparing cached face/background frames…')
+        if progress:progress(0,'Preparing object tracking frames…' if tracking else 'Preparing cached face/background frames…')
         inputs=['-loop','1'] if media.kind=='image' else ['-ss',str(item.in_point)]
-        command=[ffmpeg,'-v','error']+inputs+['-i',media.path,'-t',str(item.source_duration),'-vf',_crop_filter(item)+f',scale={width}:{height},fps={fps:.6f}','-an','-pix_fmt','rgba','-f','rawvideo','pipe:1']
+        decode_width,decode_height=(media.width,media.height) if follow else (width,height)
+        crop_filter='null' if follow or crop==Crop() else _crop_filter(item)
+        command=[ffmpeg,'-v','error']+inputs+['-i',media.path,'-t',str(item.source_duration),'-vf',crop_filter+f',scale={decode_width}:{decode_height},fps={fps:.6f}','-an','-pix_fmt','rgba','-f','rawvideo','pipe:1']
         with tempfile.TemporaryDirectory(prefix='vision-render-',dir=target.parent) as directory:
             pending=Path(directory)/'effect.mkv'
             with (Path(directory)/'decode.log').open('wb') as log:
@@ -248,12 +264,16 @@ def prepare_export(project,ffmpeg,progress,cancel):
                     with av.open(str(pending),'w') as movie:
                         stream=movie.add_stream('ffv1',rate=Fraction(str(round(fps,6)))); stream.width=width; stream.height=height; stream.pix_fmt='bgra'; stream.options={'level':'3'}
                         n=0
-                        for raw in decoded_frames(decoder.stdout,width*height*4,cancel):
-                            image=QImage(raw,width,height,width*4,QImage.Format_RGBA8888).copy(); image=apply(image,item,media,item.in_point+n/fps)
+                        for raw in decoded_frames(decoder.stdout,decode_width*decode_height*4,cancel):
+                            source_time=item.in_point+n/fps
+                            image=QImage(raw,decode_width,decode_height,decode_width*4,QImage.Format_RGBA8888).copy()
+                            if follow:image=crop_source(image,item,media,source_time,crop,(width,height))
+                            image=apply(image,item,media,source_time)
+                            if tracking:image=apply_tracking(image,item,media,source_time,effective_crop(item,media,source_time,crop))
                             pixels=np.frombuffer(image.constBits(),dtype=np.uint8).reshape(height,width,4); frame=av.VideoFrame.from_ndarray(pixels,format='rgba'); frame.pts=n
                             for packet in stream.encode(frame):movie.mux(packet)
                             n+=1
-                            if n%15==0 and progress:progress(0,f'Preparing face/background frames · {n/fps:.1f}s / {item.source_duration:.1f}s')
+                            if n%15==0 and progress:progress(0,f'Preparing {"object tracking" if tracking else "face/background"} frames · {n/fps:.1f}s / {item.source_duration:.1f}s')
                         for packet in stream.encode():movie.mux(packet)
                     if decoder.wait(timeout=15) or n==0:raise RuntimeError('Could not decode this clip for effect rendering.')
                 finally:
@@ -261,4 +281,5 @@ def prepare_export(project,ffmpeg,progress,cancel):
                     job.close(); decoder.stdout.close()
             check_cancel(cancel); pending.replace(target)
         result[item.id]=str(target)
+    if any(tracking_active(item) for item in project.timeline):prune_tracking(CACHE_DIR/'vision-renders',set(result.values()))
     return result

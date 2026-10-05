@@ -580,6 +580,10 @@ class Project:
             import os
             def relative_sources(body):
                 for item in body.get('timeline',body.get('items',[])):
+                    for effect in item.get('effects',[]):
+                        if effect.get('name')=='Object Tracking' and effect.get('image'):
+                            try:effect['image']=os.path.relpath(effect['image'],target.parent)
+                            except ValueError:pass
                     for node in item.get('graphic_data',{}).get('scene',{}).get('nodes',[]):
                         if node.get('kind')=='image' and node.get('source'):
                             try:node['source']=os.path.relpath(node['source'],target.parent)
@@ -608,6 +612,8 @@ class Project:
             base = Path(path).resolve().parent
             def absolute_sources(body):
                 for item in body.get('timeline',body.get('items',[])):
+                    for effect in item.get('effects',[]):
+                        if effect.get('name')=='Object Tracking' and effect.get('image') and not Path(effect['image']).is_absolute():effect['image']=str((base/effect['image']).resolve())
                     for node in item.get('graphic_data',{}).get('scene',{}).get('nodes',[]):
                         if node.get('kind')=='image' and node.get('source') and not Path(node['source']).is_absolute():node['source']=str((base/node['source']).resolve())
                 for media in body.get("media", []):
