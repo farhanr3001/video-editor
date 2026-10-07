@@ -152,7 +152,7 @@ class MediaDownloaderDialogTests(unittest.TestCase):
         from kinetic_cut.downloader_dialog import _FetchMetadataWorker
         worker = _FetchMetadataWorker("https://www.youtube.com/shorts/test123")
         # Unit-test the fallback, not this PC's installed Node/browser/cookie paths.
-        with patch("subprocess.run") as mock_run, patch("kinetic_cut.downloader_dialog.fetch_youtube_oembed") as mock_oembed, patch("kinetic_cut.downloader_dialog.get_ytdlp_runtime_args", return_value=[]):
+        with patch("kinetic_cut.downloader_dialog._capture_process") as mock_run, patch("kinetic_cut.downloader_dialog.fetch_youtube_oembed") as mock_oembed, patch("kinetic_cut.downloader_dialog.get_ytdlp_runtime_args", return_value=[]):
             mock_proc = MagicMock()
             mock_proc.returncode = 1
             mock_proc.stdout = ""

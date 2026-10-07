@@ -14,6 +14,24 @@ class CaptionBackendError(RuntimeError):
     pass
 
 
+class CaptionCancelled(InterruptedError):
+    """Cancellation is terminal; it must never trigger another speech engine."""
+
+
+def _check_cancel(cancel_check):
+    if cancel_check and cancel_check():raise CaptionCancelled('Caption generation cancelled')
+
+
+def run_caption_process(command, cancel_check=None, **kwargs):
+    """Cooperative subprocess cancellation without blocking on silent tools."""
+    if cancel_check is None:return run_process(command,**kwargs)
+    from .process import run_cancellable
+    _check_cancel(cancel_check)
+    try:
+        return run_cancellable(command,cancel_check=cancel_check,**kwargs)
+    except InterruptedError as error:raise CaptionCancelled('Caption generation cancelled') from error
+
+
 def _from_segments(segments: list[dict], offset: float = 0.0,
                    style: CaptionStyle | None = None, words_per_caption: int = 5,
                    hold_seconds: float = .5) -> list[Caption]:
@@ -52,42 +70,54 @@ def _from_segments(segments: list[dict], offset: float = 0.0,
 
 def transcribe(path: str, settings: dict, offset: float = 0.0,
                progress=None, words_per_caption: int = 5,
-               hold_seconds: float = .5, require_word_timestamps: bool = False) -> tuple[list[Caption], str]:
+               hold_seconds: float = .5, require_word_timestamps: bool = False,
+               cancel_check=None) -> tuple[list[Caption], str]:
     """Transcribe locally, preferring faster-whisper, then whisper.cpp, then Windows Speech."""
     faster_error = ""
+    _check_cancel(cancel_check)
     try:
         from faster_whisper import WhisperModel  # type: ignore
         if progress:
             progress("Loading local Whisper model…")
+        _check_cancel(cancel_check)
         from .caption_runtime import model_arguments
         model_name, model_options = model_arguments(settings.get("whisper_model", "small.en"))
         model = WhisperModel(model_name, device="cpu", compute_type="int8", **model_options)
+        _check_cancel(cancel_check)
         # Never concatenate distant speech islands. Restoring timestamps after
         # VAD concatenation can attach the first word after a pause to the
         # previous island (e.g. "feels" arriving four seconds too early).
         from faster_whisper.audio import decode_audio
         from faster_whisper.vad import get_speech_timestamps, VadOptions
         audio=decode_audio(path, sampling_rate=16000)
+        _check_cancel(cancel_check)
         regions=get_speech_timestamps(audio,VadOptions(min_silence_duration_ms=700,speech_pad_ms=200))
+        _check_cancel(cancel_check)
         data=[]
         for region in regions:
+            _check_cancel(cancel_check)
             origin=region["start"]/16000
             segments,_=model.transcribe(audio[region["start"]:region["end"]],
                 language=settings.get("caption_language","en"),vad_filter=False,
                 word_timestamps=True,condition_on_previous_text=False)
             for segment in segments:
+                _check_cancel(cancel_check)
                 if progress:progress((45+round(45*min(1,(origin+segment.end)/max(.01,len(audio)/16000))),f"Transcribing… {origin+segment.end:.1f}s / {len(audio)/16000:.1f}s"))
+                _check_cancel(cancel_check)
                 words=[word for word in (getattr(segment,"words",None) or []) if str(getattr(word,"word","")).strip() and word.end>word.start]
                 if not words and require_word_timestamps:
                     raise CaptionBackendError("The recognizer returned no word-level timestamps; audio was not changed.")
                 data.append({"start":origin+segment.start,"end":origin+segment.end,"text":segment.text,
                     "words":[{"start":origin+word.start,"end":origin+word.end,"text":word.word} for word in words]})
+        _check_cancel(cancel_check)
         return _from_segments(data,offset,words_per_caption=words_per_caption,hold_seconds=hold_seconds), "faster-whisper"
+    except CaptionCancelled:raise
     except Exception as error:
         # A model may not be downloaded yet or a machine may lack a compatible
         # runtime. Continue to configured whisper.cpp / Windows Speech fallbacks.
         faster_error = str(error)
 
+    _check_cancel(cancel_check)
     if require_word_timestamps:
         raise CaptionBackendError("Cut curse words requires the local faster-whisper engine and its speech model for word-level timestamps. Configure/download the caption engine first; audio was not changed. " + faster_error)
 
@@ -100,10 +130,11 @@ def transcribe(path: str, settings: dict, offset: float = 0.0,
             output = str(Path(directory) / "captions")
             command = [cli, "-m", model_path, "-f", path, "-oj", "-of", output,
                        "-l", settings.get("caption_language", "en")]
-            result = run_process(command, capture_output=True, text=True)
+            result = run_caption_process(command,cancel_check,capture_output=True,text=True)
             if result.returncode:
                 raise CaptionBackendError(result.stderr[-1000:])
             payload = json.loads(Path(output + ".json").read_text(encoding="utf-8"))
+            _check_cancel(cancel_check)
             segments = []
             for item in payload.get("transcription", []):
                 timestamps = item.get("timestamps", {})
@@ -114,7 +145,7 @@ def transcribe(path: str, settings: dict, offset: float = 0.0,
 
     if __import__("sys").platform == "win32":
         try:
-            return _windows_speech(path,settings.get("ffmpeg","ffmpeg"),offset,words_per_caption,hold_seconds), "Windows Speech"
+            return _windows_speech(path,settings.get("ffmpeg","ffmpeg"),offset,words_per_caption,hold_seconds,cancel_check), "Windows Speech"
         except CaptionBackendError as error:
             detail = f" Local Whisper: {faster_error}" if faster_error else ""
             raise CaptionBackendError(str(error) + detail) from error
@@ -123,11 +154,11 @@ def transcribe(path: str, settings: dict, offset: float = 0.0,
 
 
 def _windows_speech(path: str, ffmpeg: str, offset: float, words_per_caption: int = 5,
-                    hold_seconds: float = .5) -> list[Caption]:
+                    hold_seconds: float = .5, cancel_check=None) -> list[Caption]:
     with tempfile.TemporaryDirectory(prefix="kinetic-speech-") as directory:
         wav = str(Path(directory) / "speech.wav")
-        run_process([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", path,
-                        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav], check=True)
+        run_caption_process([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", path,
+                        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav], cancel_check,check=True)
         script = r'''
 param([string]$InputWav)
 Add-Type -AssemblyName System.Speech
@@ -145,8 +176,8 @@ $items | ConvertTo-Json -Compress
 '''
         script_path = Path(directory) / "recognize.ps1"
         script_path.write_text(script, encoding="utf-8")
-        result = run_process(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                                 "-File", str(script_path), wav], capture_output=True, text=True)
+        result = run_caption_process(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                                 "-File", str(script_path), wav], cancel_check,capture_output=True,text=True)
         if result.returncode:
             raise CaptionBackendError("Windows Speech Recognition is unavailable: " + result.stderr[-600:])
         try:
@@ -155,6 +186,7 @@ $items | ConvertTo-Json -Compress
                 payload = [payload]
         except json.JSONDecodeError as error:
             raise CaptionBackendError("Windows Speech returned no usable transcript.") from error
+        _check_cancel(cancel_check)
         return _from_segments(payload,offset,words_per_caption=words_per_caption,hold_seconds=hold_seconds)
 
 

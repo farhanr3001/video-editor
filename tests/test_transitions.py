@@ -1,6 +1,7 @@
 """Comprehensive tests for the Video Transitions system."""
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from PySide6.QtCore import Qt, QPointF, QRectF
 from PySide6.QtGui import QImage, QPainter, QColor
 from PySide6.QtWidgets import QApplication
@@ -264,12 +265,19 @@ class TestExportFiltergraphSynthesis(unittest.TestCase):
 class MockWindow:
     def __init__(self, project):
         self.project = project
+        self.settings = {}
+        self.timeline = SimpleNamespace(selected_ids=set(), selected_caption_ids=set(),
+                                        selected_transition_id='',
+                                        viewport=lambda: SimpleNamespace(update=lambda: None))
         self._property_scrubbing = False
 
     def flush_text_edit(self):
         pass
 
     def commit_history(self):
+        pass
+
+    def text_edited(self):
         pass
 
 

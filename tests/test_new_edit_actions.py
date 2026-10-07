@@ -10,6 +10,9 @@ from PySide6.QtTest import QTest
 from kinetic_cut.model import Project,MediaItem,TimelineItem,Caption,CaptionStyle
 from kinetic_cut.timeline_actions import delete_gaps,aligned_linked_av,keep_audio_ranges,complement
 from kinetic_cut.profanity import censor_text,contains_curse
+# Initialize native Qt SVG bindings before the speech-service sys.modules mock.
+# Restoring that mock must not unload/reimport a native PySide extension.
+from kinetic_cut.icons import resource_path
 
 
 class NewActionModelTests(unittest.TestCase):

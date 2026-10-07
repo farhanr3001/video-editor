@@ -41,8 +41,9 @@ def reanalyse_pasted(window,targets,context='pasted'):
         window._vision_busy=False; window._vision_cancel=None
         if not window.transport.closed:dialog.close()
     def done(results):
+        cancelled=cancel.is_set()
         finish()
-        if window.transport.closed or window.project is not project:return
+        if cancelled or window.transport.closed or window.project is not project:return
         count=0
         for snapshot,info in results:
             item=project.item_by_id(snapshot.id)
@@ -55,7 +56,7 @@ def reanalyse_pasted(window,targets,context='pasted'):
         finish()
         if not window.transport.closed:window.statusBar().showMessage(f'{context.title()} effects still need Re-analyse: '+('cancelled' if cancel.is_set() else detail[-350:]),10000)
     def update(value):
-        if not window.transport.closed:dialog.setValue(round(value[0])); dialog.setLabelText(value[1])
+        if not cancel.is_set() and not window.transport.closed:dialog.setValue(round(value[0])); dialog.setLabelText(value[1])
     worker=Worker(work); worker.signals.progress.connect(update); worker.signals.result.connect(done); worker.signals.error.connect(failed); window.start_worker(worker)
 
 def begin(window,name=None,reanalyse=False):
@@ -122,11 +123,13 @@ def begin(window,name=None,reanalyse=False):
         component.install(progress,cancel,root)
         return component.analyse(root,asset,snapshot,fps,destination,ffmpeg,progress,cancel)
     def update(value):
-        if not window.transport.closed:dialog.setValue(round(value[0])); dialog.setLabelText(value[1])
+        if not cancel.is_set() and not window.transport.closed:dialog.setValue(round(value[0])); dialog.setLabelText(value[1])
     def finish():
         window._vision_busy=False; window._vision_cancel=None
         if not window.transport.closed:dialog.close()
-    def done(info):finish(); commit(info)
+    def done(info):
+        cancelled=cancel.is_set(); finish()
+        if not cancelled:commit(info)
     def failed(detail):
         cancelled=cancel.is_set(); finish()
         if window.transport.closed:return
