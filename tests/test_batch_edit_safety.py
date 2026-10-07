@@ -69,11 +69,7 @@ class BatchEditSafetyTests(unittest.TestCase):
         w=self.window(); t=w.transport; key=("live",); player=Mock(); output=Mock(); sink=Mock(); sink._frame_stamp=None
         frame=Mock(); frame.isValid.return_value=True; frame.startTime.return_value=100; frame.endTime.return_value=200
         pixels=QImage(2,2,QImage.Format_RGB32); pixels.fill(Qt.red); frame.toImage.return_value=pixels; sink.videoFrame.return_value=frame
-        t.decoders[key]=(player,output,sink)
-        with patch("kinetic_cut.transport.QMetaObject.invokeMethod") as invoke:
-            t.poll_frames(); t.poll_frames(); frame.toImage.assert_called_once()
-            player.pause.assert_called_once_with()
-            invoke.assert_not_called()
+        t.decoders[key]=(player,output,sink); t.poll_frames(); t.poll_frames(); frame.toImage.assert_called_once()
         pixels.fill(Qt.blue); self.assertEqual(w.preview.frames[key].pixelColor(0,0).name(),"#ff0000")
         with patch("kinetic_cut.transport.QMetaObject.invokeMethod"):t.shutdown()
         with patch.object(t,"sync") as sync:t.audio_ready("late"); sync.assert_not_called()

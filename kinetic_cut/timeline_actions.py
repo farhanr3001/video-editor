@@ -31,35 +31,6 @@ def fragment(item,a,b,start):
     return result
 
 
-def transition_edges(transitions,replacements,time_map=None):
-    """Keep transitions attached to surviving outer edges of replaced clips.
-
-    Each replacement stores the new clip ID and the timeline shift of its
-    edge. Local packing can separate a clip from an unchanged neighbour; that
-    former joining transition has no valid cut after the edit.
-    """
-    result=[]
-    for original in transitions:
-        clone=copy.deepcopy(original); deltas=[]; missing=False
-        for attr,edge in (('left_item_id','left'),('right_item_id','right')):
-            identifier=getattr(original,attr)
-            if not identifier:continue
-            replacement=replacements.get((identifier,edge),(identifier,0.))
-            if replacement is None:missing=True; break
-            setattr(clone,attr,replacement[0]); deltas.append(replacement[1])
-        if missing:continue
-        if time_map:
-            clone.start=time_map(original.start)
-            clone.duration=time_map(original.start+original.duration)-clone.start
-            if clone.duration<.05-1e-7:continue
-            clone.duration=max(.05,clone.duration)
-        elif deltas:
-            if max(deltas)-min(deltas)>1e-7:continue
-            clone.start=max(0.,clone.start+deltas[0])
-        result.append(clone)
-    return result
-
-
 def aligned_linked_av(project,audio):
     if not audio or audio.track not in project.audio_tracks:
         raise ValueError("Drop Remove Silence onto an audio clip linked to a video clip.")
@@ -79,24 +50,16 @@ def keep_audio_ranges(project,audio,keep,pack=False):
     if any(project.track_states.get(i.track,{}).get("locked") for i in targets):raise ValueError("Unlock the audio layer first.")
     keep=merge_ranges((max(0,a),min(audio.duration,b)) for a,b in keep)
     if keep==[(0,audio.duration)]:return []
-    generated=[]; cursor=audio.start; replacements={}
-    for item in targets:
-        replacements[(item.id,'left')]=None
-        replacements[(item.id,'right')]=None
+    generated=[]; cursor=audio.start
     for a,b in keep:
         group=uid()
         for item in targets:
             clip=fragment(item,a,b,cursor if pack else item.start+a)
             clip.group_id=group; clip.link_id=group if pack else ""
             generated.append(clip)
-            if a<1e-7:replacements[(item.id,'right')]=(clip.id,clip.start-item.start)
-            if b>=item.duration-1e-7:
-                replacements[(item.id,'left')]=(clip.id,clip.start+clip.duration-item.start-item.duration)
         if pack:cursor+=b-a
     ids={i.id for i in targets}
-    transitions=transition_edges(project.transitions,replacements)
     project.timeline=[i for i in project.timeline if i.id not in ids]+generated
-    project.transitions=transitions
     project.touch(); return [i.id for i in generated]
 
 
@@ -133,28 +96,20 @@ def delete_gaps(project):
     affected=[i for i in project.timeline if i.start+i.duration>gaps[0][0]]
     if any(project.track_states.get(i.track,{}).get("locked") for i in affected) or (project.track_states.get("subtitle_1",{}).get("locked") and any(c.end>gaps[0][0] for c in project.captions)):
         raise ValueError("Unlock the affected layers before deleting gaps; nothing was changed.")
-    timeline=[]; media={m.id:m for m in project.media}; replacements={}
+    timeline=[]; media={m.id:m for m in project.media}
     for item in project.timeline:
         cuts=[(a-item.start,b-item.start) for a,b in gaps]
         keep=complement(item.duration,cuts)
         if keep==[(0,item.duration)]:
             clip=copy.deepcopy(item); clip.start=mapped(item.start); timeline.append(clip); continue
         if item.role in {"title", "graphic"} or (media.get(item.media_id) and media[item.media_id].kind=="image"):
-            replacements[(item.id,'left')]=None; replacements[(item.id,'right')]=None
             if mapped(item.start+item.duration)>mapped(item.start):
                 clip=copy.deepcopy(item); clip.start=mapped(item.start); clip.duration=mapped(item.start+item.duration)-clip.start
                 from .keyframes import clean
                 clip.keyframes=clean({name:[dict(k,time=mapped(item.start+k['time'])-clip.start) for k in keys] for name,keys in item.keyframes.items()})
                 clip.fade_in=min(clip.fade_in,clip.duration); clip.fade_out=min(clip.fade_out,clip.duration); timeline.append(clip)
-                replacements[(item.id,'right')]=(clip.id,clip.start-item.start)
-                replacements[(item.id,'left')]=(clip.id,clip.start+clip.duration-item.start-item.duration)
         else:
-            replacements[(item.id,'left')]=None; replacements[(item.id,'right')]=None
-            for a,b in keep:
-                clip=fragment(item,a,b,mapped(item.start+a)); timeline.append(clip)
-                if a<1e-7:replacements[(item.id,'right')]=(clip.id,clip.start-item.start)
-                if b>=item.duration-1e-7:
-                    replacements[(item.id,'left')]=(clip.id,clip.start+clip.duration-item.start-item.duration)
+            timeline.extend(fragment(item,a,b,mapped(item.start+a)) for a,b in keep)
     captions=[]
     for original in project.captions:
         cap=copy.deepcopy(original); cap.start=mapped(cap.start); cap.end=mapped(cap.end)
@@ -162,7 +117,6 @@ def delete_gaps(project):
             word['start']=mapped(original.start+word['start'])-cap.start
             word['end']=mapped(original.start+word['end'])-cap.start
         if cap.end>cap.start:captions.append(cap)
-    transitions=transition_edges(project.transitions,replacements,mapped)
-    project.timeline=timeline; project.captions=captions; project.transitions=transitions; project.playhead=mapped(project.playhead)
+    project.timeline=timeline; project.captions=captions; project.playhead=mapped(project.playhead)
     project.mark_in=mapped(project.mark_in); project.mark_out=mapped(project.mark_out); project.touch()
     return sum(b-a for a,b in gaps),gaps

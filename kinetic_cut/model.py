@@ -303,10 +303,6 @@ class Project:
         shift(right,offset)
         item.duration = offset
         self.timeline.append(right)
-        # The new right fragment owns the original outgoing edge. Incoming
-        # transitions remain attached to the original left fragment.
-        for transition in self.transitions:
-            if transition.left_item_id == item.id:transition.left_item_id = right.id
         self.touch()
         return [item, right]
 
@@ -384,7 +380,7 @@ class Project:
     def overwrite(self, placed_ids: Iterable[str]) -> None:
         """Subtract placed intervals from other clips on their destination lanes."""
         placed=set(placed_ids); cutters=[i for i in self.timeline if i.id in placed]
-        survivors=[]; fragments=[]; edge_replacements={}
+        survivors=[]; fragments=[]
         for original in self.timeline:
             if original.id in placed or self.track_states.get(original.track,{}).get("locked"):
                 survivors.append(original); continue
@@ -409,10 +405,6 @@ class Project:
                 item.fade_in=min(item.duration,original.fade_in) if abs(a-original.start)<1e-7 else 0
                 item.fade_out=min(item.duration,original.fade_out) if abs(b-original.start-original.duration)<1e-7 else 0
                 item.link_id=""; survivors.append(item); fragments.append((item,key,round(a,6),round(b,6)))
-                if abs(a-original.start)<1e-7:edge_replacements[(original.id,'right')]=item.id
-                if abs(b-original.start-original.duration)<1e-7:edge_replacements[(original.id,'left')]=item.id
-            edge_replacements.setdefault((original.id,'right'),'')
-            edge_replacements.setdefault((original.id,'left'),'')
         # Symmetric AV fragments remain paired; asymmetric overwrites unlink them.
         groups={}
         for item,key,a,b in fragments:
@@ -421,14 +413,7 @@ class Project:
             if len(group)>1:
                 link=uid()
                 for item in group:item.link_id=link
-        self.timeline=survivors
-        transitions=[]
-        for transition in self.transitions:
-            left=edge_replacements.get((transition.left_item_id,'left'),transition.left_item_id)
-            right=edge_replacements.get((transition.right_item_id,'right'),transition.right_item_id)
-            if (transition.left_item_id and not left) or (transition.right_item_id and not right):continue
-            transition.left_item_id=left; transition.right_item_id=right; transitions.append(transition)
-        self.transitions=transitions; self.touch()
+        self.timeline=survivors; self.touch()
 
     def overwrite_captions(self,placed_ids,notify=True):
         """Subtract placed subtitle intervals while retaining unaffected tails."""
@@ -465,7 +450,6 @@ class Project:
         last = max([i.start + i.duration for i in removed]+[c.end for c in removed_captions])
         ids={i.id for i in removed}
         self.timeline = [i for i in self.timeline if i.id not in ids]
-        self.transitions = [t for t in self.transitions if t.left_item_id not in ids and t.right_item_id not in ids]
         self.captions = [c for c in self.captions if c.id not in caption_ids]
         if ripple:
             gap = last - first
@@ -476,9 +460,6 @@ class Project:
                 if caption.start >= last - 0.001 and not self.track_states.get("subtitle_1",{}).get("locked"):
                     caption.start -= gap
                     caption.end -= gap
-            for transition in self.transitions:
-                if transition.start >= last - .001 and not self.track_states.get(transition.track,{}).get('locked'):
-                    transition.start = max(first, transition.start-gap)
         self.touch()
 
     def ripple_ranges(self, group_id: str, keep: list[tuple[float, float]], item_id=None) -> None:
@@ -582,24 +563,20 @@ class Project:
         tracks = self.video_tracks if track in self.video_tracks else self.audio_tracks if track in self.audio_tracks else []
         if len(tracks) <= 1:return False
         tracks.remove(track); self.timeline=[i for i in self.timeline if i.track != track]
-        self.transitions=[t for t in self.transitions if t.track != track]
         self.track_states.pop(track,None); self.track_names.pop(track,None); self.touch(); return True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def save(self, path: str | Path | None = None) -> Path:
-        destination = path or self.path
-        if not destination or not str(destination).strip():
+        target = Path(path or self.path)
+        if not str(target):
             raise ValueError("A project path is required")
-        target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
+        self.path = str(target)
+        self.touch()
         pending = target.with_suffix(target.suffix + ".tmp")
         document = self.to_dict()
-        # Save As is a publication transaction. A denied/full destination must
-        # not re-associate the live edit with a file that was never written.
-        document['path'] = str(target)
-        document['modified_at'] = time.time()
         if self.portable_media:
             import os
             def relative_sources(body):
@@ -627,8 +604,6 @@ class Project:
             relative_sources(document)
         pending.write_text(json.dumps(document, indent=2), encoding="utf-8")
         pending.replace(target)
-        self.path = document['path']
-        self.modified_at = document['modified_at']
         return target
 
     @classmethod

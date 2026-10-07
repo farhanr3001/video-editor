@@ -82,8 +82,7 @@ class PlaybackSchedulingTests(unittest.TestCase):
         with patch.object(t,'frame') as frame:
             t.publish_frames(); self.assertEqual(frame.call_count,1)
         self.assertEqual(t._published_sequences[key],12)
-        t._frame_jobs=[job(3,13)]
-        with patch('kinetic_cut.transport.QMetaObject.invokeMethod'):t.position_decoder(key,2000)
+        t._frame_jobs=[job(3,13)]; t.position_decoder(key,2000)
         with patch.object(t,'frame') as frame:t.publish_frames(); frame.assert_not_called()
         t.decoders.clear()
     def test_pending_queue_is_bounded_before_readback(self):

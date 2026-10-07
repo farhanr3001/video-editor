@@ -4,7 +4,6 @@ import subprocess
 import copy
 import shutil
 import sys
-import time
 from pathlib import Path
 from functools import lru_cache
 
@@ -86,44 +85,3 @@ def popen(*args, **kwargs):
     if args:args=(_tool_args(args[0]),*args[1:])
     elif 'args' in kwargs:kwargs['args']=_tool_args(kwargs['args'])
     return subprocess.Popen(*args, **_desktop_flags(kwargs))
-
-
-def run_cancellable(args, *, cancel_check=None, timeout=None, **kwargs):
-    """Drain pipes while polling cancellation, and always reap our own child.
-
-    communicate(timeout=...) avoids both blocking reads and stderr pipe deadlock.
-    The caller's cancellation is distinct from an actual tool failure.
-    """
-    capture = kwargs.pop('capture_output', False)
-    check = kwargs.pop('check', False)
-    if capture:
-        kwargs['stdout'] = kwargs['stderr'] = subprocess.PIPE
-    if cancel_check and cancel_check():
-        raise InterruptedError('Operation cancelled')
-    started = time.monotonic()
-    with popen(args, **kwargs) as child:
-        from .export_process import ChildJob, stop
-        job = ChildJob(child)
-        try:
-            while True:
-                if cancel_check and cancel_check():
-                    raise InterruptedError('Operation cancelled')
-                if timeout is not None and time.monotonic() - started >= timeout:
-                    raise subprocess.TimeoutExpired(args, timeout)
-                try:
-                    stdout, stderr = child.communicate(timeout=.1)
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
-        except BaseException:
-            stop(child, job)
-            child.communicate()
-            raise
-        finally:
-            job.close()
-        if cancel_check and cancel_check():
-            raise InterruptedError('Operation cancelled')
-        result = subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
-        if check:
-            result.check_returncode()
-        return result

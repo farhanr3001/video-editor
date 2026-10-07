@@ -81,16 +81,6 @@ def merge(target, values):
         else:target[key]=copy.deepcopy(value)
 
 
-def finite_numbers(value):
-    """Reject invalid numbers before constructors or clamps can disguise them."""
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError('Non-finite numeric value')
-    if isinstance(value, dict):
-        for item in value.values():finite_numbers(item)
-    elif isinstance(value, (list, tuple)):
-        for item in value:finite_numbers(item)
-
-
 def validate(project):
     def types(obj):
         if not is_dataclass(obj):return
@@ -108,7 +98,13 @@ def validate(project):
             elif isinstance(value,list):
                 for item in value:types(item)
     types(project)
-    finite_numbers(project.to_dict())
+    def finite(value):
+        if isinstance(value,float) and not math.isfinite(value):raise ValueError('Non-finite numeric value')
+        if isinstance(value,dict):
+            for v in value.values():finite(v)
+        elif isinstance(value,list):
+            for v in value:finite(v)
+    finite(project.to_dict())
     for collection in (project.media,project.timeline,project.captions,project.transitions):
         ids=[x.id for x in collection]
         if any(not isinstance(x,str) or not x for x in ids) or len(ids)!=len(set(ids)):raise ValueError('IDs must be unique nonempty strings')
@@ -138,15 +134,10 @@ def validate(project):
     for tr in project.transitions:
         if tr.track not in project.video_tracks:raise ValueError('Transitions require a video track')
         if tr.start<-1e-7 or not 0.05<=tr.duration<=10.0:raise ValueError('Invalid transition timing/duration')
-        for identifier in (tr.left_item_id,tr.right_item_id):
-            if identifier:
-                item=project.item_by_id(identifier)
-                if item is None or item.track!=tr.track:raise ValueError('Transition references missing or mismatched clips')
 
 
 def edited(project, operations):
     if not isinstance(operations,list) or not 1<=len(operations)<=500:raise ValueError('Provide 1–500 operations')
-    finite_numbers(operations)
     stage=copy.deepcopy(project); created=[]
     for op in operations:
         kind=op.get('op'); values=op.get('values',{})
@@ -175,10 +166,7 @@ def edited(project, operations):
                 if target is None:raise ValueError('Unknown item: '+str(identifier))
                 track_name=target.get('track','subtitle_1')
                 if stage.track_states.get(track_name,{}).get('locked'):raise ValueError('Unlock the track before editing')
-                if kind=='remove':
-                    rows.remove(target)
-                    if collection=='timeline':
-                        raw['transitions']=[t for t in raw['transitions'] if identifier not in (t.get('left_item_id'),t.get('right_item_id'))]
+                if kind=='remove':rows.remove(target)
                 else:
                     if 'id' in values:raise ValueError('Item IDs cannot be changed')
                     merge(target,values)
@@ -233,9 +221,9 @@ def edited(project, operations):
             if 'effects' in op and isinstance(op['effects'],list):
                 new_item.effects=copy.deepcopy(op['effects'])
             if 'crop' in op and isinstance(op['crop'],dict):
-                crop=asdict(new_item.crop); merge(crop,op['crop']); new_item.crop=Crop(**crop)
+                merge(asdict(new_item.crop),op['crop'])
             if 'transform' in op and isinstance(op['transform'],dict):
-                transform=asdict(new_item.transform); merge(transform,op['transform']); new_item.transform=Transform(**transform)
+                merge(asdict(new_item.transform),op['transform'])
             raw=stage.to_dict(); raw['timeline'].append(asdict(new_item))
             stage=Project.from_dict(raw); created.append(item_id)
         elif kind=='set_caption_style':
@@ -320,12 +308,6 @@ def edited(project, operations):
     previous={i.id:i for i in project.timeline}
     for i in stage.timeline:
         if stage.track_states.get(i.track,{}).get('locked') and (i.id not in previous or i!=previous[i.id]):raise ValueError('Destination track is locked')
-    previous_captions={c.id:c for c in project.captions}
-    if stage.track_states.get('subtitle_1',{}).get('locked'):
-        if any(c.id not in previous_captions or c!=previous_captions[c.id] for c in stage.captions):raise ValueError('Destination track is locked')
-    previous_transitions={t.id:t for t in project.transitions}
-    for t in stage.transitions:
-        if stage.track_states.get(t.track,{}).get('locked') and (t.id not in previous_transitions or t!=previous_transitions[t.id]):raise ValueError('Destination track is locked')
     return stage,created
 
 
@@ -625,11 +607,8 @@ class EditorAPI:
             job.update(state='Cancelled' if cancel.is_set() else 'Failed',
                        error='' if cancel.is_set() else str(detail)[-2000:],message='Tracking cancelled; clip unchanged.' if cancel.is_set() else 'Object analysis failed; clip unchanged.')
         def finished():
-            if job['state'] in ('Running','Cancelling'):
-                failed('Tracking did not complete; no changes were applied.')
             if getattr(self.w,'_tracking_cancel',None) is cancel:self.w._tracking_cancel=None
             self._tracking_jobs.pop(job['id'],None); job.update(cancellable=False,finished=time.time())
-        worker.cancel_callback=cancel.set
         worker.signals.progress.connect(progress); worker.signals.result.connect(done)
         worker.signals.error.connect(failed); worker.signals.finished.connect(finished)
         try:self.w.start_worker(worker)
@@ -650,29 +629,14 @@ class EditorAPI:
         if any(not Path(p).is_file() for p in paths):raise ValueError('One or more media files do not exist')
         from .ui import Worker
         from .media import probe
-        import threading
-        project=self.w.project; settings=copy.deepcopy(self.w.settings); cancel=threading.Event(); job=self.new_job('Import media')
-        def prepare():
-            items=[]
-            for path in paths:
-                if cancel.is_set():raise InterruptedError('Import cancelled')
-                items.append(probe(path,settings.get('ffprobe','ffprobe'),settings.get('ffmpeg','ffmpeg'),timeout=30))
-            if cancel.is_set():raise InterruptedError('Import cancelled')
-            return items
-        worker=Worker(prepare); worker.cancel_callback=cancel.set
+        project=self.w.project; job=self.new_job('Import media')
+        worker=Worker(lambda:[probe(p,self.w.settings.get('ffprobe','ffprobe'),self.w.settings.get('ffmpeg','ffmpeg')) for p in paths])
         def finish(items):
-            if cancel.is_set() or getattr(self.w,'_closing',False):return
             if project is not self.w.project:job.update(state='Failed',error='Project changed during import; retry in the intended project'); return
             self.w.media_added(items)
             from .media_insert import source_key
             job.update(state='Complete',media_ids=[m.id for m in project.media if source_key(m.path) in {source_key(p) for p in paths}])
-        def finished():
-            if job['state']=='Running':
-                job.update(state='Cancelled' if cancel.is_set() or getattr(self.w,'_closing',False) else 'Failed',
-                           error='Import cancelled; no media was imported.' if cancel.is_set() else 'Import did not complete.')
-            job['finished']=time.time()
-        worker.signals.result.connect(finish); worker.signals.error.connect(lambda e:job.update(state='Cancelled' if cancel.is_set() else 'Failed',error=e[-2000:]))
-        worker.signals.finished.connect(finished); self.w.start_worker(worker)
+        worker.signals.result.connect(finish); worker.signals.error.connect(lambda e:job.update(state='Failed',error=e[-2000:])); self.w.start_worker(worker)
         return dict(job)
     def call_download_media(self,url,mode='video',target_res='',cookies_path='',auto_import=True,wait=True):
         self.editing()
@@ -681,58 +645,83 @@ class EditorAPI:
         from .ui import Worker
         from .downloader_dialog import download_media_synchronous
         from .media import probe
-        import threading
-        job=self.new_job(f'Download media ({mode})')
-        project=self.w.project; settings=copy.deepcopy(self.w.settings); cancel=threading.Event()
-        from PySide6.QtCore import QEventLoop
-        loop=QEventLoop(self.w) if wait else None
-        result_box={}; error_box=[]
 
-        def cancelled():return cancel.is_set() or getattr(self.w,'_closing',False) or self.w.transport.closed
-        def mark_cancelled():job.update(state='Cancelled',error='Download cancelled; no media was imported.')
+        job=self.new_job(f'Download media ({mode})')
+        project=self.w.project
 
         def do_download():
-            if cancel.is_set():raise InterruptedError('Download cancelled')
-            res=download_media_synchronous(url,mode=mode,target_res=target_res,cookies_path=cookies_path or None,cancel_check=cancel.is_set)
-            if cancel.is_set():raise InterruptedError('Download cancelled')
+            res=download_media_synchronous(url, mode=mode, target_res=target_res, cookies_path=cookies_path or None)
             path=res.get('path')
             probe_item=None
             if auto_import and path and Path(path).is_file():
-                probe_item=probe(path,settings.get('ffprobe','ffprobe'),settings.get('ffmpeg','ffmpeg'),timeout=30)
-            if cancel.is_set():raise InterruptedError('Download cancelled')
+                probe_item=probe(path, self.w.settings.get('ffprobe','ffprobe'), self.w.settings.get('ffmpeg','ffmpeg'))
             return res, probe_item
 
-        def on_success(payload):
-            if cancelled():mark_cancelled(); return
-            res,probe_item=payload; media_id=None
-            if probe_item is not None and project is self.w.project:
-                self.w.media_added([probe_item]); media_id=probe_item.id
-            result_box['data']=dict(ok=True,path=res['path'],name=res['name'],title=res.get('title',''),mode=res['mode'],
-                                    size_bytes=res.get('size_bytes',0),media_id=media_id,imported=bool(media_id))
-            job.update(state='Complete',**result_box['data'])
-
-        def on_failure(err):
-            if cancelled():mark_cancelled(); return
-            error_box.append(err); job.update(state='Failed',error=err[-2000:])
-
-        def finished():
-            if cancelled():mark_cancelled()
-            elif job['state']=='Running':
-                error_box.append('Download did not complete'); job.update(state='Failed',error=error_box[-1])
-            if loop:loop.quit()
-
-        worker=Worker(do_download); worker.cancel_callback=cancel.set
-        worker.signals.result.connect(on_success); worker.signals.error.connect(on_failure); worker.signals.finished.connect(finished)
-        self.w.start_worker(worker)
         if wait:
-            if not cancelled():loop.exec()
-            loop.deleteLater()
-            if cancelled():mark_cancelled(); raise InterruptedError('Download cancelled')
-            if error_box:raise RuntimeError(f'Download failed: {error_box[0]}')
-            if 'data' not in result_box:raise RuntimeError('Download did not complete')
-            return result_box['data']
-        if cancelled():mark_cancelled()
-        return dict(job)
+            from PySide6.QtCore import QEventLoop
+            loop=QEventLoop()
+            result_box={}
+            error_box=[]
+
+            def on_success(payload):
+                res, probe_item = payload
+                media_id = None
+                if probe_item is not None and project is self.w.project:
+                    self.w.media_added([probe_item])
+                    media_id = probe_item.id
+                result_box['data'] = {
+                    'ok': True,
+                    'path': res['path'],
+                    'name': res['name'],
+                    'title': res.get('title', ''),
+                    'mode': res['mode'],
+                    'size_bytes': res.get('size_bytes', 0),
+                    'media_id': media_id,
+                    'imported': bool(media_id),
+                }
+                job.update(state='Complete', **result_box['data'])
+                loop.quit()
+
+            def on_failure(err):
+                error_box.append(err)
+                job.update(state='Failed', error=err[-2000:])
+                loop.quit()
+
+            worker = Worker(do_download)
+            worker.signals.result.connect(on_success)
+            worker.signals.error.connect(on_failure)
+            self.w.start_worker(worker)
+            loop.exec()
+
+            if error_box:
+                raise RuntimeError(f'Download failed: {error_box[0]}')
+            return result_box.get('data', dict(job))
+        else:
+            def on_async_success(payload):
+                res, probe_item = payload
+                media_id = None
+                if probe_item is not None and project is self.w.project:
+                    self.w.media_added([probe_item])
+                    media_id = probe_item.id
+                job.update(
+                    state='Complete',
+                    path=res['path'],
+                    name=res['name'],
+                    title=res.get('title', ''),
+                    mode=res['mode'],
+                    size_bytes=res.get('size_bytes', 0),
+                    media_id=media_id,
+                    imported=bool(media_id),
+                )
+
+            def on_async_failure(err):
+                job.update(state='Failed', error=err[-2000:])
+
+            worker = Worker(do_download)
+            worker.signals.result.connect(on_async_success)
+            worker.signals.error.connect(on_async_failure)
+            self.w.start_worker(worker)
+            return dict(job)
     def call_get_jobs(self):
         from .render_queue import elapsed
         return dict(tasks=list(self.jobs.values()),renders=[dict(id=j.setdefault('assistant_id',uid()),state=j['state'],path=j['output'],elapsed=elapsed(j),error=j.get('error','')) for j in self.w.delivery.jobs],

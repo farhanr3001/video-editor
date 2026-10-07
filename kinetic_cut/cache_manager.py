@@ -188,7 +188,7 @@ class CacheManagerDialog(QDialog):
             if components:
                 from .component_ui import events
                 events().changed.emit()
-            count, released = clear(selected) if selected else (0, 0)
+            count, released = clear(selected)
             if 'proxies' in selected:
                 window.proxies.clear()
             if 'vision-renders' in selected:

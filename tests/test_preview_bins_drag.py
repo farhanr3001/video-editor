@@ -40,7 +40,7 @@ class PreviewBinsDragTests(unittest.TestCase):
         w=self.w; m=self.source(kind="video"); w.project.media=[m]; w.project.timeline=[TimelineItem("v",m.id,"video_1",0,5)]
         t=w.transport; player=Mock(); player.position.return_value=0; player.playbackState.return_value=0; sink=Mock(); t.decoders[(m.id,0,1.,"video")]=(player,Mock(),sink)
         try:
-            with patch.object(t.frame_timer,"setInterval",wraps=t.frame_timer.setInterval) as set_interval,patch("kinetic_cut.transport.QMetaObject.invokeMethod"):
+            with patch.object(t.frame_timer,"setInterval",wraps=t.frame_timer.setInterval) as set_interval:
                 for _ in range(10):t.sync()
                 set_interval.assert_not_called(); w.project.settings.fps=30
                 for _ in range(10):t.sync()

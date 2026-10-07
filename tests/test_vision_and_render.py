@@ -196,24 +196,3 @@ class VisionUITests(unittest.TestCase):
             begin(self.w,'Remove Person Background'); install.assert_not_called()
         self.assertEqual(len(self.item.effects),2); self.assertFalse(self.w.inspector.vision_reanalyse.isHidden())
         self.w.undo(); self.assertEqual(len(self.w.project.item_by_id('i').effects),1)
-
-    def test_cancel_before_queued_analysis_result_never_applies_effect(self):
-        from kinetic_cut.vision_ui import begin
-        workers=[]
-        with patch.object(self.w,'start_worker',side_effect=workers.append),patch('kinetic_cut.vision_component.ready',return_value=True):
-            begin(self.w,'Remove Person Background')
-            self.w._vision_cancel.set()
-            workers[-1].signals.result.emit(self.a)
-        self.assertFalse(self.item.effects)
-        self.assertFalse(self.w._vision_busy)
-
-    def test_cancel_before_queued_paste_result_preserves_pasted_effect(self):
-        from kinetic_cut.vision_ui import reanalyse_pasted
-        self.item.effects=[dict(name='Remove Person Background',analysis={})]
-        workers=[]
-        with patch.object(self.w,'start_worker',side_effect=workers.append),patch('kinetic_cut.vision_component.ready',return_value=True):
-            reanalyse_pasted(self.w,[self.item])
-            self.w._vision_cancel.set()
-            workers[-1].signals.result.emit([(copy.deepcopy(self.item),self.a)])
-        self.assertEqual(self.item.effects[0]['analysis'],{})
-        self.assertFalse(self.w._vision_busy)

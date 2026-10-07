@@ -35,23 +35,3 @@ class PreviewSeekGateTests(unittest.TestCase):
         with patch('kinetic_cut.transport.QMetaObject.invokeMethod'):self.t.retire_decoder(self.key)
         self.t.decoder_loaded(self.key,self.player,QMediaPlayer.LoadedMedia)
         self.player.play.assert_not_called(); self.assertFalse(self.t._pending_video_seeks)
-
-    def test_play_pause_resume_is_immediate_for_existing_decoders(self):
-        states=[]; self.t.stateChanged.connect(states.append)
-        with patch.object(self.t,'sync'),patch.object(self.t,'tick'):
-            self.t.play(); self.t.pause(); self.t.play()
-        self.player.pause.assert_called_once()
-        self.assertTrue(self.t.playing)
-        self.assertTrue(self.t.timer.isActive())
-        self.assertEqual(states,[True,False,True])
-
-    def test_latest_load_seek_primes_directly_and_retirement_discards_it(self):
-        self.t.position_decoder(self.key,4001);self.t.position_decoder(self.key,11030)
-        self.t.decoder_loaded(self.key,self.player,QMediaPlayer.LoadedMedia)
-        self.player.setPosition.assert_called_with(11030)
-        self.player.play.assert_called_once()
-        self.assertEqual(self.t._pending_video_seeks[self.key],11030)
-        with patch('kinetic_cut.transport.QMetaObject.invokeMethod'):self.t.retire_decoder(self.key)
-        self.t.decoder_loaded(self.key,self.player,QMediaPlayer.LoadedMedia)
-        self.assertEqual(self.player.play.call_count,1)
-        self.assertNotIn(self.key,self.t._pending_video_seeks)

@@ -1,4 +1,4 @@
-"""End-to-end test verifying TTS Dialogue Generation, processed Adam voice, progress, auto-close, and timeline insertion."""
+"""End-to-end test verifying TTS Dialogue Generation, ElevenLabs Adam, progress, auto-close, and timeline insertion."""
 import os
 import sys
 import time

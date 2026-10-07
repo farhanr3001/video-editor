@@ -9,14 +9,11 @@ import shutil
 import subprocess
 import sys
 import time
-import threading
-import tempfile
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from PySide6.QtCore import Qt, Signal, Slot, QObject, QByteArray, QSize, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QObject, QByteArray, QSize, QTimer
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QImage
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -26,9 +23,6 @@ from PySide6.QtWidgets import (
 
 from .icons import lucide_icon, resource_path
 from .config import DATA_DIR
-from .dialog_jobs import RetainedThread
-from .process import popen,run_cancellable
-from .export_process import ChildJob, stop
 
 PYTHON_BIN = r"C:\Python310\python.exe" if Path(r"C:\Python310\python.exe").exists() else sys.executable
 
@@ -191,12 +185,9 @@ def is_tiktok_sound_url(url: str) -> bool:
     return ("tiktok.com" in u or "douyin.com" in u) and "/music/" in u
 
 
-def resolve_tiktok_sound(url: str, cancel_check=None) -> dict:
+def resolve_tiktok_sound(url: str) -> dict:
     title = ""
     author = ""
-    def check_cancel():
-        if cancel_check and cancel_check():raise InterruptedError('Download cancelled')
-    check_cancel()
 
     # 1. Fetch title and author from TikTok oEmbed if available
     try:
@@ -211,11 +202,8 @@ def resolve_tiktok_sound(url: str, cancel_check=None) -> dict:
                 raw_title = raw_title[2:].strip()
             title = raw_title
             author = data.get("author_name") or ""
-    except InterruptedError:raise
     except Exception:
         pass
-
-    check_cancel()
 
     if not title:
         m = re.search(r"/music/([^/?#]+)", url)
@@ -238,8 +226,6 @@ def resolve_tiktok_sound(url: str, cancel_check=None) -> dict:
             cookie_headers = resp.headers.get_all("Set-Cookie")
             if cookie_headers:
                 cookie_header = "; ".join([c.split(";")[0] for c in cookie_headers])
-
-        check_cancel()
 
         m_tt = re.search(r"s_tt\s*=\s*'([^']+)'", html_page)
         s_tt = m_tt.group(1) if m_tt else ""
@@ -284,11 +270,8 @@ def resolve_tiktok_sound(url: str, cancel_check=None) -> dict:
                     pass
         if not audio_url and direct_urls:
             audio_url = direct_urls[0]
-    except InterruptedError:raise
     except Exception:
         pass
-
-    check_cancel()
 
     if not audio_url:
         raise ValueError("Could not resolve MP3 audio stream for this TikTok sound link.")
@@ -321,62 +304,7 @@ def detect_platform(url: str) -> str:
     return "generic"
 
 
-def _capture_process(command, cancel, timeout=90):
-    """Drain both pipes while allowing cancellation even before any output."""
-    return run_cancellable(command,cancel_check=cancel.is_set,timeout=timeout,
-                           capture_output=True,text=True,encoding='utf-8',errors='replace')
-
-
-class _DownloaderTask(QObject):
-    settled=Signal()
-    def __init__(self):
-        super().__init__(); self._cancel=threading.Event()
-    def cancel(self):self._cancel.set()
-
-
-class _DownloaderCallbacks(QObject):
-    """GUI-thread callbacks remain valid after the worker QObject is deleted."""
-    def __init__(self,dialog,kind,worker):
-        super().__init__(dialog); self.dialog=dialog; self.kind=kind
-        self.request=object(); self.cancel=worker._cancel; self.url=getattr(worker,'url',''); self.job=None
-        setattr(dialog,'_'+kind+'_request',self.request)
-
-    def current(self):
-        return (not self.dialog._closed and not self.cancel.is_set()
-                and getattr(self.dialog,'_'+self.kind+'_request',None) is self.request
-                and (self.kind!='fetch' or self.url==self.dialog.url_input.text().strip()))
-
-    @Slot(dict)
-    def metadata(self,data):
-        if self.current():self.dialog._on_metadata_loaded(data)
-
-    @Slot(QImage)
-    def thumbnail(self,image):
-        if self.current():self.dialog._on_thumb_loaded(QPixmap.fromImage(image))
-
-    @Slot(float,str)
-    def progress(self,pct,message):
-        if self.current():self.dialog._on_download_progress(pct,message)
-
-    @Slot(str)
-    def result(self,path):
-        if self.current():self.dialog._on_download_finished(path)
-
-    @Slot(str)
-    def error(self,detail):
-        if self.current():
-            if self.kind=='fetch':self.dialog._on_fetch_error(detail)
-            else:self.dialog._on_download_error(detail)
-
-    @Slot()
-    def finished(self):
-        self.dialog._task_finished(self.job,self.cancel.is_set())
-        try:self.dialog.destroyed.disconnect(self.job.cancel)
-        except (RuntimeError,TypeError):pass
-        self.deleteLater()
-
-
-class _FetchMetadataWorker(_DownloaderTask):
+class _FetchMetadataWorker(QThread):
     finished = Signal(dict)
     error = Signal(str)
 
@@ -387,10 +315,9 @@ class _FetchMetadataWorker(_DownloaderTask):
 
     def run(self):
         try:
-            if self._cancel.is_set():return
             if is_tiktok_sound_url(self.url):
-                data = resolve_tiktok_sound(self.url,self._cancel.is_set)
-                if not self._cancel.is_set():self.finished.emit(data)
+                data = resolve_tiktok_sound(self.url)
+                self.finished.emit(data)
                 return
 
             cmd = [
@@ -402,31 +329,29 @@ class _FetchMetadataWorker(_DownloaderTask):
             cmd.extend(get_ytdlp_runtime_args(self.cookies_path))
             cmd.append(self.url)
 
-            res = _capture_process(cmd,self._cancel)
-            if self._cancel.is_set():return
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
             if res.returncode != 0 or not res.stdout.strip():
                 err_msg = res.stderr.strip() or "Failed to fetch metadata for URL"
                 # Fallback to official YouTube oEmbed if YouTube bot challenge encountered
                 if "youtube.com" in self.url.lower() or "youtu.be" in self.url.lower():
                     oembed_data = fetch_youtube_oembed(self.url)
-                    if oembed_data and not self._cancel.is_set():
+                    if oembed_data:
                         if "not a bot" in err_msg.lower() or "sign in" in err_msg.lower():
                             oembed_data["needs_cookies"] = True
                             oembed_data["bot_warning"] = "YouTube bot check detected. Use Cookies button to select cookies.txt."
                         self.finished.emit(oembed_data)
                         return
 
-                if not self._cancel.is_set():self.error.emit(err_msg)
+                self.error.emit(err_msg)
                 return
             data = json.loads(res.stdout)
-            if not self._cancel.is_set():self.finished.emit(data)
+            self.finished.emit(data)
         except Exception as e:
-            if not self._cancel.is_set():self.error.emit(str(e))
-        finally:self.settled.emit()
+            self.error.emit(str(e))
 
 
-class _ThumbnailWorker(_DownloaderTask):
-    loaded = Signal(QImage)
+class _ThumbnailWorker(QThread):
+    loaded = Signal(QPixmap)
 
     def __init__(self, url: str):
         super().__init__()
@@ -434,20 +359,18 @@ class _ThumbnailWorker(_DownloaderTask):
 
     def run(self):
         try:
-            if self._cancel.is_set():return
             import urllib.request
             req = urllib.request.Request(self.url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=8) as resp:
                 data = resp.read()
             img = QImage.fromData(data)
-            if not img.isNull() and not self._cancel.is_set():
-                self.loaded.emit(img)
+            if not img.isNull():
+                self.loaded.emit(QPixmap.fromImage(img))
         except Exception:
             pass
-        finally:self.settled.emit()
 
 
-class _DownloadWorker(_DownloaderTask):
+class _DownloadWorker(QThread):
     progress = Signal(float, str)
     finished = Signal(str)
     error = Signal(str)
@@ -462,10 +385,10 @@ class _DownloadWorker(_DownloaderTask):
         self.sound_title = sound_title
         self.cookies_path = cookies_path
         self._proc = None
+        self._cancelled = False
 
     def run(self):
         try:
-            if self._cancel.is_set():return
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
             # Direct audio stream download (e.g. TikTok Sound)
@@ -474,34 +397,29 @@ class _DownloadWorker(_DownloaderTask):
                 self.progress.emit(10.0, "Downloading TikTok MP3 sound...")
                 clean_name = re.sub(r'[\\/*?:"<>|]', "", self.sound_title or "TikTok_Sound").strip() or "TikTok_Sound"
                 target_file = self.output_dir / f"{clean_name}.mp3"
-                temporary=None
                 req = urllib.request.Request(self.direct_audio_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-                try:
-                    with urllib.request.urlopen(req, timeout=8) as resp:
-                        total_len = int(resp.headers.get("Content-Length", 0))
-                        downloaded = 0
-                        with tempfile.NamedTemporaryFile(mode='wb',dir=self.output_dir,prefix='.kinetic-sound-',suffix='.partial',delete=False) as f:
-                            temporary=Path(f.name)
-                            while True:
-                                if self._cancel.is_set():return
-                                chunk = resp.read(32768)
-                                if not chunk:break
-                                f.write(chunk); downloaded += len(chunk)
-                                if total_len > 0:
-                                    pct = min(98.0, (downloaded / total_len) * 88.0 + 10.0)
-                                    self.progress.emit(pct, f"Downloading MP3... {pct:.1f}%")
-                        if self._cancel.is_set():return
-                        if total_len and downloaded!=total_len:raise IOError('Audio download was incomplete')
-                        os.replace(temporary,target_file); temporary=None
-                finally:
-                    if temporary:temporary.unlink(missing_ok=True)
+                with urllib.request.urlopen(req, timeout=25) as resp:
+                    total_len = int(resp.headers.get("Content-Length", 0))
+                    downloaded = 0
+                    with open(target_file, "wb") as f:
+                        while True:
+                            if self._cancelled:
+                                return
+                            chunk = resp.read(32768)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_len > 0:
+                                pct = min(98.0, (downloaded / total_len) * 88.0 + 10.0)
+                                self.progress.emit(pct, f"Downloading MP3... {pct:.1f}%")
                 self.progress.emit(100.0, "Completed!")
                 self.finished.emit(str(target_file.resolve()))
                 return
 
             out_template = str(self.output_dir / "%(title).80s [%(id)s].%(ext)s")
             
-            cmd = [PYTHON_BIN, "-m", "yt_dlp", "--newline", "--no-playlist",'--progress','--no-simulate','--socket-timeout','15','--retries','3','--fragment-retries','3','--print','after_move:KC_PATH:%(filepath)s']
+            cmd = [PYTHON_BIN, "-m", "yt_dlp", "--newline", "--no-playlist"]
             cmd.extend(get_ytdlp_runtime_args(self.cookies_path))
             
             if self.mode == "audio":
@@ -523,45 +441,48 @@ class _DownloadWorker(_DownloaderTask):
                 ])
                 
             self.progress.emit(5.0, "Starting download...")
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+            
             final_file = None
-            raw_output = deque(maxlen=20)
-            with tempfile.TemporaryDirectory(prefix='.kinetic-download-',dir=self.output_dir) as temporary:
-                log=Path(temporary)/'process.log'
-                with log.open('wb') as writer,log.open('r',encoding='utf-8',errors='replace') as reader:
-                    if self._cancel.is_set():return
-                    self._proc=popen(cmd,stdout=writer,stderr=subprocess.STDOUT); job=ChildJob(self._proc)
-                    advanced=time.monotonic()
-                    try:
-                        while True:
-                            if self._cancel.is_set():return
-                            exited=self._proc.poll() is not None
-                            lines=reader.readlines()
-                            if lines:advanced=time.monotonic()
-                            for line in lines:
-                                line=line.strip()
-                                if not line:continue
-                                raw_output.append(line)
-                                if line.startswith('KC_PATH:'):final_file=Path(line[len('KC_PATH:'):])
-                                m=re.search(r'\[download\]\s+([\d\.]+)%',line)
-                                if m:
-                                    pct=float(m.group(1)); self.progress.emit(min(98.0,max(5.0,pct)),f'Downloading... {pct:.1f}%')
-                                elif '[Merger]' in line or '[ExtractAudio]' in line:self.progress.emit(95.0,'Processing and converting media...')
-                            # Once exit is observed all native writes have completed;
-                            # read through EOF before selecting the reported output.
-                            if exited:break
-                            if time.monotonic()-advanced>120:raise TimeoutError('Download stopped responding for 120 seconds')
-                            time.sleep(.1)
-                    finally:
-                        if self._proc.poll() is None:stop(self._proc,job)
-                        job.close()
-            if self._cancel.is_set():return
+            raw_output = []
+            for line in iter(self._proc.stdout.readline, ""):
+                if self._cancelled:
+                    self._proc.terminate()
+                    return
+                line = line.strip()
+                if not line:
+                    continue
+                raw_output.append(line)
+                # Parse yt-dlp progress
+                # [download]  45.2% of 12.34MiB at 3.45MiB/s ETA 00:03
+                m = re.search(r"\[download\]\s+([\d\.]+)%", line)
+                if m:
+                    pct = float(m.group(1))
+                    self.progress.emit(min(98.0, max(5.0, pct)), f"Downloading... {pct:.1f}%")
+                elif "[Merger]" in line or "[ExtractAudio]" in line:
+                    self.progress.emit(95.0, "Processing and converting media...")
+                elif "[download] Destination:" in line:
+                    dest_str = line.split("[download] Destination:")[-1].strip()
+                    final_file = Path(dest_str)
+                elif "has already been downloaded" in line:
+                    dest_str = line.split("[download]")[-1].split("has already been downloaded")[0].strip()
+                    final_file = Path(dest_str)
+
+            self._proc.wait()
             if self._proc.returncode != 0:
-                combined_err = " ".join(list(raw_output)[-6:])
+                combined_err = " ".join(raw_output[-6:])
                 if "not a bot" in combined_err.lower() or "sign in" in combined_err.lower():
                     self.error.emit("YouTube requires authentication ('Sign in to confirm you're not a bot'). Click 'Cookies' to select your cookies.txt file.")
                 else:
                     self.error.emit(f"Download failed with exit code {self._proc.returncode}: {combined_err[:120]}")
                 return
+
+            # If final_file was not captured directly, find the newest file in output_dir
+            if not final_file or not final_file.exists():
+                files = list(self.output_dir.glob("*.mp3" if self.mode == "audio" else "*.mp4"))
+                if files:
+                    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                    final_file = files[0]
 
             if final_file and final_file.exists():
                 self.progress.emit(100.0, "Completed!")
@@ -569,41 +490,102 @@ class _DownloadWorker(_DownloaderTask):
             else:
                 self.error.emit("Downloaded file could not be located.")
         except Exception as e:
-            if not self._cancel.is_set():self.error.emit(str(e))
-        finally:self.settled.emit()
+            self.error.emit(str(e))
+
+    def cancel(self):
+        self._cancelled = True
+        if self._proc:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
 
 
-class _ExternalCancel(threading.Event):
-    def __init__(self,check):super().__init__(); self.check=check
-    def is_set(self):return super().is_set() or bool(self.check and self.check())
+def download_media_synchronous(url: str, mode: str = "video", target_res: str = "", cookies_path: str | None = None, output_dir: Path | None = None) -> dict:
+    """Download video or audio synchronously, return dictionary with file details."""
+    dest_dir = output_dir if output_dir is not None else default_download_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
 
+    # 1. Direct TikTok Sound resolution
+    if is_tiktok_sound_url(url):
+        data = resolve_tiktok_sound(url)
+        audio_url = data.get("audio_url")
+        sound_title = data.get("title", "TikTok_Sound")
+        clean_name = re.sub(r'[\\/*?:"<>|]', "", sound_title).strip() or "TikTok_Sound"
+        target_file = dest_dir / f"{clean_name}.mp3"
+        import urllib.request
+        req = urllib.request.Request(audio_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=30) as resp, open(target_file, "wb") as f:
+            while True:
+                chunk = resp.read(32768)
+                if not chunk:
+                    break
+                f.write(chunk)
+        return {
+            "path": str(target_file.resolve()),
+            "name": target_file.name,
+            "title": sound_title,
+            "mode": "audio",
+            "size_bytes": target_file.stat().st_size,
+        }
 
-def download_media_synchronous(url: str, mode: str = "video", target_res: str = "", cookies_path: str | None = None,
-                               output_dir: Path | None = None, cancel_check=None) -> dict:
-    """Use the same bounded, cancellable downloader for automation callers."""
-    cancel=_ExternalCancel(cancel_check)
-    if cancel.is_set():raise InterruptedError('Download cancelled')
-    dest_dir=Path(output_dir) if output_dir is not None else default_download_dir()
-    data=resolve_tiktok_sound(url,cancel.is_set) if is_tiktok_sound_url(url) else {}
-    worker=_DownloadWorker(url,mode,dest_dir,target_res,direct_audio_url=data.get('audio_url',''),
-                           sound_title=data.get('title',''),cookies_path=cookies_path or '')
-    worker._cancel=cancel
-    results=[]; errors=[]
-    # This helper deliberately executes synchronously in its caller's worker.
-    worker.finished.connect(results.append,Qt.DirectConnection)
-    worker.error.connect(errors.append,Qt.DirectConnection)
-    try:worker.run()
-    finally:worker.deleteLater()
-    if cancel.is_set():raise InterruptedError('Download cancelled')
-    if errors:
-        detail=errors[-1]
-        if 'not a bot' in detail.lower() or 'sign in' in detail.lower():raise ValueError(detail)
-        raise RuntimeError(detail)
-    if not results:raise FileNotFoundError('Downloaded media file could not be located.')
-    final_file=Path(results[-1])
-    return {'path':str(final_file.resolve()),'name':final_file.name,
-            'title':data.get('title') or final_file.stem,'mode':'audio' if data else mode,
-            'size_bytes':final_file.stat().st_size}
+    # 2. General yt-dlp download (YouTube, Shorts, TikTok video, Instagram, Twitter)
+    out_template = str(dest_dir / "%(title).80s [%(id)s].%(ext)s")
+    cmd = [PYTHON_BIN, "-m", "yt_dlp", "--no-playlist"]
+    cmd.extend(get_ytdlp_runtime_args(cookies_path or ""))
+
+    if mode == "audio":
+        cmd.extend([
+            "-x", "--audio-format", "mp3",
+            "--audio-quality", "0",
+            "-o", out_template,
+            url
+        ])
+    else:
+        format_spec, format_sort = video_download_format(target_res)
+        cmd.extend([
+            "-f", format_spec,
+            "-S", format_sort,
+            "--merge-output-format", "mp4",
+            "-o", out_template,
+            url
+        ])
+
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+    if proc.returncode != 0:
+        err_out = proc.stderr.strip() or proc.stdout.strip()
+        if "not a bot" in err_out.lower() or "sign in" in err_out.lower():
+            raise ValueError(
+                "YouTube bot verification required ('Sign in to confirm you're not a bot'). "
+                "Please provide an exported cookies.txt file to download this video."
+            )
+        raise RuntimeError(f"Download failed: {err_out[-300:]}")
+
+    # Find the downloaded file
+    final_file = None
+    for line in proc.stdout.splitlines():
+        if "[download] Destination:" in line:
+            final_file = Path(line.split("[download] Destination:")[-1].strip())
+        elif "has already been downloaded" in line:
+            final_file = Path(line.split("[download]")[-1].split("has already been downloaded")[0].strip())
+
+    if not final_file or not final_file.exists():
+        ext = "*.mp3" if mode == "audio" else "*.mp4"
+        files = list(dest_dir.glob(ext))
+        if files:
+            files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            final_file = files[0]
+
+    if not final_file or not final_file.exists():
+        raise FileNotFoundError("Downloaded media file could not be located.")
+
+    return {
+        "path": str(final_file.resolve()),
+        "name": final_file.name,
+        "title": final_file.stem,
+        "mode": mode,
+        "size_bytes": final_file.stat().st_size,
+    }
 
 
 class MediaDownloaderDialog(QDialog):
@@ -618,9 +600,7 @@ class MediaDownloaderDialog(QDialog):
         self.resize(760, 660)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
-        self._closed=False
-        self._fetch_thread=None; self._thumb_thread=None; self._download_thread=None
-        self._fetch_worker: _FetchMetadataWorker | None = None
+        self._fetch_worker: _FetchWorker | None = None
         self._thumb_worker: _ThumbnailWorker | None = None
         self._download_worker: _DownloadWorker | None = None
         self.metadata: dict | None = None
@@ -906,9 +886,6 @@ class MediaDownloaderDialog(QDialog):
         actions_layout.addWidget(self.btn_download_audio, 1)
 
         root.addLayout(actions_layout)
-        self.cancel_download_btn=QPushButton('Cancel download',self)
-        self.cancel_download_btn.clicked.connect(self._cancel_download)
-        self.cancel_download_btn.hide(); root.addWidget(self.cancel_download_btn,0,Qt.AlignRight)
 
     def _apply_theme(self):
         set_ui_style(self, '\n            QDialog {\n                background-color: @bg_panel;\n                color: @text_main;\n                font-family: \'Segoe UI\', Inter, sans-serif;\n            }\n            #headerTitle {\n                font-size: 20px;\n                font-weight: 700;\n                color: @text_main;\n            }\n            #headerSubtitle {\n                font-size: 12px;\n                color: @text_sub;\n            }\n            #platformPill {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 8px;\n                color: @text_main;\n                font-size: 13px;\n                font-weight: 600;\n                padding: 10px 14px;\n                text-align: center;\n            }\n            #platformPill:hover {\n                background-color: @bg_hover;\n                border-color: @border_subtle;\n            }\n            #platformPill:checked {\n                background-color: @bg_selected;\n                border: 2px solid @accent;\n                color: @text_selected;\n            }\n            #inputContainer {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 8px;\n            }\n            #urlInput {\n                background: transparent;\n                border: none;\n                color: @text_main;\n                font-size: 13px;\n                padding: 4px;\n            }\n            #urlInput:focus {\n                outline: none;\n            }\n            #clearButton {\n                background: transparent;\n                border: none;\n                color: @text_sub;\n                font-size: 12px;\n                font-weight: bold;\n                border-radius: 11px;\n            }\n            #clearButton:hover {\n                background-color: @bg_hover;\n                color: @text_main;\n            }\n            #cookiesButton {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 6px;\n                color: @text_sub;\n                font-size: 12px;\n                font-weight: 600;\n                padding: 0 12px;\n            }\n            #cookiesButton:hover {\n                background-color: @bg_hover;\n                color: @text_main;\n                border-color: @border_subtle;\n            }\n            #fetchButton {\n                background-color: @accent;\n                border: none;\n                border-radius: 6px;\n                color: @accent_text;\n                font-size: 13px;\n                font-weight: 700;\n                padding: 0 18px;\n            }\n            #fetchButton:hover {\n                background-color: @accent;\n            }\n            #fetchButton:pressed {\n                background-color: @accent;\n            }\n            #fetchButton:disabled {\n                background-color: @danger_bg;\n                color: @text_disabled;\n            }\n            #previewCard {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 12px;\n            }\n            #thumbImage {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 8px;\n                color: @text_sub;\n                font-size: 12px;\n            }\n            #durationBadge {\n                background-color: rgba(0, 0, 0, 0.78);\n                border-radius: 4px;\n                color: @text_main;\n                font-size: 11px;\n                font-weight: 700;\n            }\n            #videoTitle {\n                font-size: 15px;\n                font-weight: 700;\n                color: @text_main;\n                line-height: 1.3;\n            }\n            #platformIndicator {\n                color: @text_sub;\n                font-size: 12px;\n                font-weight: 600;\n            }\n            #authorName {\n                color: @text_main;\n                font-size: 12px;\n                font-weight: 600;\n            }\n            #authorSubs {\n                color: @text_sub;\n                font-size: 12px;\n            }\n            #statsText {\n                color: @text_sub;\n                font-size: 12px;\n            }\n            #formLabel {\n                color: @text_sub;\n                font-size: 11px;\n                font-weight: 600;\n                text-transform: uppercase;\n                letter-spacing: 0.5px;\n            }\n            #styledCombo {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 6px;\n                color: @text_main;\n                font-size: 12px;\n                padding: 6px 10px;\n                min-height: 24px;\n            }\n            #styledCombo:hover {\n                border-color: @border_subtle;\n            }\n            #downloadProgress {\n                background-color: @bg_panel;\n                border: none;\n                border-radius: 4px;\n            }\n            #downloadProgress::chunk {\n                background-color: @accent;\n                border-radius: 4px;\n            }\n            #statusLabel {\n                color: @info;\n                font-size: 12px;\n                font-weight: 600;\n            }\n            #btnDownloadVideo {\n                background-color: @accent;\n                border: none;\n                border-radius: 8px;\n            }\n            #btnDownloadVideo:hover {\n                background-color: @accent;\n            }\n            #btnDownloadVideo:pressed {\n                background-color: @accent;\n            }\n            #btnDownloadVideo:disabled {\n                background-color: @danger_bg;\n            }\n            #btnDownloadAudio {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 8px;\n            }\n            #btnDownloadAudio:hover {\n                background-color: @bg_hover;\n                border-color: @border_subtle;\n            }\n            #btnDownloadAudio:pressed {\n                background-color: @bg_panel;\n            }\n            #btnDownloadAudio:disabled {\n                background-color: @bg_panel;\n                border-color: @border_subtle;\n            }\n            #btnDownloadAudio[primarySound="true"] {\n                background-color: @accent;\n                border: none;\n            }\n            #btnDownloadAudio[primarySound="true"]:hover {\n                background-color: @accent;\n            }\n            #btnDownloadAudio[primarySound="true"]:pressed {\n                background-color: @accent;\n            }\n            #btnMainText {\n                color: @text_main;\n                font-size: 14px;\n                font-weight: 700;\n            }\n            #btnSubTextLight {\n                color: @text_main;\n                font-size: 11px;\n            }\n            #btnSubTextMuted {\n                color: @text_sub;\n                font-size: 11px;\n            }\n        ')
@@ -919,53 +896,19 @@ class MediaDownloaderDialog(QDialog):
             btn.setChecked(k == key)
 
     def _on_url_changed(self, text: str):
-        if self._closed:return
-        self.metadata=None
-        for job in (self._fetch_thread,self._thumb_thread):
-            if job:job.cancel()
         detected = detect_platform(text)
         if detected in self.platform_buttons:
             self._set_platform(detected)
         u = text.strip().lower()
-        valid=u.startswith(('http://','https://'))
-        busy=self._download_thread and self._download_thread.isRunning()
-        self.btn_download_video.setEnabled(valid and not busy)
-        self.btn_download_audio.setEnabled(valid and not busy)
-        if not busy:self.fetch_btn.setEnabled(True)
-
-    def _start_task(self,worker,attribute,callbacks):
-        job=RetainedThread(worker)
-        setattr(self,attribute,job)
-        callbacks.job=job
-        job.finished.connect(callbacks.finished,Qt.QueuedConnection)
-        self.destroyed.connect(job.cancel)
-        job.start(); return job
-
-    def _task_finished(self,job,cancelled=False):
-        if self._closed:return
-        if job is self._download_thread:
-            self._download_thread=None; self._download_worker=None
-            self.cancel_download_btn.hide()
-            if cancelled:
-                self.progress_bar.hide(); self.status_lbl.setText('Download cancelled.')
-                self._on_url_changed(self.url_input.text())
-        elif job is self._fetch_thread:self._fetch_thread=None; self._fetch_worker=None
-        elif job is self._thumb_thread:self._thumb_thread=None; self._thumb_worker=None
-
-    def _cancel_download(self):
-        if self._download_thread:
-            self._download_thread.cancel(); self.cancel_download_btn.setEnabled(False)
-            self.status_lbl.setText('Cancelling download…')
+        if u.startswith("http://") or u.startswith("https://"):
+            self.btn_download_video.setEnabled(True)
+            self.btn_download_audio.setEnabled(True)
 
     def _on_fetch_clicked(self):
-        if self._closed or self._download_thread and self._download_thread.isRunning():return
         url = self.url_input.text().strip()
         if not url:
             self.status_lbl.setText("Please enter a valid video link.")
             return
-        if self._fetch_thread and self._fetch_thread.isRunning():
-            if self._fetch_worker.url==url and not self._fetch_worker._cancel.is_set():return
-            self._fetch_thread.cancel()
 
         self.fetch_btn.setEnabled(False)
         self.status_lbl.setText("Fetching video information...")
@@ -973,14 +916,12 @@ class MediaDownloaderDialog(QDialog):
         self.progress_bar.setValue(25)
 
         self._fetch_worker = _FetchMetadataWorker(url)
-        callbacks=_DownloaderCallbacks(self,'fetch',self._fetch_worker)
-        self._fetch_worker.finished.connect(callbacks.metadata,Qt.QueuedConnection)
-        self._fetch_worker.error.connect(callbacks.error,Qt.QueuedConnection)
-        self._start_task(self._fetch_worker,'_fetch_thread',callbacks)
+        self._fetch_worker.finished.connect(self._on_metadata_loaded)
+        self._fetch_worker.error.connect(self._on_fetch_error)
+        self._fetch_worker.start()
 
     @Slot(dict)
     def _on_metadata_loaded(self, data: dict):
-        if self._closed:return
         self.fetch_btn.setEnabled(True)
         self.progress_bar.hide()
         self.metadata = data
@@ -1106,15 +1047,14 @@ class MediaDownloaderDialog(QDialog):
         thumb_url = data.get("thumbnail")
         if thumb_url:
             self.thumb_label.setText("Loading...")
-            if self._thumb_thread:self._thumb_thread.cancel()
             self._thumb_worker = _ThumbnailWorker(thumb_url)
-            callbacks=_DownloaderCallbacks(self,'thumb',self._thumb_worker)
-            self._thumb_worker.loaded.connect(callbacks.thumbnail,Qt.QueuedConnection)
-            self._start_task(self._thumb_worker,'_thumb_thread',callbacks)
+            self._thumb_worker.loaded.connect(self._on_thumb_loaded)
+            self._thumb_worker.start()
         else:
             self.thumb_label.setText("")
             self.thumb_label.setPixmap(lucide_icon("video", "#ff5744", 48).pixmap(56, 56))
 
+    @Slot(QPixmap)
     def _on_thumb_loaded(self, pixmap: QPixmap):
         scaled = pixmap.scaled(180, 240, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         # Center crop to 180x240
@@ -1125,7 +1065,6 @@ class MediaDownloaderDialog(QDialog):
 
     @Slot(str)
     def _on_fetch_error(self, err_msg: str):
-        if self._closed:return
         self.fetch_btn.setEnabled(True)
         self.progress_bar.hide()
         url = self.url_input.text().strip()
@@ -1176,9 +1115,6 @@ class MediaDownloaderDialog(QDialog):
         return False
 
     def _start_download(self, mode: str):
-        if self._closed or self._download_thread and self._download_thread.isRunning():return
-        for job in (self._fetch_thread,self._thumb_thread):
-            if job:job.cancel()
         url = self.url_input.text().strip()
         if not url:
             return
@@ -1190,7 +1126,6 @@ class MediaDownloaderDialog(QDialog):
         self.progress_bar.show()
         self.progress_bar.setValue(5)
         self.status_lbl.setText("Initializing download...")
-        self.cancel_download_btn.setEnabled(True); self.cancel_download_btn.show()
 
         dest_dir = default_download_dir()
         target_res = self.res_combo.currentText()
@@ -1206,25 +1141,18 @@ class MediaDownloaderDialog(QDialog):
             direct_audio_url=direct_audio_url,
             sound_title=sound_title
         )
-        callbacks=_DownloaderCallbacks(self,'download',self._download_worker)
-        self._download_worker.progress.connect(callbacks.progress,Qt.QueuedConnection)
-        self._download_worker.finished.connect(callbacks.result,Qt.QueuedConnection)
-        self._download_worker.error.connect(callbacks.error,Qt.QueuedConnection)
-        self._start_task(self._download_worker,'_download_thread',callbacks)
-
-    def _download_result_is_current(self):
-        return not self._closed
+        self._download_worker.progress.connect(self._on_download_progress)
+        self._download_worker.finished.connect(self._on_download_finished)
+        self._download_worker.error.connect(self._on_download_error)
+        self._download_worker.start()
 
     @Slot(float, str)
     def _on_download_progress(self, pct: float, msg: str):
-        if not self._download_result_is_current():return
         self.progress_bar.setValue(int(pct))
         self.status_lbl.setText(msg)
 
     @Slot(str)
     def _on_download_finished(self, file_path: str):
-        if not self._download_result_is_current():return
-        self.cancel_download_btn.hide()
         self.progress_bar.setValue(100)
         self.status_lbl.setText(f"✓ Downloaded: {file_path}")
         if getattr(self, "metadata", None) and self.metadata.get("is_sound_only"):
@@ -1246,8 +1174,6 @@ class MediaDownloaderDialog(QDialog):
 
     @Slot(str)
     def _on_download_error(self, err_msg: str):
-        if not self._download_result_is_current():return
-        self.cancel_download_btn.hide()
         self.btn_download_video.setEnabled(True)
         self.btn_download_audio.setEnabled(True)
         self.fetch_btn.setEnabled(True)
@@ -1272,13 +1198,6 @@ class MediaDownloaderDialog(QDialog):
                 QMessageBox.critical(self, "Download Error", f"Failed to download media:\n\n{err_msg}")
 
     def closeEvent(self, event):
-        self._shutdown_tasks()
+        if self._download_worker and self._download_worker.isRunning():
+            self._download_worker.cancel()
         super().closeEvent(event)
-
-    def _shutdown_tasks(self):
-        self._closed=True
-        for job in (self._fetch_thread,self._thumb_thread,self._download_thread):
-            if job:job.cancel()
-
-    def done(self,result):
-        self._shutdown_tasks(); super().done(result)

@@ -3,9 +3,8 @@ from .theme_widgets import set_ui_style, set_ui_icon
 from .editing import edit_only
 import copy
 import math
-from threading import Event
 from dataclasses import asdict
-from PySide6.QtCore import Qt, Signal, QUrl, Slot
+from PySide6.QtCore import Qt, Signal, QUrl
 from PySide6.QtGui import QColor, QFontDatabase,QTextCursor
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from .media_source import set_media_source
@@ -86,7 +85,6 @@ class PropertiesPanel(QWidget):
     changed=Signal(); requestCrop=Signal(str)
     def __init__(self,window):
         super().__init__(); self.window=window; self.item_id=""; self.caption_id=""; self.transition_id=""; self.updating=False
-        self._title_tts_request = None
         self.bindings=[]; self.audio_bindings=[]; self.color_bindings=[]; self.style_bindings=[]; self.style_colors=[]; self.style_combos=[]
         root=QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
         self.filename=QLabel("No clip selected"); self.filename.setObjectName("inspectorFilename"); root.addWidget(self.filename)
@@ -457,8 +455,6 @@ class PropertiesPanel(QWidget):
         self.changed.emit()
 
     def select(self,item_id):
-        if item_id != self.item_id and self._title_tts_request and self._title_tts_request["preview"]:
-            self.cancel_title_tts()
         if not item_id and getattr(self, "transition_id", "") and getattr(self.window, "timeline", None) and getattr(self.window.timeline, "selected_transition_id", "") == self.transition_id:
             trans = self.window.project.transition_by_id(self.transition_id) if getattr(self.window, "project", None) else None
             if trans:
@@ -1035,8 +1031,6 @@ class PropertiesPanel(QWidget):
     @edit_only
     def edit_title(self):
         if self.updating:return
-        if self._title_tts_request and self._title_tts_request["item_id"]==self.item_id:
-            self.cancel_title_tts()
         for item in self.targets(False):
             if item.role=='title':item.title_text=self.title_text.toPlainText()
         self.window.text_edited()
@@ -1091,7 +1085,6 @@ class PropertiesPanel(QWidget):
 
     def reset_title_tts(self):
         if self.updating:return
-        self.cancel_title_tts()
         for item in self.targets(False):
             if item.role=='title':
                 item.tts_enabled=False
@@ -1103,7 +1096,6 @@ class PropertiesPanel(QWidget):
 
     def toggle_title_tts(self,enabled):
         if self.updating:return
-        if not enabled:self.cancel_title_tts()
         for item in self.targets(False):
             if item.role=='title':item.tts_enabled=enabled
         for w in (self.title_tts_voice,self.title_tts_speed,self.title_tts_pitch,self.title_tts_preview_btn,self.title_tts_generate_btn,self.title_tts_match_duration):
@@ -1112,7 +1104,6 @@ class PropertiesPanel(QWidget):
 
     def edit_title_tts_voice(self):
         if self.updating:return
-        self.cancel_title_tts()
         voice=self.title_tts_voice.currentData()
         for item in self.targets(False):
             if item.role=='title':item.tts_voice=voice
@@ -1120,26 +1111,43 @@ class PropertiesPanel(QWidget):
 
     def edit_title_tts_speed(self,val):
         if self.updating:return
-        self.cancel_title_tts()
         for item in self.targets(False):
             if item.role=='title':item.tts_speed=val
         self.changed.emit()
 
     def edit_title_tts_pitch(self,val):
         if self.updating:return
-        self.cancel_title_tts()
         for item in self.targets(False):
             if item.role=='title':item.tts_pitch=val
         self.changed.emit()
 
     def preview_title_tts(self):
-        if self._title_tts_request and self._title_tts_request["preview"]:
-            self.cancel_title_tts()
+        text=self.title_text.toPlainText().strip()
+        if not text:
+            self.title_tts_status.setText("Enter text in the Title text box first.")
+            self.title_tts_status.show(); return
+        voice=self.title_tts_voice.currentData() or DEFAULT_VOICE
+        speed=int(self.title_tts_speed.spin.value())
+        pitch=int(self.title_tts_pitch.spin.value())
+        if not hasattr(self,"_tts_preview_player"):
+            self._tts_preview_player=QMediaPlayer(self)
+            self._tts_preview_output=QAudioOutput(self)
+            self._tts_preview_player.setAudioOutput(self._tts_preview_output)
+            self._tts_preview_player.playbackStateChanged.connect(self._on_title_preview_state)
+        if self._tts_preview_player.playbackState()==QMediaPlayer.PlayingState:
+            self._tts_preview_player.stop()
+            self.title_tts_preview_btn.setText(" Preview")
+            self.title_tts_preview_btn.setIcon(lucide_icon("play","#ffffff",12))
             return
-        if hasattr(self,"_tts_preview_player") and self._tts_preview_player.playbackState()==QMediaPlayer.PlayingState:
-            self.cancel_title_tts()
-            return
-        self._start_title_tts(preview=True)
+        try:
+            path=synthesize_speech(text[:200],voice,speed,pitch)
+            set_media_source(self._tts_preview_player,QUrl.fromLocalFile(path))
+            self._tts_preview_player.play()
+            self.title_tts_preview_btn.setText(" Stop")
+            self.title_tts_preview_btn.setIcon(lucide_icon("square","#ff6b6b",12))
+        except Exception as err:
+            self.title_tts_status.setText(f"Preview error: {err}")
+            self.title_tts_status.show()
 
     def _on_title_preview_state(self,state):
         if state!=QMediaPlayer.PlayingState:
@@ -1148,131 +1156,44 @@ class PropertiesPanel(QWidget):
 
     @edit_only
     def generate_title_tts(self):
-        if self._title_tts_request and not self._title_tts_request["preview"] and self._title_tts_request["item_id"]==self.item_id:
-            self.cancel_title_tts()
-            return
-        self._start_title_tts(preview=False)
-
-    def cancel_title_tts(self):
-        request = self._title_tts_request
-        self._title_tts_request = None
-        if request:
-            request["cancel"].set()
-        if hasattr(self, "_tts_preview_player"):
-            self._tts_preview_player.stop()
-        if hasattr(self, "title_tts_preview_btn"):
-            self.title_tts_preview_btn.setText(" Preview")
-            self.title_tts_generate_btn.setText(" Generate / Link Audio")
-            if request:
-                self.title_tts_status.setText("Speech generation cancelled.")
-                self.title_tts_status.show()
-
-    def _start_title_tts(self, preview):
         item=self.window.project.item_by_id(self.item_id)
         if not item or item.role!='title':return
-        if getattr(self.window, "_closing", False) or self.window.current_page != 0:return
-        if self.window.project.track_states.get(item.track, {}).get("locked", False):return
         text=item.title_text.strip() or self.title_text.toPlainText().strip()
         if not text:
             self.title_tts_status.setText("Enter text in the Title text box first.")
             self.title_tts_status.show(); return
         voice=item.tts_voice or self.title_tts_voice.currentData() or DEFAULT_VOICE
-        speed=item.tts_speed
-        pitch=item.tts_pitch
-        self.cancel_title_tts()
-        cancel = Event()
-        request = {"project": self.window.project, "item_id": item.id,
-                   "item": asdict(item), "preview": preview, "cancel": cancel,
-                   "match_duration": self.title_tts_match_duration.isChecked()}
-        self._title_tts_request = request
-        ffmpeg_bin = self.window.settings.get("ffmpeg", "ffmpeg")
-        ffprobe_bin = self.window.settings.get("ffprobe", "ffprobe")
-        self.title_tts_status.setText("Generating voice preview..." if preview else "Generating linked speech...")
-        self.title_tts_status.show()
-        if preview:self.title_tts_preview_btn.setText(" Cancel preview")
-        else:self.title_tts_generate_btn.setText(" Cancel generation")
-        from .ui import Worker
-        def work():
-            try:
-                path = synthesize_speech(text[:200] if preview else text, voice, speed, pitch,
-                                         ffmpeg_bin=ffmpeg_bin, cancel_check=cancel.is_set)
-                if cancel.is_set():raise InterruptedError("Speech generation cancelled.")
-                media = None if preview else probe(path, ffprobe_bin, ffmpeg_bin)
-                if cancel.is_set():raise InterruptedError("Speech generation cancelled.")
-                return {"cancel": cancel, "path": path, "media": media}
-            except InterruptedError:
-                raise
-            except Exception as err:
-                return {"cancel": cancel, "error": str(err)}
-        worker = Worker(work)
-        worker.cancel_callback = cancel.set
-        request["worker"] = worker
-        worker.signals.result.connect(self._on_title_tts_result, Qt.QueuedConnection)
-        self.window.start_worker(worker)
-
-    @Slot(object)
-    def _on_title_tts_result(self, result):
-        request = self._title_tts_request
-        if not request or request["cancel"] is not result["cancel"] or request["cancel"].is_set():return
-        self._title_tts_request = None
-        self.title_tts_preview_btn.setText(" Preview")
-        self.title_tts_generate_btn.setText(" Generate / Link Audio")
-        p=self.window.project
-        item=p.item_by_id(request["item_id"])
-        if (getattr(self.window, "_closing", False) or p is not request["project"] or
-            self.window.current_page != 0 or not item or asdict(item) != request["item"] or
-            p.track_states.get(item.track, {}).get("locked", False)):
-            if self.item_id==request["item_id"]:
-                self.title_tts_status.setText("Speech discarded because its title or project changed.")
-            return
-        if result.get("error"):
-            self.title_tts_status.setText(f"TTS error: {result['error']}")
-            self.title_tts_status.show()
-            return
-        if request["preview"]:
-            if self.item_id != item.id:return
-            if not hasattr(self,"_tts_preview_player"):
-                self._tts_preview_player=QMediaPlayer(self)
-                self._tts_preview_output=QAudioOutput(self)
-                self._tts_preview_player.setAudioOutput(self._tts_preview_output)
-                self._tts_preview_player.playbackStateChanged.connect(self._on_title_preview_state)
-            set_media_source(self._tts_preview_player,QUrl.fromLocalFile(result["path"]))
-            self._tts_preview_player.play()
-            self.title_tts_preview_btn.setText(" Stop")
-            self.title_tts_status.hide()
-            return
-        probed=result["media"]
-        linked_audio=next((i for i in p.timeline if i.track in p.audio_tracks and i.link_id and i.link_id==item.link_id),None)
-        if linked_audio and p.track_states.get(linked_audio.track, {}).get("locked",False):
-            self.title_tts_status.setText("The linked audio track is locked."); return
+        speed=item.tts_speed or int(self.title_tts_speed.spin.value())
+        pitch=item.tts_pitch or int(self.title_tts_pitch.spin.value())
         try:
+            path=synthesize_speech(text,voice,speed,pitch)
+            probed=probe(path,self.window.settings.get("ffprobe","ffprobe"),self.window.settings.get("ffmpeg","ffmpeg"))
             self.window.project.add_media(probed)
             self.window.refresh_media()
             self.window.request_waveform(probed)
 
+            p=self.window.project
             link=item.link_id or uid(); item.link_id=link
             linked_audio=next((i for i in p.timeline if i.track in p.audio_tracks and i.link_id and i.link_id==link),None)
             if linked_audio:
                 linked_audio.media_id=probed.id; linked_audio.in_point=0.0; linked_audio.duration=probed.duration
                 p.overwrite({linked_audio.id})
             else:
-                track=next((track for track in p.audio_tracks if not p.track_states.get(track,{}).get("locked",False)),None)
-                if track is None:track=p.add_track("audio")
+                track=p.audio_tracks[0] if p.audio_tracks else p.add_track("audio")
                 audio_clip=TimelineItem(uid(),probed.id,track,item.start,probed.duration,0.0,group_id=item.group_id or uid(),link_id=link,role="sfx")
                 p.timeline.append(audio_clip)
                 p.overwrite({audio_clip.id})
 
-            if request["match_duration"]:
+            if self.title_tts_match_duration.isChecked():
                 item.duration=probed.duration
                 p.overwrite({item.id})
 
             item.tts_enabled=True
-            if self.item_id==item.id:self.title_tts_enabled.setChecked(True)
+            self.title_tts_enabled.setChecked(True)
             self.window.commit_history()
             self.window.model_changed()
-            if self.item_id==item.id:
-                self.title_tts_status.setText(f"✓ Linked voiceover ({probed.duration:.1f}s)")
-                self.title_tts_status.show()
+            self.title_tts_status.setText(f"✓ Linked voiceover ({probed.duration:.1f}s)")
+            self.title_tts_status.show()
         except Exception as err:
             self.title_tts_status.setText(f"TTS error: {err}")
             self.title_tts_status.show()

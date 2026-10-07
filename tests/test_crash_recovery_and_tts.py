@@ -329,20 +329,3 @@ if __name__ == "__main__":
     unittest.main()
 
 
-
-
-class SpeechProviderCleanupTests(unittest.TestCase):
-    def test_default_narration_keeps_processed_edge_voice_without_credentials(self):
-        from pathlib import Path
-        import tempfile
-        from unittest.mock import patch
-        from kinetic_cut import tts
-        calls=[]
-        async def speech(text,voice,rate,pitch,target,cancel_check=None):
-            calls.append((voice,rate,pitch));target.write_bytes(b'raw-edge-speech')
-        def mastering(command,cancel_check):
-            Path(command[-1]).write_bytes(b'mastered-adam')
-        with tempfile.TemporaryDirectory() as directory,patch.object(tts,'_synthesize_async',speech),patch.object(tts,'_run_audio_process',mastering):
-            result=tts.synthesize_speech('Ordinary narration',output_path=Path(directory)/'speech.mp3')
-            self.assertEqual(Path(result).read_bytes(),b'mastered-adam')
-        self.assertEqual(calls,[('en-US-AndrewNeural','+0%','-2Hz')])
