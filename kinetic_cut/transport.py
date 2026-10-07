@@ -4,7 +4,7 @@ import copy
 import hashlib
 from .process import run as run_process
 from .audio_levels import channel_peaks
-from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot, Qt, QMetaObject, Q_ARG
+from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot, Qt, QMetaObject
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink, QAudioBufferOutput
 
 
@@ -22,7 +22,7 @@ class TimelineTransport(QObject):
         self.origin=0.; self.started=0.; self.decoders={}; self.closed=False
         self.audio_cache={}; self.audio_pending=set(); self.audio_failed=set()
         self.warm_keys=set(); self.previous_video={}; self.boundary_holds={}; self._project=None
-        self._pending_video_seeks={}; self._video_seek_floor={}; self._loading_positions={}
+        self._pending_video_seeks={}; self._video_seek_floor={}
         self._frame_epochs={}; self._frame_jobs=[]; self._frame_executor=None
         self._frame_sequence=0; self._published_sequences={}; self._cpu_frame_fallback=set(); self._frame_epoch=0; self._frame_cursor=0
         self.scrubbing=False; self._last_scrub_sync=0.; self._scrub_pending_pos=None
@@ -79,7 +79,7 @@ class TimelineTransport(QObject):
     def pause(self):
         if self.playing:self.tick()
         self.playing=False; self.timer.stop(); self._meter_timer.stop()
-        for player,_,_ in self.decoders.values():QMetaObject.invokeMethod(player,'pause',Qt.QueuedConnection)
+        for player,_,_ in self.decoders.values():player.pause()
         self._meter_display={}; self.levelsChanged.emit(self._idle_levels())
         self.stateChanged.emit(False)
 
@@ -174,12 +174,12 @@ class TimelineTransport(QObject):
                 output.setVolume(output.property('monitor_base_gain')*self.monitor_gain)
             player.setPlaybackRate(self.rate*(1 if audio_path else item.speed))
             if force or created or abs(player.position()-desired)>350:self.position_decoder(key,desired)
-            if self.playing and player.playbackState()!=QMediaPlayer.PlayingState:self.play_decoder(player)
+            if self.playing and player.playbackState()!=QMediaPlayer.PlayingState:player.play()
             elif created and video:
                 # A new paused decoder otherwise never produces its first frame.
                 # Prime only muted video; frame() pauses it without starting the clock.
-                self.play_decoder(player)
-            elif not self.playing and key not in self._pending_video_seeks and player.playbackState()==QMediaPlayer.PlayingState:QMetaObject.invokeMethod(player,'pause',Qt.QueuedConnection)
+                player.play()
+            elif not self.playing and key not in self._pending_video_seeks and player.playbackState()==QMediaPlayer.PlayingState:player.pause()
         # Keep decoders primed for clips in active transitions
         for trans in (() if caption_focus else getattr(p, "transitions", [])):
             if trans.contains_time(t):
@@ -218,9 +218,9 @@ class TimelineTransport(QObject):
                     if force or created or abs(player.position() - desired) > 350:
                         self.position_decoder(key, desired)
                     if created:
-                        self.play_decoder(player)
+                        player.play()
                     elif not self.playing and key not in self._pending_video_seeks and player.playbackState() == QMediaPlayer.PlayingState:
-                        QMetaObject.invokeMethod(player,'pause',Qt.QueuedConnection)
+                        player.pause()
         self.previous_video=current_video
         # Prepare both sides of nearby cuts, including backwards scrubbing.
         # Keep at most one neighbour per direction/lane and eight extra decoders.
@@ -258,8 +258,8 @@ class TimelineTransport(QObject):
                     output.setVolume(0.)
                     desired=(0 if direction>0 else max(0,item.duration-1/max(1,p.settings.fps))) if audio_path else max(item.in_point,source)
                     self.position_decoder(key,round(desired*1000))
-                    if video:self.play_decoder(player)
-                    else:QMetaObject.invokeMethod(player,'pause',Qt.QueuedConnection)
+                    if video:player.play()
+                    else:player.pause()
         self.warm_keys=warm
         for key in list(self.decoders):
             if key not in active|warm:self.retire_decoder(key)
@@ -281,7 +281,7 @@ class TimelineTransport(QObject):
         sink=QVideoSink(player) if video else None
         if sink:player.setVideoSink(sink); sink._frame_stamp=None
         self.decoders[key]=(player,output,sink)
-        player.mediaStatusChanged.connect(lambda status,k=key,p=player:self.decoder_loaded(k,p,status),Qt.QueuedConnection)
+        player.mediaStatusChanged.connect(lambda status,k=key,p=player:self.decoder_loaded(k,p,status))
         from .media_source import set_media_source
         set_media_source(player,QUrl.fromLocalFile(self.window.proxies.get(media.id,media.path) if video else audio_path or media.path))
 
@@ -316,13 +316,6 @@ class TimelineTransport(QObject):
         self._meter_published_clips.clear()
         self.levelsChanged.emit({track:(*value,False) for track,value in self._meter_display.items()})
 
-    def play_decoder(self,player):
-        # A loading source is primed once by decoder_loaded after its seek.
-        # Starting it sooner and seeking again from the queued LoadedMedia
-        # notification can strand ordinary B-frame video in BufferingMedia.
-        if player.mediaStatus()!=QMediaPlayer.LoadingMedia:
-            QMetaObject.invokeMethod(player,'play',Qt.QueuedConnection)
-
     def position_decoder(self,key,milliseconds):
         player,_,sink=self.decoders[key]
         if sink:
@@ -332,24 +325,18 @@ class TimelineTransport(QObject):
             # publish (or pause on) the source's initial frame while it loads.
             self._pending_video_seeks[key]=milliseconds
             self._video_seek_floor[key]=milliseconds*1000
-        if player.mediaStatus()==QMediaPlayer.LoadingMedia:
-            self._loading_positions[key]=milliseconds
-            return
-        # Seeking joins native decoder work too. Run the C++ slot from Qt's
-        # event loop without retaining Python's GIL, as for stop/play/pause.
-        QMetaObject.invokeMethod(player,'setPosition',Qt.QueuedConnection,Q_ARG('qint64',milliseconds))
+        player.setPosition(milliseconds)
 
     def decoder_loaded(self,key,player,status):
         if self.closed or status!=QMediaPlayer.LoadedMedia:return
         decoder=self.decoders.get(key)
         if not decoder or decoder[0] is not player:return
-        target=self._loading_positions.pop(key,self._pending_video_seeks.get(key))
         if decoder[2] is None:
-            player.setActiveVideoTrack(-1)
-        if target is not None and (target!=0 or player.position()!=0):
-            QMetaObject.invokeMethod(player,'setPosition',Qt.QueuedConnection,Q_ARG('qint64',target))
-        if decoder[2] is not None or self.playing:
-            self.play_decoder(player)
+            player.setActiveVideoTrack(-1); return
+        target=self._pending_video_seeks.get(key)
+        if target is not None:
+            player.setPosition(target)
+            player.play()  # Muted priming; pause only after the sought frame.
 
     @Slot()
     def poll_frames(self):
@@ -423,7 +410,7 @@ class TimelineTransport(QObject):
         self._meter_tracks.pop(key,None); self._meter_peaks.pop(key,None); self._meter_last.pop(key,None)
         self._frame_epochs.pop(key,None)
         self._published_sequences.pop(key,None); self._cpu_frame_fallback.discard(key)
-        self._pending_video_seeks.pop(key,None); self._video_seek_floor.pop(key,None); self._loading_positions.pop(key,None)
+        self._pending_video_seeks.pop(key,None); self._video_seek_floor.pop(key,None)
         decoder=self.decoders.pop(key,None)
         self.window.preview.frames.pop(key,None)
         if not decoder:return
@@ -477,7 +464,7 @@ class TimelineTransport(QObject):
             self.window.preview.set_frame(image); self.boundary_holds.pop(key,None)
             for value in self.previous_video.values():
                 if value['key']==key:value['image']=image
-        if (not self.playing or key in self.warm_keys) and key in self.decoders:QMetaObject.invokeMethod(self.decoders[key][0],'pause',Qt.QueuedConnection)
+        if (not self.playing or key in self.warm_keys) and key in self.decoders:self.decoders[key][0].pause()
 
     def shutdown(self):
         self._scrub_timer.stop()

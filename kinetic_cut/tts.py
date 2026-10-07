@@ -1,16 +1,12 @@
-"""Text-to-Speech synthesis with curated viral voices (including ElevenLabs Adam) and batch processing."""
+"""Edge speech synthesis with curated voices, processed Adam narration and batching."""
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import concurrent.futures
-import json
-import os
 import re
 import shutil
 import sys
-import urllib.request
-import urllib.error
 import subprocess
 import tempfile
 from pathlib import Path
@@ -129,63 +125,6 @@ def _synthesize_adam(
     return str(target)
 
 
-def synthesize_elevenlabs(
-    text: str,
-    api_key: str,
-    voice_id: str = "pNInz6obpgDQGcFmaJgB",
-    rate_percent: int = 0,
-    target_path: Path | str | None = None,
-    cancel_check: Callable[[], bool] | None = None,
-) -> str:
-    cleaned = text.strip()
-    if not cleaned:
-        raise ValueError("Script text cannot be empty.")
-    key = api_key.strip() if api_key else os.environ.get("ELEVENLABS_API_KEY", "").strip()
-    if not key:
-        raise ValueError("ElevenLabs API Key required. Enter your key or select a free voice like Adam or Christopher.")
-
-    speed_factor = max(0.7, min(1.2, 1.0 + (rate_percent / 100.0)))
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    headers = {
-        "xi-api-key": key,
-        "Content-Type": "application/json",
-        "Accept": "audio/mpeg"
-    }
-    body = {
-        "text": cleaned,
-        "model_id": "eleven_multilingual_v2",
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.75,
-            "speed": round(speed_factor, 2)
-        }
-    }
-    async def request_audio():
-        import aiohttp
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-            async with session.post(url, json=body, headers=headers) as resp:
-                if resp.status >= 400:
-                    error = await resp.json(content_type=None)
-                    detail = error.get("detail", {})
-                    message = detail.get("message") if isinstance(detail, dict) else str(detail)
-                    raise RuntimeError(f"ElevenLabs error ({resp.status}): {message or resp.reason}")
-                return await resp.read()
-    try:
-        audio_bytes = asyncio.run(_await_cancellable(request_audio(), cancel_check))
-    except InterruptedError:
-        raise
-    except Exception as err:
-        raise RuntimeError(f"ElevenLabs connection failed: {err}")
-
-    target = Path(target_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temp_target = target.with_suffix(".tmp.mp3")
-    temp_target.write_bytes(audio_bytes)
-    if temp_target.exists():
-        temp_target.replace(target)
-    return str(target)
-
-
 async def _synthesize_async(text: str, voice: str, rate: str, pitch: str, target: Path, cancel_check=None):
     target.parent.mkdir(parents=True, exist_ok=True)
     temp_target = target.with_suffix(".tmp.mp3")
@@ -202,7 +141,6 @@ def synthesize_speech(
     rate_percent: int = 0,
     pitch_hz: int = 0,
     output_path: str | Path | None = None,
-    api_key: str = "",
     ffmpeg_bin: str = "ffmpeg",
     cancel_check: Callable[[], bool] | None = None,
 ) -> str:
@@ -226,7 +164,7 @@ def synthesize_speech(
         with tempfile.TemporaryDirectory(prefix=".tts-", dir=target.parent) as work_dir:
             work_target = Path(work_dir) / "speech.mp3"
             _synthesize_to_target(cleaned_text, voice, rate_percent, pitch_hz,
-                                  work_target, api_key, ffmpeg_bin, cancel_check)
+                                  work_target, ffmpeg_bin, cancel_check)
             _check_cancel(cancel_check)
             work_target.replace(target)
 
@@ -235,17 +173,11 @@ def synthesize_speech(
 
 
 def _synthesize_to_target(cleaned_text, voice, rate_percent, pitch_hz, target,
-                          api_key, ffmpeg_bin, cancel_check):
+                          ffmpeg_bin, cancel_check):
         rate_str = f"{rate_percent:+d}%"
         pitch_str = f"{pitch_hz:+d}Hz"
         if voice in ("adam-narrator", "adam-shorts") or voice.startswith("adam"):
             _synthesize_adam(cleaned_text, rate_percent=rate_percent, pitch_hz=pitch_hz, target_path=target, ffmpeg_bin=ffmpeg_bin, cancel_check=cancel_check)
-        elif voice.startswith("elevenlabs:"):
-            if api_key.strip():
-                voice_id = voice.split(":", 1)[1]
-                synthesize_elevenlabs(cleaned_text, api_key=api_key, voice_id=voice_id, rate_percent=rate_percent, target_path=target, cancel_check=cancel_check)
-            else:
-                _synthesize_adam(cleaned_text, rate_percent=rate_percent, pitch_hz=pitch_hz, target_path=target, ffmpeg_bin=ffmpeg_bin, cancel_check=cancel_check)
         else:
             _ensure_windows_asyncio()
             try:
@@ -324,7 +256,6 @@ def synthesize_dialogue_batches(
     progress_callback: Callable[[int, str], None] | None = None,
     ffmpeg_bin: str = "ffmpeg",
     cancel_check: Callable[[], bool] | None = None,
-    api_key: str = "",
 ) -> str:
     """Synthesize dialogue of any length via batching with progress updates and ffmpeg concatenation."""
     cleaned_text = text.strip()
@@ -357,7 +288,7 @@ def synthesize_dialogue_batches(
     if total_batches <= 1:
         if progress_callback:
             progress_callback(10, "Generating dialogue...")
-        synthesize_speech(cleaned_text, voice, rate_percent, pitch_hz, output_path=target, api_key=api_key, ffmpeg_bin=ffmpeg_bin, cancel_check=cancel_check)
+        synthesize_speech(cleaned_text, voice, rate_percent, pitch_hz, output_path=target, ffmpeg_bin=ffmpeg_bin, cancel_check=cancel_check)
         _check_cancel(cancel_check)
         if progress_callback:
             progress_callback(100, "Dialogue ready")
@@ -374,7 +305,7 @@ def synthesize_dialogue_batches(
                 raise InterruptedError("Dialogue generation cancelled.")
 
             chunk_path = batch_dir / f"part_{i:04d}.mp3"
-            synthesize_speech(batch_text, voice, rate_percent, pitch_hz, output_path=chunk_path, api_key=api_key, ffmpeg_bin=ffmpeg_bin, cancel_check=cancel_check)
+            synthesize_speech(batch_text, voice, rate_percent, pitch_hz, output_path=chunk_path, ffmpeg_bin=ffmpeg_bin, cancel_check=cancel_check)
             _check_cancel(cancel_check)
             chunk_files.append(chunk_path)
 

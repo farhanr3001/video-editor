@@ -30,6 +30,9 @@ if __name__ == "__main__":
     if len(sys.argv)==3 and sys.argv[1]=='--stability-selftest':
         from kinetic_cut.stability_diagnostics import run
         sys.exit(run(sys.argv[2]))
+    if len(sys.argv)==3 and sys.argv[1]=='--resume-selftest':
+        from kinetic_cut.resume_diagnostics import run
+        sys.exit(run(sys.argv[2]))
     if len(sys.argv)==3 and sys.argv[1]=='--tts-stability-selftest':
         from kinetic_cut.tts_stability_diagnostics import run
         sys.exit(run(sys.argv[2]))

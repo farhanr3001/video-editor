@@ -42,7 +42,6 @@ DEFAULT_SETTINGS = {
     "ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "whisper_cli": "",
     "whisper_model": "base.en", "whisper_model_path": "", "caption_language": "en",
     "sfx_folder": "", "phone_folder": "/sdcard/Movies/KineticCut",
-    "elevenlabs_api_key": "",
     "effects_category": "All Effects",
     "shortcuts": DEFAULT_SHORTCUTS,
 }
