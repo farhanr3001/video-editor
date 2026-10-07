@@ -534,12 +534,12 @@ class TimelineWidget(BaseTimeline):
         self._blade_snap=None
         return max(hit.start,min(end,round(value*fps)/fps))
 
-    def item_rect(self,item):
-        tr=self.track_rect(item.track)
+    def item_rect(self,item,track_rect=None):
+        tr=self.track_rect(item.track) if track_rect is None else track_rect
         return QRectF(self.x_for_time(item.start),tr.y()+3,max(5,item.duration*self.pixels_per_second),tr.height()-6)
 
-    def caption_rect(self,caption):
-        tr=self.track_rect("subtitle_1")
+    def caption_rect(self,caption,track_rect=None):
+        tr=self.track_rect("subtitle_1") if track_rect is None else track_rect
         return QRectF(self.x_for_time(caption.start),tr.y()+7,max(5,(caption.end-caption.start)*self.pixels_per_second),tr.height()-14)
 
     def header_controls(self,track):
@@ -621,7 +621,7 @@ class TimelineWidget(BaseTimeline):
         size=viewport.size()*scale
         cursor_only=(self._timeline_backing is not None and self._timeline_backing.size()==size
                      and self._timeline_backing.devicePixelRatioF()==scale
-                     and not self._playhead_damage.isEmpty()
+                     and not (self._playhead_damage|self._meter_damage).isEmpty()
                      and event.region().subtracted(self._playhead_damage|self._meter_damage).isEmpty()
                      and self.drag_mode in {'','marquee','playhead'} and self.snap_guide is None)
         self._playhead_damage=self._playhead_damage.subtracted(event.region())

@@ -20,7 +20,9 @@ class MissingMediaController(QObject):
         paths=offline.source_paths(w.project)
         paths.extend(m.path for e in self.panel.power.data['media'] for m in offline.leaf_media(MediaItem(**e['media'])))
         paths.extend(entry.path for folder in self.panel.watch_folders.folders.values() for entry in folder.entries.values())
+        if not paths:return
         self.busy=True; worker=Worker(offline.scan,paths)
+        worker.maintenance=True
         worker.signals.result.connect(self.checked)
         worker.signals.finished.connect(lambda:setattr(self,'busy',False)); w.start_worker(worker)
 

@@ -107,3 +107,20 @@ class PlaybackSchedulingTests(unittest.TestCase):
             self.assertFalse(t._painted_marquee.isEmpty())
             t.cancel_drag(); self.app.processEvents(); self.assertTrue(t._painted_marquee.isEmpty())
         finally:t.close(); t.deleteLater()
+
+    def test_audio_meter_only_damage_reuses_static_tracks(self):
+        t=TimelineWidget(); t.resize(1000,420); t.set_project(self.p); t.show(); self.app.processEvents()
+        try:
+            t.viewport().repaint(); self.assertIsNotNone(t._timeline_backing)
+            self.assertTrue(t._playhead_damage.isEmpty())
+            before=t.viewport().grab().toImage()
+            with patch.object(t,'paint_track_header',wraps=t.paint_track_header) as headers:
+                t.set_audio_levels({'audio_1':(.8,.5,True)})
+                self.app.processEvents()
+                self.assertEqual(headers.call_count,0)
+            after=t.viewport().grab().toImage()
+            self.assertNotEqual(before,after)  # live meter still paints
+            with patch.object(t,'paint_track_header',wraps=t.paint_track_header) as headers:
+                t.viewport().update(); self.app.processEvents()
+                self.assertGreater(headers.call_count,0)  # ordinary edit damage
+        finally:t.close(); t.deleteLater()

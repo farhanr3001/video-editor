@@ -75,12 +75,15 @@ class TimelineMarquee(QObject):
         self.logical=QRectF(self.anchor,self.endpoint).normalized(); r=self.logical
         t.marquee=QRectF(0,0,r.width()*t.pixels_per_second,r.height())
         metrics={name:(base,origin) for name,_,base,_,origin in self.metrics()}
+        # All clips in a lane share geometry. Compute it once per move instead
+        # of reconstructing sections/track lists for every clip and caption.
+        lanes={track:(t._section_name(track),t.track_rect(track)) for track in t.tracks()}
         def intersects(rect,track):
-            base,origin=metrics[t._section_name(track)]
+            base,origin=metrics[lanes[track][0]]
             logical=QRectF(t.time_for_x(rect.left()),base+rect.top()-origin,rect.width()/t.pixels_per_second,rect.height())
             return logical.intersects(r)
-        ids={i.id for i in t.project.timeline if t._section_name(i.track) in metrics and intersects(t.item_rect(i),i.track)}
-        captions={c.id for c in t.project.captions if 'subtitle' in metrics and intersects(t.caption_rect(c),'subtitle_1')}
+        ids={i.id for i in t.project.timeline if i.track in lanes and lanes[i.track][0] in metrics and intersects(t.item_rect(i,lanes[i.track][1]),i.track)}
+        captions={c.id for c in t.project.captions if 'subtitle' in metrics and intersects(t.caption_rect(c,lanes['subtitle_1'][1]),'subtitle_1')}
         ids=t.marquee_initial|t.expanded(ids); captions=t.marquee_caption_initial|captions
         changed=ids!=t.selected_ids or captions!=t.selected_caption_ids
         t.selected_ids=ids; t.selected_id=t.selected_id if t.selected_id in ids else next(iter(ids),''); t.selected_caption_ids=captions; t.selected_caption=next(iter(captions),'')
@@ -117,8 +120,10 @@ class TimelineMarquee(QObject):
         if metric is None:return
         name,rect,*_=metric
         step=edge_step(self.pos.y(),rect.top(),rect.bottom()); bar=getattr(t,name+'_scroll')
+        horizontal=edge_step(self.pos.x(),t.LABEL_WIDTH,t.viewport().width())
+        if not step and not horizontal:return
         bar.setValue(bar.value()+(-step if name in {'video','subtitle'} else step))
-        bar=t.horizontalScrollBar(); bar.setValue(bar.value()+edge_step(self.pos.x(),t.LABEL_WIDTH,t.viewport().width()))
+        bar=t.horizontalScrollBar(); bar.setValue(bar.value()+horizontal)
         self.update()
 
 

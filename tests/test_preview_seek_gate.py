@@ -4,6 +4,7 @@ from PySide6.QtGui import QImage
 from PySide6.QtCore import Qt
 from PySide6.QtMultimedia import QMediaPlayer
 from kinetic_cut.ui import MainWindow
+from kinetic_cut.model import Project, MediaItem, TimelineItem
 
 
 class PreviewSeekGateTests(unittest.TestCase):
@@ -35,3 +36,32 @@ class PreviewSeekGateTests(unittest.TestCase):
         with patch('kinetic_cut.transport.QMetaObject.invokeMethod'):self.t.retire_decoder(self.key)
         self.t.decoder_loaded(self.key,self.player,QMediaPlayer.LoadedMedia)
         self.player.play.assert_not_called(); self.assertFalse(self.t._pending_video_seeks)
+
+    def resume_project(self, player_position=2020):
+        p=Project(media=[MediaItem('source','fixture.mp4','video','fixture',20,640,360,30)],
+                  timeline=[TimelineItem('v','source','video_1',0,20)])
+        self.w.project=p; self.w.preview.set_project(p)
+        self.key=('source',0.,1.,'video'); self.t.decoders={self.key:(self.player,Mock(),self.sink)}
+        self.t._project=p; self.t.position=2.
+        self.player.position.return_value=player_position
+        self.player.playbackState.return_value=QMediaPlayer.PausedState
+
+    def test_resume_does_not_reseek_positioned_decoder_or_reset_frame_gate(self):
+        self.resume_project()
+        self.t._frame_epochs[self.key]=7; self.t._video_seek_floor[self.key]=1_500_000
+        with patch.object(self.t,'position_decoder',wraps=self.t.position_decoder) as seek:
+            self.t.play(); seek.assert_not_called()
+        self.player.play.assert_called_once()
+        self.assertEqual(self.t._frame_epochs[self.key],7)
+        self.assertEqual(self.t._video_seek_floor[self.key],1_500_000)
+
+    def test_resume_still_corrects_drift_and_explicit_seek_positions(self):
+        self.resume_project(1000)
+        self.t.play(); self.player.setPosition.assert_called_with(2000)
+        self.t.pause(); self.player.reset_mock(); self.player.position.return_value=2000
+        self.t.seek(2.1); self.player.setPosition.assert_called_with(2100)
+
+    def test_restart_at_project_end_still_positions_to_start(self):
+        self.resume_project(20000); self.t.position=20.
+        self.t.play(); self.player.setPosition.assert_called_with(0)
+        self.assertEqual(self.t.position,0.)

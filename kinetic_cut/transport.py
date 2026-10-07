@@ -74,7 +74,11 @@ class TimelineTransport(QObject):
     def play(self):
         if self.position>=self.window.project.duration:self.position=0.
         self.origin=self.position; self.started=time.monotonic(); self.playing=True
-        self.sync(True); self.timer.start(); self._meter_timer.start(); self.stateChanged.emit(True)
+        # A paused decoder is already at the timeline position. Forcing another
+        # seek here flushes its queued frames and decodes from a keyframe again.
+        # sync still positions newly created/out-of-sync players; explicit seeks
+        # retain their force flag, source trim gates and loading behavior.
+        self.sync(); self.timer.start(); self._meter_timer.start(); self.stateChanged.emit(True)
 
     def pause(self):
         if self.playing:self.tick()

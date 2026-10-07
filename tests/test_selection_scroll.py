@@ -1,4 +1,5 @@
 import copy,unittest
+from unittest.mock import patch
 from PySide6.QtCore import Qt,QPoint,QPointF,QSize,QEvent,QEventLoop,QTimer
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
@@ -24,6 +25,18 @@ class SelectionScrollTests(unittest.TestCase):
     def wheel(self,view,point,delta):
         event=QWheelEvent(QPointF(point),QPointF(point),QPoint(),QPoint(0,delta),Qt.LeftButton,Qt.NoModifier,Qt.ScrollUpdate,False)
         self.app.sendEvent(view.viewport(),event)
+
+    def test_marquee_lane_geometry_is_reused_and_stationary_center_does_no_work(self):
+        t=self.timeline(); section=t._sections()['video']
+        start=QPointF(t.x_for_time(5),section.center().y())
+        t.drag_mode='marquee'; t.marquee_initial=set(); t.marquee_caption_initial=set()
+        t.marquee_controller.begin(start)
+        for n in range(100):t.project.timeline.append(TimelineItem('extra'+str(n),'','video_1',1,2,link_id=''))
+        with patch.object(t,'track_rect',wraps=t.track_rect) as geometry:
+            t.marquee_controller.move(start-QPointF(15,1))
+            self.assertLessEqual(geometry.call_count,len(t.tracks()))
+        with patch.object(t.marquee_controller,'update') as update:
+            t.marquee_controller.scroll(); update.assert_not_called()
     def test_timeline_video_wheel_keeps_offscreen_selection_anchored(self):
         t=self.timeline(); original=copy.deepcopy(t.project.timeline); rect=t._sections()['video']
         start=QPoint(round(t.x_for_time(4)),round(rect.bottom()-3)); end=QPoint(round(t.x_for_time(.5)),round(rect.top()+3))

@@ -478,7 +478,11 @@ class MainWindow(QMainWindow):
 
     def update_job_status(self):
         if not hasattr(self,"job_status"):return
-        count=len(self._workers); self.job_status.setVisible(count>0); self.job_progress.setVisible(count>0)
+        # File/folder presence polling is maintenance, not an import/render job.
+        # Keep its lifetime tracked for shutdown without relayout/animation on
+        # every no-change scan while the owner plays or interacts with the UI.
+        count=sum(not getattr(job,'maintenance',False) for job in self._workers)
+        self.job_status.setVisible(count>0); self.job_progress.setVisible(count>0)
         self.job_status.setText(f"{count} background task{'s' if count!=1 else ''}")
         self.job_status.setToolTip("Processing media, audio previews or renders. The workspace remains responsive.")
 

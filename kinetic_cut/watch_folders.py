@@ -144,6 +144,9 @@ class WatchFolders(QObject):
         settings = self.panel.window.settings
         worker = Worker(index_folders, dict(self.folders), settings.get('ffprobe', 'ffprobe'),
                         settings.get('ffmpeg', 'ffmpeg'), self.cancel)
+        worker.maintenance = all(entry.loaded == entry.signature
+                                 for folder in self.folders.values()
+                                 for entry in folder.entries.values())
         worker.signals.result.connect(self.indexed, Qt.QueuedConnection)
         worker.signals.error.connect(self.failed, Qt.QueuedConnection)
         self.panel.window.start_worker(worker)
@@ -154,9 +157,11 @@ class WatchFolders(QObject):
         if self.closed:return
         indexed, more = result
         presence = {}
+        changed = False
         for key, folder in indexed.items():
             # Removed watches cannot be resurrected by an in-flight result.
             if key in self.folders:
+                changed |= folder != self.folders[key]
                 presence.update({identity:identity not in folder.entries for identity in self.folders[key].entries})
                 presence.update({identity:False for identity in folder.entries})
                 self.folders[key] = folder
@@ -165,7 +170,7 @@ class WatchFolders(QObject):
         if attached-desired:self.watcher.removePaths(list(attached-desired))
         if desired-attached:self.watcher.addPaths(list(desired-attached))
         if presence and hasattr(self.panel,'missing_media'):self.panel.missing_media.checked(presence)
-        self.changed.emit()
+        if changed:self.changed.emit()
         if more or self.rescan:self.schedule()
 
     @Slot(str)

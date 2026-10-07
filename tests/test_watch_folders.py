@@ -179,6 +179,33 @@ class WatchPoolTests(unittest.TestCase):
         self.assertEqual(self.panel.grid.selectedItems()[0].text(),'Photo One.png')
         with patch.object(self.panel,'refresh') as refresh:self.panel.watches_changed(); refresh.assert_not_called()
         self.assertFalse(self.w.project.media)
+
+    def test_no_change_index_does_not_notify_ui_and_discovery_still_does(self):
+        notices=[]; self.watch.changed.connect(lambda:notices.append(True))
+        state,more=index_folders(self.watch.folders,'ffprobe','ffmpeg',self.watch.cancel,now=3)
+        self.watch.indexed((state,more)); self.assertEqual(notices,[])
+        Image.new('RGB',(160,90),'red').save(self.folder/'Added.png')
+        state,more=index_folders(self.watch.folders,'ffprobe','ffmpeg',self.watch.cancel,now=4)
+        self.watch.indexed((state,more)); self.assertEqual(len(notices),1)
+        self.assertIn('preparing',self.watch.status(self.key))
+        state,more=index_folders(self.watch.folders,'ffprobe','ffmpeg',self.watch.cancel,now=6)
+        self.watch.indexed((state,more)); self.assertEqual(len(notices),2)
+        self.assertEqual(self.panel.grid.count(),2)
+
+    def test_ready_watch_scans_are_maintenance_and_pending_probes_are_visible(self):
+        with patch.object(self.w,'start_worker') as start:
+            self.watch.check(); self.assertTrue(start.call_args.args[0].maintenance)
+            self.watch.busy=False
+            next(iter(self.watch.folders[self.key].entries.values())).loaded=()
+            self.watch.check(); self.assertFalse(start.call_args.args[0].maintenance)
+            for call in start.call_args_list:call.args[0].signals.deleteLater()
+        self.watch.busy=False
+
+    def test_empty_availability_check_does_not_start_a_job(self):
+        monitor=self.panel.missing_media
+        self.watch.folders={}; self.panel.power.data['media']=[]; self.w.project.media=[]; monitor.busy=False
+        with patch.object(self.w,'start_worker') as start:
+            monitor.check(); start.assert_not_called()
     def test_watched_bins_cannot_delete_or_write_into_source_folder(self):
         self.panel.grid.item(0).setSelected(True); before=copy.deepcopy(self.panel.power.data)
         QTest.keyClick(self.panel.grid,Qt.Key_Delete); self.assertTrue(self.image.is_file())

@@ -6,7 +6,8 @@ import weakref
 from unittest.mock import patch
 
 from PySide6.QtCore import QEvent, QObject, QThread, QThreadPool
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel, QProgressBar
+from types import SimpleNamespace
 
 from kinetic_cut.ui import MainWindow, Worker
 
@@ -111,3 +112,29 @@ class WorkerLifecycleTests(unittest.TestCase):
         self.assertFalse(self.owner._workers)
         self.assertIsNone(job_ref())
         self.assertIsNone(input_ref())
+
+    def test_maintenance_is_retained_and_finishes_like_foreground_work(self):
+        started, release = threading.Event(), threading.Event()
+        job=Worker(lambda:(started.set(),release.wait(5)))
+        job.maintenance=True; self.owner.start_worker(job)
+        try:
+            self.assertTrue(started.wait(5)); self.assertIn(job,self.owner._workers)
+        finally:release.set()
+        self.drain(); self.assertFalse(self.owner._workers)
+
+    def test_only_user_work_shows_task_indicator(self):
+        label=QLabel(); progress=QProgressBar()
+        maintenance=Worker(lambda:None); maintenance.maintenance=True
+        ordinary=Worker(lambda:None)
+        owner=SimpleNamespace(_workers={maintenance},job_status=label,job_progress=progress)
+        try:
+            MainWindow.update_job_status(owner)
+            self.assertTrue(label.isHidden()); self.assertTrue(progress.isHidden())
+            owner._workers.add(ordinary); MainWindow.update_job_status(owner)
+            self.assertFalse(label.isHidden()); self.assertFalse(progress.isHidden())
+            self.assertEqual(label.text(),'1 background task')
+            owner._workers.remove(ordinary); MainWindow.update_job_status(owner)
+            self.assertTrue(label.isHidden()); self.assertTrue(progress.isHidden())
+        finally:
+            label.deleteLater(); progress.deleteLater()
+            maintenance.signals.deleteLater(); ordinary.signals.deleteLater()
