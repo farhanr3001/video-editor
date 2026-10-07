@@ -1,7 +1,9 @@
 import unittest
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QEvent
 from PySide6.QtGui import QColor, QIcon, QPalette
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from PySide6.QtWidgets import (QApplication, QLabel, QPushButton, QWidget,
+                              QVBoxLayout, QListView, QTreeView, QTableView,
+                              QTreeWidget, QHeaderView)
 from kinetic_cut.theme import PALETTES, get_active_theme_palette
 from kinetic_cut.theme_widgets import apply_application_theme, set_ui_style, set_ui_icon
 from kinetic_cut.icons import lucide_icon
@@ -21,6 +23,23 @@ def contrast(a,b):
 class ThemeContrastTests(unittest.TestCase):
     def tearDown(self):
         apply_application_theme('default')
+
+    def test_theme_changes_repaint_item_views_and_their_headers(self):
+        # Qt item views also provide update(QModelIndex). A full application
+        # theme refresh must reach them without selecting that indexed overload.
+        owner=QWidget(); layout=QVBoxLayout(owner)
+        views=[QListView(),QTreeView(),QTableView(),QTreeWidget(),QHeaderView(Qt.Horizontal)]
+        for view in views:layout.addWidget(view)
+        try:
+            for theme in ('ableton_gray','final_cut_obsidian','default'):
+                apply_application_theme(theme)
+                app.processEvents()
+                self.assertEqual(app.property('kineticTheme'),theme)
+                self.assertEqual(app.palette().color(QPalette.Text),QColor(PALETTES[theme]['text_main']))
+                self.assertTrue(all(view.parent() is owner for view in views))
+        finally:
+            owner.close(); owner.deleteLater()
+            app.sendPostedEvents(None,QEvent.DeferredDelete); app.processEvents()
 
     def test_light_text_and_status_roles_are_readable(self):
         p=PALETTES['ableton_gray']

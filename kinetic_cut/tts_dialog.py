@@ -5,6 +5,7 @@ from .theme_widgets import set_ui_style, set_ui_icon
 import math
 import os
 import re
+from threading import Event
 from pathlib import Path
 from PySide6.QtCore import Qt, QUrl, Signal, QThread, QObject, Slot
 from PySide6.QtGui import QFont, QColor
@@ -17,21 +18,32 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 from .config import CACHE_DIR
 from .controls import SafeComboBox
+from .dialog_jobs import RetainedThread
 from .icons import lucide_icon
 from .tts import VOICES, DEFAULT_VOICE, synthesize_speech
 
 
 class _SynthesisWorker(QObject):
-    finished = Signal(str)
-    error = Signal(str)
+    finished = Signal(str, object)
+    error = Signal(str, object)
+    settled = Signal()
 
-    def __init__(self, text: str, voice: str, rate: int, pitch: int, output_path: str = ""):
+    def __init__(self, text: str, voice: str, rate: int, pitch: int, output_path: str = "", ffmpeg_bin: str = "ffmpeg"):
         super().__init__()
         self.text = text
         self.voice = voice
         self.rate = rate
         self.pitch = pitch
         self.output_path = output_path
+        self.ffmpeg_bin = ffmpeg_bin
+        self._cancel = Event()
+
+    @property
+    def cancelled(self):
+        return self._cancel.is_set()
+
+    def cancel(self):
+        self._cancel.set()
 
     @Slot()
     def run(self):
@@ -41,11 +53,17 @@ class _SynthesisWorker(QObject):
                 voice=self.voice,
                 rate_percent=self.rate,
                 pitch_hz=self.pitch,
-                output_path=self.output_path
+                output_path=self.output_path,
+                ffmpeg_bin=self.ffmpeg_bin,
+                cancel_check=self._cancel.is_set,
             )
-            self.finished.emit(path)
+            if not self.cancelled:
+                self.finished.emit(path, self._cancel)
         except Exception as err:
-            self.error.emit(str(err))
+            if not self.cancelled:
+                self.error.emit(str(err), self._cancel)
+        finally:
+            self.settled.emit()
 
 
 class TTSDialog(QDialog):
@@ -65,8 +83,15 @@ class TTSDialog(QDialog):
         self._preview_player.setAudioOutput(self._audio_output)
         self._preview_player.playbackStateChanged.connect(self._on_player_state_changed)
 
-        self._active_thread: QThread | None = None
+        self._active_thread: RetainedThread | None = None
         self._active_worker: _SynthesisWorker | None = None
+        self._preview_thread = None
+        self._preview_worker = None
+        self._is_generating = False
+        self._closed = False
+        self._generation_data = None
+        self._preview_token = None
+        self._generation_token = None
         self.generated_data: dict | None = None
 
         self._build_ui(initial_text)
@@ -275,8 +300,10 @@ class TTSDialog(QDialog):
             self.preview_btn.setIcon(lucide_icon("play", "#ffffff", 14))
 
     def _toggle_preview(self):
+        if self._closed or self._is_generating:
+            return
         if self._preview_player.playbackState() == QMediaPlayer.PlayingState:
-            self._preview_player.stop()
+            self._cancel_preview()
             return
 
         text = self.text_edit.toPlainText().strip()
@@ -295,34 +322,57 @@ class TTSDialog(QDialog):
         self.status_lbl.setText("Generating audio preview...")
         self.status_lbl.setVisible(True)
 
-        worker = _SynthesisWorker(preview_text, voice, rate, pitch)
-        thread = QThread(self)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-
-        def on_done(path: str):
-            self.preview_btn.setEnabled(True)
-            self.preview_btn.setText(" Stop")
-            self.preview_btn.setIcon(lucide_icon("square", "#ff6b6b", 14))
-            self.status_lbl.setVisible(False)
-            from .media_source import set_media_source
-            set_media_source(self._preview_player,QUrl.fromLocalFile(path))
-            self._preview_player.play()
-            thread.quit()
-
-        def on_err(err: str):
-            self.preview_btn.setEnabled(True)
-            self.preview_btn.setText(" Preview Voice")
-            self.preview_btn.setIcon(lucide_icon("play", "#ffffff", 14))
-            self.status_lbl.setVisible(False)
-            QMessageBox.warning(self, "Preview Failed", f"Could not generate voice preview:\n{err}")
-            thread.quit()
-
-        worker.finished.connect(on_done)
-        worker.error.connect(on_err)
+        self._cancel_preview()
+        self.preview_btn.setEnabled(False)
+        self.preview_btn.setText(" Synthesizing...")
+        worker = _SynthesisWorker(preview_text, voice, rate, pitch, ffmpeg_bin=self._ffmpeg())
+        thread = RetainedThread(worker)
+        self._preview_worker = worker
+        self._preview_token = worker._cancel
+        self._preview_thread = thread
+        worker.finished.connect(self._on_preview_done, Qt.QueuedConnection)
+        worker.error.connect(self._on_preview_error, Qt.QueuedConnection)
         thread.start()
 
+    def _ffmpeg(self):
+        return getattr(self.parent(), "settings", {}).get("ffmpeg", "ffmpeg")
+
+    def _cancel_preview(self):
+        self._preview_player.stop()
+        if self._preview_worker:
+            self._preview_worker.cancel()
+        self._preview_worker = None
+        self._preview_token = None
+        self._preview_thread = None
+        self.preview_btn.setText(" Preview Voice")
+        self.preview_btn.setEnabled(not self._is_generating)
+
+    @Slot(str, object)
+    def _on_preview_done(self, path, token=None):
+        if self._closed or self._is_generating or token is not self._preview_token:
+            return
+        self._preview_worker = None
+        self._preview_thread = None
+        self.preview_btn.setEnabled(True)
+        self.status_lbl.setVisible(False)
+        from .media_source import set_media_source
+        set_media_source(self._preview_player, QUrl.fromLocalFile(path))
+        self._preview_player.play()
+
+    @Slot(str, object)
+    def _on_preview_error(self, err, token=None):
+        if self._closed or self._is_generating or token is not self._preview_token:
+            return
+        self._preview_worker = None
+        self._preview_thread = None
+        self.preview_btn.setEnabled(True)
+        self.preview_btn.setText(" Preview Voice")
+        self.status_lbl.setVisible(False)
+        QMessageBox.warning(self, "Preview Failed", f"Could not generate voice preview:\n{err}")
+
     def _on_generate_clicked(self):
+        if self._closed or self._is_generating:
+            return
         text = self.text_edit.toPlainText().strip()
         if not text:
             QMessageBox.information(self, "No Text", "Please enter narration text to synthesize.")
@@ -332,55 +382,72 @@ class TTSDialog(QDialog):
         rate = self.speed_slider.value()
         pitch = self.pitch_slider.value()
 
+        self._cancel_preview()
+        self._is_generating = True
         self.generate_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
         self.preview_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.status_lbl.setText("Synthesizing full voiceover with AI...")
         self.status_lbl.setVisible(True)
 
-        worker = _SynthesisWorker(text, voice, rate, pitch)
-        thread = QThread(self)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
+        self._generation_data = {
+            "text": text, "voice": voice,
+            "insert_timeline": self.insert_timeline_chk.isChecked(),
+            "destination_track": self.track_combo.currentData(),
+            "generate_captions": self.generate_captions_chk.isChecked(),
+        }
+        self._set_inputs_enabled(False)
+        worker = _SynthesisWorker(text, voice, rate, pitch, ffmpeg_bin=self._ffmpeg())
+        thread = RetainedThread(worker)
         self._active_thread = thread
         self._active_worker = worker
+        self._generation_token = worker._cancel
 
-        def on_done(path: str):
-            self.progress_bar.setVisible(False)
-            self.status_lbl.setVisible(False)
-            self.generate_btn.setEnabled(True)
-            self.cancel_btn.setEnabled(True)
-            self.preview_btn.setEnabled(True)
-
-            self.generated_data = {
-                "audio_path": path,
-                "text": text,
-                "voice": voice,
-                "insert_timeline": self.insert_timeline_chk.isChecked(),
-                "destination_track": self.track_combo.currentData(),
-                "generate_captions": self.generate_captions_chk.isChecked(),
-            }
-            self.speechGenerated.emit(self.generated_data)
-            thread.quit()
-            self.accept()
-
-        def on_err(err: str):
-            self.progress_bar.setVisible(False)
-            self.status_lbl.setVisible(False)
-            self.generate_btn.setEnabled(True)
-            self.cancel_btn.setEnabled(True)
-            self.preview_btn.setEnabled(True)
-            QMessageBox.critical(self, "Synthesis Error", f"Failed to generate speech:\n{err}")
-            thread.quit()
-
-        worker.finished.connect(on_done)
-        worker.error.connect(on_err)
+        worker.finished.connect(self._on_generate_done, Qt.QueuedConnection)
+        worker.error.connect(self._on_generate_error, Qt.QueuedConnection)
         thread.start()
 
-    def closeEvent(self, event):
-        self._preview_player.stop()
-        if self._active_thread and self._active_thread.isRunning():
-            self._active_thread.quit()
-            self._active_thread.wait(500)
-        super().closeEvent(event)
+    @Slot(str, object)
+    def _on_generate_done(self, path, token=None):
+        if self._closed or token is not self._generation_token:
+            return
+        self._active_thread = None
+        self._active_worker = None
+        self._is_generating = False
+        self.generated_data = dict(self._generation_data)
+        self.generated_data["audio_path"] = path
+        self.speechGenerated.emit(self.generated_data)
+        self.accept()
+
+    @Slot(str, object)
+    def _on_generate_error(self, err, token=None):
+        if self._closed or token is not self._generation_token:
+            return
+        self._active_thread = None
+        self._active_worker = None
+        self._is_generating = False
+        self.progress_bar.setVisible(False)
+        self.status_lbl.setVisible(False)
+        self.generate_btn.setEnabled(True)
+        self.preview_btn.setEnabled(True)
+        self._set_inputs_enabled(True)
+        QMessageBox.critical(self, "Synthesis Error", f"Failed to generate speech:\n{err}")
+
+    def _set_inputs_enabled(self, enabled):
+        self.text_edit.setReadOnly(not enabled)
+        for widget in (self.voice_combo, self.speed_slider, self.pitch_slider,
+                       self.insert_timeline_chk, self.track_combo, self.generate_captions_chk):
+            widget.setEnabled(enabled)
+
+    def done(self, result):
+        self._closed = True
+        self._cancel_preview()
+        if self._active_worker:
+            self._active_worker.cancel()
+        self._active_worker = None
+        self._active_thread = None
+        self._is_generating = False
+        if result != QDialog.Accepted:
+            self.generated_data = None
+        super().done(result)

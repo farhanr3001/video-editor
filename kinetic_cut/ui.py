@@ -16,7 +16,7 @@ from .playback_config import configure as configure_playback
 from .config import load_settings as _playback_settings
 configure_playback(_playback_settings())
 
-from PySide6.QtCore import QObject, QRunnable, QSize, QThreadPool, QTimer, QUrl, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, QSize, QThreadPool, QTimer, QUrl, Qt, Signal, Slot, QEventLoop
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QCursor, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from .media_source import set_media_source
@@ -52,6 +52,11 @@ class WorkerSignals(QObject):
 class Worker(QRunnable):
     def __init__(self, function, *args, **kwargs):
         super().__init__(); self.function=function; self.args=args; self.kwargs=kwargs; self.signals=WorkerSignals()
+        self.cancel_callback = None
+
+    def cancel(self):
+        if self.cancel_callback:
+            self.cancel_callback()
 
     @Slot()
     def run(self):
@@ -59,6 +64,11 @@ class Worker(QRunnable):
             value=self.function(*self.args, **self.kwargs)
             try:self.signals.result.emit(value)
             except RuntimeError:return
+        except InterruptedError:
+            # Existing consumers use error as a terminal callback (including
+            # render queue unlock). Keep that contract without a crash log.
+            try:self.signals.error.emit('Operation cancelled.')
+            except RuntimeError:pass
         except Exception:
             logging.exception("Background task failed: %s",getattr(self.function,"__name__","task"))
             try:self.signals.error.emit(traceback.format_exc())
@@ -222,6 +232,7 @@ class ExportDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    shutdownFinished=Signal()
     def __init__(self, startup_progress=None):
         progress=startup_progress or (lambda *_:None)
         progress(45,"Loading preferences and project services")
@@ -456,6 +467,10 @@ class MainWindow(QMainWindow):
         self._restore_history(self._history_index+1)
 
     def start_worker(self,worker:Worker):
+        if getattr(self, '_closing', False):
+            worker.cancel()
+            worker.signals.deleteLater()
+            return
         self._workers.add(worker)
         self.update_job_status()
         worker.signals.finished.connect(self.worker_finished,Qt.QueuedConnection)
@@ -600,8 +615,10 @@ class MainWindow(QMainWindow):
             if cap:
                 initial_text = cap.text
 
+        destination = self.project
         dialog = TTSDialog(self, initial_text=initial_text)
-        if dialog.exec() == QDialog.Accepted and dialog.generated_data:
+        if (dialog.exec() == QDialog.Accepted and dialog.generated_data
+                and self.project is destination and not getattr(self, '_closing', False)):
             self._apply_generated_tts(dialog.generated_data)
 
     def _apply_generated_tts(self, data: dict):
@@ -682,13 +699,31 @@ class MainWindow(QMainWindow):
         if headless or (initial_text and voice and not QApplication.activeModalWidget()):
             # Headless / MCP programmatic execution
             from .tts import synthesize_speech
-            audio_path = synthesize_speech(
-                initial_text,
-                voice=voice,
-                rate_percent=rate,
-                pitch_hz=pitch,
-                ffmpeg_bin=self.settings.get("ffmpeg", "ffmpeg")
-            )
+            # Preserve the synchronous MCP result while allowing the GUI to
+            # process playback, close/cancel and project-switch events.
+            destination = self.project
+            destination_key = self._history_key(destination)
+            cancel = threading.Event()
+            loop = QEventLoop(self)
+            result, errors = [], []
+            worker = Worker(synthesize_speech, initial_text, voice=voice,
+                            rate_percent=rate, pitch_hz=pitch,
+                            ffmpeg_bin=self.settings.get('ffmpeg', 'ffmpeg'),
+                            cancel_check=cancel.is_set)
+            worker.cancel_callback = cancel.set
+            worker.signals.result.connect(result.append)
+            worker.signals.error.connect(errors.append)
+            worker.signals.finished.connect(loop.quit)
+            self.start_worker(worker)
+            if not getattr(self, '_closing', False):loop.exec()
+            loop.deleteLater()
+            if getattr(self, '_closing', False) or cancel.is_set():return None
+            if errors:raise RuntimeError(errors[0])
+            if not result:return None
+            if self.project is not destination or self._history_key(destination)!=destination_key:
+                self.statusBar().showMessage('Dialogue result discarded because the project changed', 5000)
+                return None
+            audio_path = result[0]
             return self._apply_generated_dialogue({
                 "audio_path": audio_path,
                 "text": initial_text,
@@ -697,15 +732,15 @@ class MainWindow(QMainWindow):
                 "gain_db": gain_db
             })
 
+        destination = self.project
         from .tts_dialogue_dialog import TTSDialogueDialog
         dialog = TTSDialogueDialog(self, initial_text=initial_text)
         res = dialog.exec()
         data = getattr(dialog, "result_data", None)
         dialog.deleteLater()
-        from PySide6.QtWidgets import QApplication
         QApplication.processEvents()
 
-        if res == QDialog.Accepted and data:
+        if res == QDialog.Accepted and data and self.project is destination and not getattr(self, '_closing', False):
             return self._apply_generated_dialogue(data)
         return None
 
@@ -1002,11 +1037,26 @@ class MainWindow(QMainWindow):
         """Download social media / YouTube video or audio and optionally import into the project."""
         from .downloader_dialog import download_media_synchronous
         from .media import probe
-        res = download_media_synchronous(url, mode=mode, target_res=target_res, cookies_path=cookies_path or None)
+        destination=self.project
+        cancel=threading.Event(); loop=QEventLoop(self); results=[]; errors=[]
+        settings=copy.deepcopy(self.settings)
+        def work():
+            res=download_media_synchronous(url,mode=mode,target_res=target_res,cookies_path=cookies_path or None,cancel_check=cancel.is_set)
+            path=res.get('path')
+            item=probe(path,settings.get('ffprobe','ffprobe'),settings.get('ffmpeg','ffmpeg')) if auto_import and path and Path(path).is_file() else None
+            return res,item
+        worker=Worker(work); worker.cancel_callback=cancel.set
+        worker.signals.result.connect(results.append); worker.signals.error.connect(errors.append); worker.signals.finished.connect(loop.quit)
+        self.start_worker(worker)
+        if not getattr(self,'_closing',False):loop.exec()
+        loop.deleteLater()
+        if cancel.is_set() or getattr(self,'_closing',False):raise InterruptedError('Download cancelled')
+        if errors:raise RuntimeError(errors[0])
+        if not results:raise RuntimeError('Download did not complete')
+        res,probe_item=results[0]
         path = res.get("path")
         imported_media_id = None
-        if auto_import and path and Path(path).is_file():
-            probe_item = probe(path, self.settings.get("ffprobe", "ffprobe"), self.settings.get("ffmpeg", "ffmpeg"))
+        if probe_item and self.project is destination:
             self.media_added([probe_item])
             imported_media_id = probe_item.id
         res["media_id"] = imported_media_id
@@ -1018,8 +1068,19 @@ class MainWindow(QMainWindow):
         valid=[p for p in paths if Path(p).is_file()]
         if not valid:return
         self.statusBar().showMessage(f"Indexing {len(valid)} media file(s)…")
-        def work():return [probe(path,self.settings.get("ffprobe","ffprobe"),self.settings.get("ffmpeg","ffmpeg")) for path in valid]
-        worker=Worker(work); worker.signals.result.connect(self.media_added); worker.signals.error.connect(lambda detail:QMessageBox.warning(self,"Media import",detail[-1800:])); self.start_worker(worker)
+        destination=self.project; settings=copy.deepcopy(self.settings); cancel=threading.Event()
+        def work():
+            items=[]
+            for path in valid:
+                if cancel.is_set():raise InterruptedError('Import cancelled')
+                items.append(probe(path,settings.get('ffprobe','ffprobe'),settings.get('ffmpeg','ffmpeg'),timeout=30))
+            return items
+        def ready(items):
+            if not cancel.is_set() and self.project is destination and not getattr(self,'_closing',False):self.media_added(items)
+        worker=Worker(work); worker.cancel_callback=cancel.set
+        worker.signals.result.connect(ready)
+        worker.signals.error.connect(lambda detail:None if cancel.is_set() or getattr(self,'_closing',False) else QMessageBox.warning(self,'Media import',detail[-1800:]))
+        self.start_worker(worker)
 
     def media_added(self,items):
         self.media_panel.on_import(items)
@@ -1944,18 +2005,21 @@ class MainWindow(QMainWindow):
         settings=copy.deepcopy(self.settings)
         self.statusBar().showMessage("Preparing timeline speech for local captions…")
 
+        cancel=threading.Event()
+        settled=[False]
+        self._caption_cancel=cancel
         progress_dialog=None
         if not headless and not QApplication.activeModalWidget():
-            progress_dialog=QProgressDialog("Preparing timeline audio…","",0,100,self)
+            progress_dialog=QProgressDialog("Preparing timeline audio…","Cancel",0,100,self)
             progress_dialog.setWindowTitle("Generating Auto Captions")
-            progress_dialog.setCancelButton(None)
+            progress_dialog.canceled.connect(lambda:None if settled[0] else cancel.set())
             progress_dialog.setWindowModality(Qt.WindowModal)
             progress_dialog.setValue(5)
             progress_dialog.show()
 
         def work():
             import tempfile
-            from .process import run as run_process
+            from .process import run_cancellable
             with tempfile.TemporaryDirectory(prefix="kinetic-caption-timeline-") as directory:
                 wav=str(Path(directory)/"speech.wav")
                 args=[settings.get("ffmpeg","ffmpeg"),"-hide_banner","-loglevel","error","-y"]
@@ -1974,11 +2038,13 @@ class MainWindow(QMainWindow):
                     raise CaptionBackendError("The selected range contains no speech audio.")
                 filters.append("".join(labels)+f"amix=inputs={len(labels)}:duration=longest:normalize=0[out]")
                 args += ["-filter_complex",";".join(filters),"-map","[out]","-ac","1","-ar","16000","-t",str(duration),wav]
-                run_process(args,check=True,capture_output=True)
+                run_cancellable(args,check=True,capture_output=True,cancel_check=cancel.is_set)
                 worker.signals.progress.emit((20,"Audio prepared · loading speech model…"))
-                return transcribe(wav,settings,offset,lambda value:worker.signals.progress.emit(value if isinstance(value,tuple) else (45,value)),caption_word_count,.5)
+                return transcribe(wav,settings,offset,lambda value:worker.signals.progress.emit(value if isinstance(value,tuple) else (45,value)),caption_word_count,.5,cancel_check=cancel.is_set)
         worker=Worker(work)
+        worker.cancel_callback=cancel.set
         def caption_progress(value):
+            if cancel.is_set() or getattr(self,'_closing',False):return
             percent,text=value if isinstance(value,tuple) else (45,str(value))
             if progress_dialog:
                 progress_dialog.setValue(percent)
@@ -1986,10 +2052,13 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(text)
         worker.signals.progress.connect(caption_progress)
         def ready(result):
+            if cancel.is_set() or getattr(self,'_closing',False):return
+            settled[0]=True
             if progress_dialog:
                 progress_dialog.setValue(100)
                 progress_dialog.close()
-            if self.project is not destination_project:
+            if (self.project is not destination_project or self._history_key(self.project)!=self._history_key(snapshot)
+                    or self.project.track_states.get('subtitle_1',{}).get('locked')):
                 self.statusBar().showMessage("Caption result discarded because the project changed",5000)
                 return
             captions,backend=result
@@ -2008,9 +2077,18 @@ class MainWindow(QMainWindow):
             if not headless and style.animation in ('fade every word','word highlight','word reveal') and any(not c.word_timings for c in captions):
                 QMessageBox.information(self,'Estimated word timing','This speech engine did not provide individual word timestamps. Word animation timing is estimated. Generate with local Whisper for speech-aligned word timings.')
         worker.signals.result.connect(ready)
-        worker.signals.error.connect(lambda detail:(QMessageBox.warning(self,"Caption engine",detail[-1800:]) if (not headless and not QApplication.activeModalWidget()) else logging.error("Caption engine error: %s", detail)))
-        if progress_dialog:
-            worker.signals.error.connect(lambda _:progress_dialog.close())
+        def failed(detail):
+            if cancel.is_set() or getattr(self,'_closing',False):return
+            settled[0]=True
+            if not headless and not QApplication.activeModalWidget():QMessageBox.warning(self,'Caption engine',detail[-1800:])
+            else:logging.error('Caption engine error: %s',detail)
+        def finished():
+            settled[0]=True
+            if progress_dialog:progress_dialog.close(); progress_dialog.deleteLater()
+            if getattr(self,'_caption_cancel',None) is cancel:self._caption_cancel=None
+            if cancel.is_set() and not getattr(self,'_closing',False):self.statusBar().showMessage('Caption generation cancelled',4000)
+        worker.signals.error.connect(failed)
+        worker.signals.finished.connect(finished)
         self.start_worker(worker)
         return worker
 
@@ -2130,12 +2208,27 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self,event:QCloseEvent):
         from .close_guard import confirm_close
+        if getattr(self,'_closing',False):
+            from .dialog_jobs import active_dialog_threads
+            if self._workers or active_dialog_threads():event.ignore(); return
+            self._shutdown_wait_timer.stop()
+            try:SESSION_LOCK_PATH.unlink(missing_ok=True)
+            except OSError:logging.exception('Could not remove active session marker')
+            self.shutdownFinished.emit()
+            event.accept(); return
         if not confirm_close(self):
             event.ignore(); return
         if hasattr(self,'phone_connect'):
             if self.phone_connect.active_job and QMessageBox.question(self,'Cancel phone transfers?','A phone transfer is running. Cancel it and close Kinetic Cut?')!=QMessageBox.Yes:
                 event.ignore(); return
-            self.phone_connect.shutdown()
+        self._closing=True
+        self.setEnabled(False)
+        self.autosave_timer.stop(); self.autosave_debounce_timer.stop()
+        for name in ('_history_settle_timer','_text_history_timer'):
+            timer=getattr(self,name,None)
+            if timer:timer.stop()
+        if hasattr(self,'phone_connect'):self.phone_connect.shutdown()
+        if hasattr(self.inspector,'cancel_title_tts'):self.inspector.cancel_title_tts()
         self.compounds.cancel()
         self.media_panel.watch_folders.stop()
         self.preview_quality.cancel()
@@ -2145,15 +2238,33 @@ class MainWindow(QMainWindow):
         if getattr(self,'_tracking_cancel',None):self._tracking_cancel.set()
         if getattr(self.delivery,'render_cancel',None):self.delivery.render_cancel.set()
         if getattr(self,"_vocal_cancel",None):self._vocal_cancel.set()
+        if getattr(self,'_caption_cancel',None):self._caption_cancel.set()
+        from .dialog_jobs import cancel_dialog_threads, active_dialog_threads
+        cancel_dialog_threads()
+        from .component_ui import cancel_component_downloads
+        cancel_component_downloads()
+        for worker in tuple(self._workers):
+            worker.cancel()
+            # The window remains alive until finished. Discard late feature
+            # mutations/progress, while retaining terminal cleanup/ownership.
+            for signal,signature in ((worker.signals.result,'2result(PyObject)'),(worker.signals.error,'2error(QString)'),(worker.signals.progress,'2progress(PyObject)')):
+                try:
+                    if worker.signals.receivers(signature):signal.disconnect()
+                except RuntimeError:pass
         if hasattr(self, 'update_controller') and hasattr(self.update_controller, '_cancel'):
             self.update_controller._cancel.set()
         if hasattr(self,"transport"):self.transport.shutdown()
         self.autosave(); self.player.stop()
-        try:
-            SESSION_LOCK_PATH.unlink(missing_ok=True)
-        except Exception:
-            pass
-        event.accept()
+        self._shutdown_wait_timer=QTimer(self)
+        self._shutdown_wait_timer.setInterval(50)
+        self._shutdown_wait_timer.timeout.connect(self.close)
+        if self._workers or active_dialog_threads():
+            self.statusBar().showMessage('Closing · waiting for background tasks to finish…')
+            self._shutdown_wait_timer.start(); event.ignore()
+        else:
+            try:SESSION_LOCK_PATH.unlink(missing_ok=True)
+            except OSError:logging.exception('Could not remove active session marker')
+            self.shutdownFinished.emit(); event.accept()
 
 
 def run():

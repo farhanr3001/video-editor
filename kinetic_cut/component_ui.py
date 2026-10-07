@@ -1,6 +1,6 @@
 """Optional downloads accessible without changing any editing project."""
 import threading
-from PySide6.QtCore import QThreadPool, QObject, Signal
+from PySide6.QtCore import QThreadPool, QObject, Signal, Slot, Qt
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QProgressBar, QMessageBox
 from . import feature_packs
 
@@ -9,6 +9,46 @@ class ComponentEvents(QObject):
 
 _events = None
 active_downloads = set()
+_jobs={}
+_installer_jobs=set()
+
+
+def cancel_component_downloads():
+    for job in tuple(_jobs.values()):job.cancel.set()
+    for job in tuple(_installer_jobs):job.cancel.set()
+
+
+class _ComponentJob(QObject):
+    """Own installation completion independently of a disposable popup."""
+    progress=Signal(object)
+    result=Signal(object)
+    error=Signal(str)
+
+    def __init__(self,key,cancel):
+        super().__init__(); self.key=key; self.cancel=cancel; self.worker=None
+
+    def start(self,owner):
+        from .ui import Worker
+        worker=Worker(feature_packs.install,self.key,self.progress.emit,self.cancel)
+        self.worker=worker; _jobs[self.key]=self; active_downloads.add(self.key)
+        worker.signals.result.connect(self.complete,Qt.QueuedConnection)
+        worker.signals.error.connect(self.failed,Qt.QueuedConnection)
+        worker.signals.finished.connect(self.retire,Qt.QueuedConnection)
+        if owner:owner.start_worker(worker)
+        else:QThreadPool.globalInstance().start(worker)
+
+    @Slot(object)
+    def complete(self,result):
+        events().changed.emit(); self.result.emit(result)
+
+    @Slot(str)
+    def failed(self,detail):self.error.emit(detail)
+
+    @Slot()
+    def retire(self):
+        if _jobs.get(self.key) is self:_jobs.pop(self.key,None); active_downloads.discard(self.key)
+        if self.worker:self.worker.signals.deleteLater()
+        self.worker=None; self.deleteLater()
 
 def events():
     global _events
@@ -18,7 +58,7 @@ def events():
 
 class InstallComponentDialog(QDialog):
     def __init__(self, parent, key):
-        super().__init__(parent); self.key = key; self.cancel = threading.Event(); self.running = False
+        super().__init__(parent); self.key = key; self.cancel = threading.Event(); self.running = False; self._closed=False; self._job=None
         item = feature_packs.manifest().get(key, {})
         name = item.get('name', {'android':'Android mirroring','iphone':'iPhone mirroring',
                                  'vision':'Face / background tools','vocals':'Vocal separation'}[key])
@@ -35,30 +75,40 @@ class InstallComponentDialog(QDialog):
         self.confirm = QPushButton('Confirm download'); self.confirm.clicked.connect(self.begin); row.addWidget(self.confirm)
 
     def begin(self):
-        from .ui import Worker
-        if self.running:return
+        if self._closed or self.running:return
+        if self.key in active_downloads:
+            self.status.setText('This component is already downloading. Wait for it to finish.'); return
         self.running = True; self.confirm.setEnabled(False)
-        active_downloads.add(self.key)
-        worker = Worker(lambda: feature_packs.install(self.key, worker.signals.progress.emit, self.cancel))
-        worker.signals.progress.connect(lambda event: (self.progress.setValue(round(event[0])), self.status.setText(event[1])))
-        worker.signals.result.connect(self.complete); worker.signals.error.connect(self.failed)
-        self._worker = worker; QThreadPool.globalInstance().start(worker)
+        self._job=_ComponentJob(self.key,self.cancel)
+        self._job.progress.connect(self.update_progress,Qt.QueuedConnection)
+        self._job.result.connect(self.complete,Qt.QueuedConnection)
+        self._job.error.connect(self.failed,Qt.QueuedConnection)
+        owner=self.parentWidget()
+        while owner and not hasattr(owner,'start_worker'):owner=owner.parentWidget()
+        self.destroyed.connect(self.cancel.set)
+        self._job.start(owner)
 
+    @Slot(object)
+    def update_progress(self,event):
+        if self._closed or self.cancel.is_set():return
+        self.progress.setValue(round(event[0])); self.status.setText(event[1])
+
+    @Slot(object)
     def complete(self, result):
-        active_downloads.discard(self.key)
-        self.running = False; events().changed.emit(); self.accept()
-
-    def failed(self, error):
-        active_downloads.discard(self.key)
         self.running = False
-        if self.cancel.is_set():return
+        if not self._closed and not self.cancel.is_set():self.accept()
+
+    @Slot(str)
+    def failed(self, error):
+        self.running = False
+        if self._closed or self.cancel.is_set():return
         self.status.setText(error.splitlines()[-1]); self.confirm.setEnabled(True)
 
     def reject(self):
-        self.cancel.set(); super().reject()
+        self._closed=True; self.cancel.set(); super().reject()
 
     def closeEvent(self, event):
-        self.cancel.set(); super().closeEvent(event)
+        self._closed=True; self.cancel.set(); super().closeEvent(event)
 
 
 def offer(parent, key):
@@ -67,40 +117,116 @@ def offer(parent, key):
     return feature_packs.available(key)
 
 
-def installer_downloads(keys, local_source=None):
-    """Installer-confirmed selections still have visible progress and cancellation."""
-    import sys
-    from PySide6.QtWidgets import QApplication
-    from .config import DATA_DIR
-    app = QApplication.instance() or QApplication(sys.argv)
-    dialog = QDialog(); dialog.setWindowTitle('Installing optional downloads'); dialog.resize(520,220)
-    layout = QVBoxLayout(dialog); status = QLabel('Preparing selected optional tools…'); status.setWordWrap(True); layout.addWidget(status)
-    bar = QProgressBar(); bar.setRange(0,100); bar.setFormat('%p%'); layout.addWidget(bar)
-    cancel = threading.Event(); button = QPushButton('Cancel'); layout.addWidget(button)
-    button.clicked.connect(lambda:(cancel.set(), button.setEnabled(False),status.setText('Cancelling…')))
-    dialog.rejected.connect(cancel.set)
-    result = {'code':1}
-    from .ui import Worker
-    def work():
-        log = DATA_DIR/'component-install.log'
-        with log.open('w',encoding='utf-8') as stream:
-            for index,key in enumerate(keys):
+class _InstallerDownloadsJob(QObject):
+    """Retain the batch independently of its closable installer popup."""
+    progress=Signal(object)
+    finished=Signal(int)
+
+    def __init__(self,keys,local_source,cancel):
+        super().__init__(); self.keys=tuple(keys); self.local_source=local_source
+        self.cancel=cancel; self.worker=None; self.code=1; self.settled=False
+
+    def start(self):
+        from .ui import Worker
+        self.worker=Worker(self.work); self.worker.cancel_callback=self.cancel.set
+        self.worker.signals.result.connect(self.complete,Qt.QueuedConnection)
+        self.worker.signals.error.connect(self.failed,Qt.QueuedConnection)
+        self.worker.signals.finished.connect(self.retire,Qt.QueuedConnection)
+        _installer_jobs.add(self)
+        QThreadPool.globalInstance().start(self.worker)
+
+    def work(self):
+        from .config import DATA_DIR
+        with (DATA_DIR/'component-install.log').open('w',encoding='utf-8') as stream:
+            for index,key in enumerate(self.keys):
+                if self.cancel.is_set():raise InterruptedError('Component installation cancelled')
                 if key not in feature_packs.ROOTS:raise ValueError('Unknown component: '+key)
                 def progress(event):
-                    stream.write(str(event)+'\n');stream.flush()
-                    worker.signals.progress.emit((round((index+event[0]/100)/len(keys)*100),event[1]))
-                feature_packs.install(key,progress,cancel,local_source)
+                    stream.write(str(event)+'\n'); stream.flush()
+                    self.progress.emit((round((index+event[0]/100)/len(self.keys)*100),event[1]))
+                feature_packs.install(key,progress,self.cancel,self.local_source)
+            if self.cancel.is_set():raise InterruptedError('Component installation cancelled')
         return 0
-    worker = Worker(work)
-    worker.signals.progress.connect(lambda event:(bar.setValue(event[0]),status.setText(event[1])))
-    def done(code):result['code']=code;dialog.accept()
-    def failed(error):
-        with (DATA_DIR/'component-install.log').open('a',encoding='utf-8') as stream:stream.write('FAILED: '+error)
-        dialog.reject()
-    worker.signals.result.connect(done);worker.signals.error.connect(failed)
-    QThreadPool.globalInstance().start(worker);dialog.exec()
-    cancel.set(); QThreadPool.globalInstance().waitForDone(35000)
-    return result['code']
+
+    @Slot(object)
+    def complete(self,code):
+        if not self.cancel.is_set():self.code=code
+
+    @Slot(str)
+    def failed(self,error):
+        from .config import DATA_DIR
+        self.code=1
+        try:
+            with (DATA_DIR/'component-install.log').open('a',encoding='utf-8') as stream:stream.write('FAILED: '+error)
+        except OSError:
+            import logging
+            logging.exception('Could not write optional-install failure log')
+
+    @Slot()
+    def retire(self):
+        self.settled=True
+        if self.cancel.is_set():self.code=1
+        if self.worker:self.worker.signals.deleteLater()
+        self.worker=None; _installer_jobs.discard(self)
+        self.finished.emit(self.code)
+
+
+class _InstallerDownloadsDialog(QDialog):
+    def __init__(self,cancel):
+        super().__init__(); self.cancel=cancel; self._closed=False
+        self.setWindowTitle('Installing optional downloads'); self.resize(520,220)
+        layout=QVBoxLayout(self)
+        self.status=QLabel('Preparing selected optional tools…'); self.status.setWordWrap(True); layout.addWidget(self.status)
+        self.bar=QProgressBar(); self.bar.setRange(0,100); self.bar.setFormat('%p%'); layout.addWidget(self.bar)
+        self.button=QPushButton('Cancel'); layout.addWidget(self.button); self.button.clicked.connect(self.request_cancel)
+        self.destroyed.connect(cancel.set)
+
+    @Slot()
+    def request_cancel(self):
+        self.cancel.set(); self.button.setEnabled(False); self.status.setText('Cancelling…')
+
+    @Slot(object)
+    def update_progress(self,event):
+        if self._closed or self.cancel.is_set():return
+        self.bar.setValue(event[0]); self.status.setText(event[1])
+
+    @Slot(int)
+    def job_finished(self,code):
+        if self._closed:return
+        self._closed=True; super().done(QDialog.Accepted if code==0 else QDialog.Rejected)
+
+    def reject(self):
+        self._closed=True; self.cancel.set(); super().reject()
+
+    def closeEvent(self,event):
+        self._closed=True; self.cancel.set(); super().closeEvent(event)
+
+
+def installer_downloads(keys, local_source=None):
+    """Keep processing GUI events until our own optional-install batch settles."""
+    import sys
+    from PySide6.QtCore import QEventLoop
+    from PySide6.QtWidgets import QApplication
+    if not keys:return 0
+    app=QApplication.instance() or QApplication(sys.argv)
+    quit_policy=app.quitOnLastWindowClosed(); app.setQuitOnLastWindowClosed(False)
+    cancel=threading.Event(); dialog=_InstallerDownloadsDialog(cancel)
+    job=_InstallerDownloadsJob(keys,local_source,cancel); loop=QEventLoop()
+    job.progress.connect(dialog.update_progress,Qt.QueuedConnection)
+    job.finished.connect(dialog.job_finished,Qt.QueuedConnection)
+    job.finished.connect(loop.quit,Qt.QueuedConnection)
+    try:
+        dialog.show(); job.start()
+        if not job.settled:loop.exec()
+        return job.code
+    finally:
+        import shiboken6
+        cancel.set()
+        if shiboken6.isValid(dialog):dialog.deleteLater()
+        loop.deleteLater()
+        if job.settled:job.deleteLater()
+        else:job.finished.connect(job.deleteLater,Qt.QueuedConnection)
+        app.setQuitOnLastWindowClosed(quit_policy)
 
 
 class ComponentsDialog(QDialog):

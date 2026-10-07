@@ -11,6 +11,8 @@ import shutil
 import sys
 import urllib.request
 import urllib.error
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Callable
 import edge_tts
@@ -30,6 +32,39 @@ VOICES = [
 DEFAULT_VOICE = "adam-narrator"
 
 
+def _check_cancel(cancel_check):
+    if cancel_check and cancel_check():
+        raise InterruptedError("Speech generation cancelled.")
+
+
+async def _await_cancellable(awaitable, cancel_check):
+    """Interrupt a pending network operation, including a silent/blocked service."""
+    task = asyncio.ensure_future(awaitable)
+    try:
+        while not task.done():
+            _check_cancel(cancel_check)
+            await asyncio.wait({task}, timeout=0.05)
+        _check_cancel(cancel_check)
+        return await task
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+def _run_audio_process(cmd, cancel_check):
+    """Drain output to bounded disk handles and reap the actual owned encoder."""
+    from .process import run_cancellable
+    _check_cancel(cancel_check)
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        try:
+            run_cancellable(cmd, stdout=stdout, stderr=stderr, check=True, cancel_check=cancel_check)
+        except subprocess.CalledProcessError as err:
+            stderr.seek(max(0, stderr.tell() - 8192))
+            err.stderr = stderr.read()
+            raise
+
+
 def _ensure_windows_asyncio():
     if sys.platform == "win32":
         try:
@@ -43,7 +78,8 @@ def _synthesize_adam(
     rate_percent: int = 0,
     pitch_hz: int = 0,
     target_path: Path | str | None = None,
-    ffmpeg_bin: str = "ffmpeg"
+    ffmpeg_bin: str = "ffmpeg",
+    cancel_check: Callable[[], bool] | None = None,
 ) -> str:
     target = Path(target_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -62,9 +98,9 @@ def _synthesize_adam(
         loop = None
     if loop and loop.is_running():
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            pool.submit(lambda: asyncio.run(_synthesize_async(text, base_voice, rate_str, pitch_str, temp_raw))).result()
+            pool.submit(lambda: asyncio.run(_synthesize_async(text, base_voice, rate_str, pitch_str, temp_raw, cancel_check))).result()
     else:
-        asyncio.run(_synthesize_async(text, base_voice, rate_str, pitch_str, temp_raw))
+        asyncio.run(_synthesize_async(text, base_voice, rate_str, pitch_str, temp_raw, cancel_check))
 
     # Broadcast studio mastering: low-end proximity boost, clear presence EQ, and radio compression
     af = (
@@ -72,15 +108,16 @@ def _synthesize_adam(
         "equalizer=f=3300:t=q:w=1.1:g=2.4,"
         "acompressor=threshold=-17dB:ratio=3.2:attack=12:release=140:makeup=2.2dB"
     )
-    from .process import run as run_process
     cmd = [ffmpeg_bin, "-y", "-i", str(temp_raw), "-af", af, "-c:a", "libmp3lame", "-q:a", "2", str(temp_mastered)]
     try:
-        run_process(cmd, check=True, capture_output=True)
+        _run_audio_process(cmd, cancel_check)
         if temp_mastered.exists():
             temp_mastered.replace(target)
         elif temp_raw.exists():
             temp_raw.replace(target)
-    except Exception:
+    except InterruptedError:
+        raise
+    except (OSError, subprocess.CalledProcessError):
         if temp_raw.exists():
             temp_raw.replace(target)
     finally:
@@ -97,7 +134,8 @@ def synthesize_elevenlabs(
     api_key: str,
     voice_id: str = "pNInz6obpgDQGcFmaJgB",
     rate_percent: int = 0,
-    target_path: Path | str | None = None
+    target_path: Path | str | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> str:
     cleaned = text.strip()
     if not cleaned:
@@ -122,19 +160,20 @@ def synthesize_elevenlabs(
             "speed": round(speed_factor, 2)
         }
     }
-    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+    async def request_audio():
+        import aiohttp
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+            async with session.post(url, json=body, headers=headers) as resp:
+                if resp.status >= 400:
+                    error = await resp.json(content_type=None)
+                    detail = error.get("detail", {})
+                    message = detail.get("message") if isinstance(detail, dict) else str(detail)
+                    raise RuntimeError(f"ElevenLabs error ({resp.status}): {message or resp.reason}")
+                return await resp.read()
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            audio_bytes = resp.read()
-    except urllib.error.HTTPError as err:
-        try:
-            err_json = json.loads(err.read().decode("utf-8", errors="replace"))
-            detail = err_json.get("detail", {})
-            msg = detail.get("message") if isinstance(detail, dict) else str(detail)
-            msg = msg or str(err)
-        except Exception:
-            msg = str(err)
-        raise RuntimeError(f"ElevenLabs error ({err.code}): {msg}")
+        audio_bytes = asyncio.run(_await_cancellable(request_audio(), cancel_check))
+    except InterruptedError:
+        raise
     except Exception as err:
         raise RuntimeError(f"ElevenLabs connection failed: {err}")
 
@@ -147,11 +186,12 @@ def synthesize_elevenlabs(
     return str(target)
 
 
-async def _synthesize_async(text: str, voice: str, rate: str, pitch: str, target: Path):
+async def _synthesize_async(text: str, voice: str, rate: str, pitch: str, target: Path, cancel_check=None):
     target.parent.mkdir(parents=True, exist_ok=True)
     temp_target = target.with_suffix(".tmp.mp3")
     com = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
-    await com.save(str(temp_target))
+    await _await_cancellable(com.save(str(temp_target)), cancel_check)
+    _check_cancel(cancel_check)
     if temp_target.exists():
         temp_target.replace(target)
 
@@ -163,9 +203,11 @@ def synthesize_speech(
     pitch_hz: int = 0,
     output_path: str | Path | None = None,
     api_key: str = "",
-    ffmpeg_bin: str = "ffmpeg"
+    ffmpeg_bin: str = "ffmpeg",
+    cancel_check: Callable[[], bool] | None = None,
 ) -> str:
     cleaned_text = text.strip()
+    _check_cancel(cancel_check)
     if not cleaned_text:
         raise ValueError("Text cannot be empty.")
     rate_str = f"{rate_percent:+d}%"
@@ -178,14 +220,32 @@ def synthesize_speech(
         target = CACHE_DIR / "tts" / f"tts_{digest}.mp3"
 
     if not target.exists() or target.stat().st_size == 0:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Every request owns its temporary paths. Simultaneous previews of the
+        # same text cannot overwrite/delete each other's partial audio.
+        with tempfile.TemporaryDirectory(prefix=".tts-", dir=target.parent) as work_dir:
+            work_target = Path(work_dir) / "speech.mp3"
+            _synthesize_to_target(cleaned_text, voice, rate_percent, pitch_hz,
+                                  work_target, api_key, ffmpeg_bin, cancel_check)
+            _check_cancel(cancel_check)
+            work_target.replace(target)
+
+    _check_cancel(cancel_check)
+    return str(target)
+
+
+def _synthesize_to_target(cleaned_text, voice, rate_percent, pitch_hz, target,
+                          api_key, ffmpeg_bin, cancel_check):
+        rate_str = f"{rate_percent:+d}%"
+        pitch_str = f"{pitch_hz:+d}Hz"
         if voice in ("adam-narrator", "adam-shorts") or voice.startswith("adam"):
-            _synthesize_adam(cleaned_text, rate_percent=rate_percent, pitch_hz=pitch_hz, target_path=target, ffmpeg_bin=ffmpeg_bin)
+            _synthesize_adam(cleaned_text, rate_percent=rate_percent, pitch_hz=pitch_hz, target_path=target, ffmpeg_bin=ffmpeg_bin, cancel_check=cancel_check)
         elif voice.startswith("elevenlabs:"):
             if api_key.strip():
                 voice_id = voice.split(":", 1)[1]
-                synthesize_elevenlabs(cleaned_text, api_key=api_key, voice_id=voice_id, rate_percent=rate_percent, target_path=target)
+                synthesize_elevenlabs(cleaned_text, api_key=api_key, voice_id=voice_id, rate_percent=rate_percent, target_path=target, cancel_check=cancel_check)
             else:
-                _synthesize_adam(cleaned_text, rate_percent=rate_percent, pitch_hz=pitch_hz, target_path=target, ffmpeg_bin=ffmpeg_bin)
+                _synthesize_adam(cleaned_text, rate_percent=rate_percent, pitch_hz=pitch_hz, target_path=target, ffmpeg_bin=ffmpeg_bin, cancel_check=cancel_check)
         else:
             _ensure_windows_asyncio()
             try:
@@ -194,11 +254,9 @@ def synthesize_speech(
                 loop = None
             if loop and loop.is_running():
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    pool.submit(lambda: asyncio.run(_synthesize_async(cleaned_text, voice, rate_str, pitch_str, target))).result()
+                    pool.submit(lambda: asyncio.run(_synthesize_async(cleaned_text, voice, rate_str, pitch_str, target, cancel_check))).result()
             else:
-                asyncio.run(_synthesize_async(cleaned_text, voice, rate_str, pitch_str, target))
-
-    return str(target)
+                asyncio.run(_synthesize_async(cleaned_text, voice, rate_str, pitch_str, target, cancel_check))
 
 
 def extract_preview_sentence(text: str) -> str:
@@ -270,6 +328,7 @@ def synthesize_dialogue_batches(
 ) -> str:
     """Synthesize dialogue of any length via batching with progress updates and ffmpeg concatenation."""
     cleaned_text = text.strip()
+    _check_cancel(cancel_check)
     if not cleaned_text:
         raise ValueError("Script text cannot be empty.")
 
@@ -298,14 +357,15 @@ def synthesize_dialogue_batches(
     if total_batches <= 1:
         if progress_callback:
             progress_callback(10, "Generating dialogue...")
-        synthesize_speech(cleaned_text, voice, rate_percent, pitch_hz, output_path=target, api_key=api_key, ffmpeg_bin=ffmpeg_bin)
+        synthesize_speech(cleaned_text, voice, rate_percent, pitch_hz, output_path=target, api_key=api_key, ffmpeg_bin=ffmpeg_bin, cancel_check=cancel_check)
+        _check_cancel(cancel_check)
         if progress_callback:
             progress_callback(100, "Dialogue ready")
         return str(target)
 
     # Multi-batch execution
-    batch_dir = CACHE_DIR / "tts" / f"batch_{digest}"
-    batch_dir.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    batch_dir = Path(tempfile.mkdtemp(prefix=".tts-batch-", dir=target.parent))
     chunk_files: list[Path] = []
 
     try:
@@ -314,7 +374,8 @@ def synthesize_dialogue_batches(
                 raise InterruptedError("Dialogue generation cancelled.")
 
             chunk_path = batch_dir / f"part_{i:04d}.mp3"
-            synthesize_speech(batch_text, voice, rate_percent, pitch_hz, output_path=chunk_path, api_key=api_key, ffmpeg_bin=ffmpeg_bin)
+            synthesize_speech(batch_text, voice, rate_percent, pitch_hz, output_path=chunk_path, api_key=api_key, ffmpeg_bin=ffmpeg_bin, cancel_check=cancel_check)
+            _check_cancel(cancel_check)
             chunk_files.append(chunk_path)
 
             pct = int(((i + 1) / total_batches) * 90)
@@ -328,24 +389,25 @@ def synthesize_dialogue_batches(
             progress_callback(95, "Assembling dialogue audio...")
 
         list_file = batch_dir / "concat_list.txt"
-        lines = [f"file '{cf.resolve().as_posix()}'\n" for cf in chunk_files]
+        paths = [cf.resolve().as_posix().replace("'", "'\\''") for cf in chunk_files]
+        lines = [f"file '{path}'\n" for path in paths]
         list_file.write_text("".join(lines), encoding="utf-8")
 
         target.parent.mkdir(parents=True, exist_ok=True)
-        temp_target = target.with_suffix(".tmp.mp3")
+        temp_target = batch_dir / "assembled.mp3"
 
-        from .process import run as run_process
         cmd = [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(temp_target)]
         try:
-            run_process(cmd, check=True, capture_output=True)
-        except Exception:
+            _run_audio_process(cmd, cancel_check)
+        except subprocess.CalledProcessError:
             filter_inputs = []
             for cf in chunk_files:
                 filter_inputs.extend(["-i", str(cf)])
             concat_str = "".join(f"[{k}:a]" for k in range(len(chunk_files))) + f"concat=n={len(chunk_files)}:v=0:a=1[out]"
             reencode_cmd = [ffmpeg_bin, "-y"] + filter_inputs + ["-filter_complex", concat_str, "-map", "[out]", "-c:a", "libmp3lame", "-q:a", "2", str(temp_target)]
-            run_process(reencode_cmd, check=True, capture_output=True)
+            _run_audio_process(reencode_cmd, cancel_check)
 
+        _check_cancel(cancel_check)
         if temp_target.exists():
             temp_target.replace(target)
 

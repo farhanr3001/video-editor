@@ -4,7 +4,7 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 import sys
-from PySide6.QtCore import QObject, QThreadPool, Qt
+from PySide6.QtCore import QObject, Qt, Slot
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
                              QProgressDialog, QGridLayout, QTextBrowser, QSizePolicy)
 from .theme_widgets import set_ui_style, set_ui_icon
@@ -70,27 +70,40 @@ class UpdateDialog(QDialog):
 
 class UpdateController(QObject):
     def __init__(self, window):
-        super().__init__(window); self.window = window; self.busy = False; self.dialog = None
+        super().__init__(window); self.window = window; self.busy = False; self.dialog = None; self._worker = None
+
+    def _start_worker(self,worker):
+        self._worker=worker
+        worker.signals.finished.connect(self._worker_finished,Qt.QueuedConnection)
+        self.window.start_worker(worker)
+
+    @Slot()
+    def _worker_finished(self):
+        if self._worker and self._worker.signals is self.sender():self._worker=None
 
     def check(self, startup=False):
         if self.busy or self.window.transport.closed:
             return
         from .ui import Worker
         self.busy = True
+        cancelled=threading.Event()
         if not startup:
             self.dialog = UpdateDialog(self.window, message="Contacting GitHub for the latest release…", state="checking")
+            self.dialog.rejected.connect(cancelled.set)
             self.dialog.show()
         worker = Worker(updates.check)
-        worker.signals.result.connect(lambda release: self.checked(release, startup))
-        worker.signals.error.connect(lambda error: self.failed(error, startup))
-        self._worker = worker; QThreadPool.globalInstance().start(worker)
+        worker.signals.result.connect(lambda release: self.checked(release,startup,cancelled))
+        worker.signals.error.connect(lambda error: self.failed(error,startup,cancelled))
+        self._start_worker(worker)
 
-    def checked(self, release, startup):
+    def checked(self, release, startup, cancelled=None):
         self.busy = False
+        was_cancelled=bool(cancelled and cancelled.is_set())
         if self.window.transport.closed:
             return
         if self.dialog:
             self.dialog.close(); self.dialog = None
+        if was_cancelled:return
         if not release:
             if not startup:
                 UpdateDialog(self.window, message=f"Installed version: {VERSION}", state="current").exec()
@@ -98,7 +111,7 @@ class UpdateController(QObject):
         if startup and self.window.settings.get("updates_ignored_version") == release.version:
             return
         if release.incremental and release.selection is None:
-            self.prepare(release, startup)
+            self.prepare(release,startup)
             return
         dialog = UpdateDialog(self.window, release, startup=startup)
         dialog.exec()
@@ -109,7 +122,7 @@ class UpdateController(QObject):
         elif dialog.choice == "download":
             self.fetch(release)
 
-    def prepare(self, release, startup):
+    def prepare(self, release, startup, cancelled=None):
         from .ui import Worker
         from .update_files import plan
         if not getattr(sys, 'frozen', False):
@@ -117,23 +130,26 @@ class UpdateController(QObject):
             return
         self.busy = True
         worker = Worker(lambda: replace(release, selection=plan(Path(sys.executable).parent, release.manifest)))
-        worker.signals.result.connect(lambda prepared: self.checked(replace(prepared, size=prepared.selection['download_bytes']), startup))
-        worker.signals.error.connect(lambda error: self.failed(error, startup))
-        self._worker = worker; QThreadPool.globalInstance().start(worker)
+        worker.signals.result.connect(lambda prepared: self.checked(replace(prepared,size=prepared.selection['download_bytes']),startup,cancelled))
+        worker.signals.error.connect(lambda error: self.failed(error,startup,cancelled))
+        self._start_worker(worker)
 
-    def failed(self, error, startup=False):
+    def failed(self, error, startup=False, cancelled=None):
         self.busy = False
+        was_cancelled=bool(cancelled and cancelled.is_set())
         if self.window.transport.closed:
             return
         if self.dialog:
             self.dialog.close(); self.dialog = None
+        if was_cancelled:return
         if not startup:
             UpdateDialog(self.window, message="Unable to check for updates. Check your connection and try again.\n\n"
-                         + error.splitlines()[-1][:240], state="error").exec()
+                         + (error.splitlines() or ['Unknown update error'])[-1][:240], state="error").exec()
         else:
-            logging.info("Startup update check unavailable: %s", error.splitlines()[-1])
+            logging.info("Startup update check unavailable: %s", (error.splitlines() or ['Unknown update error'])[-1])
 
     def fetch(self, release):
+        if self.busy or self.window.transport.closed:return
         from .ui import Worker
         from .config import CACHE_DIR
         self.busy = True; cancel = threading.Event()
@@ -155,16 +171,23 @@ class UpdateController(QObject):
             worker = Worker(lambda: updates.download(release, CACHE_DIR / "updates", cancel,
                                                     lambda done, total: worker.signals.progress.emit(round(done/total*100))))
         worker.signals.progress.connect(progress.setValue)
-        worker.signals.result.connect(lambda path: self.ready(path, progress, release.incremental))
-        worker.signals.error.connect(lambda error: (progress.close(), self.failed(error)))
-        self._worker = worker; self._cancel = cancel
+        worker.signals.result.connect(lambda path: self.ready(path,progress,release.incremental,cancel))
+        worker.signals.error.connect(lambda error: self.download_failed(error,progress,cancel))
+        self._cancel = cancel
         self.window.destroyed.connect(cancel.set)
-        QThreadPool.globalInstance().start(worker)
+        self._start_worker(worker)
 
-    def ready(self, path, progress, incremental=False):
+    def download_failed(self,error,progress,cancelled):
+        was_cancelled=cancelled.is_set()
+        progress.close(); self.busy=False
+        if not was_cancelled:self.failed(error)
+
+    def ready(self, path, progress, incremental=False, cancelled=None):
         from PySide6.QtWidgets import QMessageBox
         from .process import popen
+        was_cancelled=cancelled and cancelled.is_set()
         progress.close(); self.busy = False
+        if was_cancelled:return
         if self.window.transport.closed:
             return
         answer = QMessageBox.question(self.window, "Update ready",
@@ -177,6 +200,18 @@ class UpdateController(QObject):
                 copied = Path(path).parent / helper.name
                 try:shutil.copy2(helper, copied)
                 except OSError as error:self.failed(str(error)); return
-                # Start first: the helper waits for this PID. A cancelled save cannot replace files.
-                if self.window.close():popen([str(copied), 'apply', str(path), '--wait-pid', str(os.getpid())])
-            elif self.window.close():popen([str(path)])
+                command=[str(copied), 'apply', str(path), '--wait-pid', str(os.getpid())]
+            else:command=[str(path)]
+            # Shutdown may be deferred while cancellable editing jobs settle.
+            # A rejected Save/Cancel prompt must never launch the updater later.
+            launched=False
+            signal=self.window.shutdownFinished
+            def launch():
+                nonlocal launched
+                if launched:return
+                launched=True
+                signal.disconnect(launch)
+                popen(command)
+            signal.connect(launch)
+            if self.window.close():launch()
+            elif not getattr(self.window,'_closing',False):signal.disconnect(launch)
