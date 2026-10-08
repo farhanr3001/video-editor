@@ -134,7 +134,7 @@ class DownloaderFailureTests(unittest.TestCase):
             unrelated=root/'unrelated.mp4'; unrelated.write_bytes(b'other')
             def complete(command,**kwargs):
                 self.assertIn('--progress',command)
-                return popen([sys.executable,'-u','-c','import sys; print("KC_PATH:"+sys.argv[1],flush=True)',str(actual)],**kwargs)
+                return popen([sys.executable,'-u','-c','import sys,json; print("KC_PATH:"+json.dumps(sys.argv[1]),flush=True)',str(actual)],**kwargs)
             worker=_DownloadWorker('https://example.invalid/video','video',root)
             found=[]; errors=[]; worker.finished.connect(found.append); worker.error.connect(errors.append)
             with patch('kinetic_cut.downloader_dialog.popen',side_effect=complete),patch('kinetic_cut.downloader_dialog.get_ytdlp_runtime_args',return_value=[]):worker.run()

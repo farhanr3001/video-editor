@@ -1,5 +1,6 @@
 """Effect metadata shared by the library, drop validation and render pipelines."""
 from .visual_fx import VISUAL_FX_NAMES, VISUAL_FX_SET, VISUAL_FX_SUBSECTIONS
+from .voice_effects import NAMES as VOICE_NAMES, DESCRIPTIONS as VOICE_DESCRIPTIONS
 from .transitions import (
     TRANSITION_NAMES,
     TRANSITION_SET,
@@ -19,7 +20,7 @@ CATALOG = {
     "Face Filters": ["Big Eyes", "Big Nose", "Big Lips", "Face Twist", "Custom Face", "Puppy Ears & Nose", "Cat Ears & Whiskers", "AR Plague Mask", "AR Pixel Glasses"],
     "Colour": ["Black & White", "Light Boost", "Cinematic Contrast", "Warm Tone", "Cool Tone", "Sepia", "Channel Swap"],
     "Titles": ["Text", "Headline"],
-    "Audio": ["Noise Clean", "Voice Clarity", "Low Cut", "Auto Duck", "Fade In / Out", "Cut curse words", "Remove Silence", "Vocal Only"],
+    "Audio": [*VOICE_NAMES, "Noise Clean", "Voice Clarity", "Low Cut", "Auto Duck", "Fade In / Out", "Cut curse words", "Remove Silence", "Vocal Only"],
     "Graphics": ["Motion Composition", "Circle", "Pointing Arrow", "Square", "Rectangle", "Timer / Countdown", "Speech Bubble / Quote Card", "Progress Bar", "Callout Badge"],
 }
 # Browser-only grouping: keep the established Face Filters catalog and effect
@@ -99,8 +100,9 @@ MATRICES = {
     "Sepia": ((.393, .769, .189), (.349, .686, .168), (.272, .534, .131)),
     "Channel Swap": ((0, 0, 1), (0, 1, 0), (1, 0, 0)),
 }
-ADJUSTABLE = set(MATRICES) | {"Voice Clarity", "Low Cut"}
+ADJUSTABLE = set(MATRICES) | {"Voice Clarity", "Low Cut"} | set(VOICE_NAMES)
 DESCRIPTIONS = {
+    **VOICE_DESCRIPTIONS,
     "Object Tracking": "Follow a selected region with censor blur, pixelation, a censor bar, arrows, outlines, labels, an image or a following crop. Analyse locally and refine with correction points.",
     **TRANSITION_DESCRIPTIONS,
     # Visual FX - Zooms

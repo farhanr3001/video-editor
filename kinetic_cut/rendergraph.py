@@ -2,6 +2,7 @@ import copy, math
 
 
 def audio_filters(item):
+    from .voice_effects import filter_chain, NAMES as VOICE_NAMES
     chain="aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS"
     tempo=item.speed
     if abs(tempo-1)>.00001:
@@ -17,12 +18,21 @@ def audio_filters(item):
         chain+=f",atempo={tempo:.6f}"
     left=min(1.,1-item.pan); right=min(1.,1+item.pan)
     chain+=f",pan=stereo|c0={left:.6f}*c0|c1={right:.6f}*c1,volume={item.gain_db:.4f}dB"
+    voice_applied=False
     for effect in item.effects:
         if not effect.get("enabled",True):continue
+        if effect.get('name') in VOICE_NAMES:
+            voice=filter_chain(effect)
+            if voice:chain+=','+voice; voice_applied=True
+            continue
         amount=max(0,min(100,float(effect.get("amount",50))))/100
         if effect.get("name")=="Noise Clean":chain+=",afftdn=nf=-25"
         elif effect.get("name")=="Voice Clarity" and amount>0:chain+=f",highpass=f=80,equalizer=f=3000:t=q:w=1:g={amount*6:.3f}"
         elif effect.get("name")=="Low Cut" and amount>0:chain+=f",highpass=f={60+180*amount:.2f}"
+    if voice_applied:
+        # Pitch/tempo filters can return a few fewer samples; keep the exact
+        # clip length and contain all processing within its timeline interval.
+        chain+=f",apad=whole_dur={item.duration:.6f},atrim=duration={item.duration:.6f}"
     if item.fade_in>0:chain+=f",afade=t=in:st=0:d={min(item.fade_in,item.duration):.6f}"
     if item.fade_out>0:chain+=f",afade=t=out:st={max(0,item.duration-item.fade_out):.6f}:d={min(item.fade_out,item.duration):.6f}"
     return chain

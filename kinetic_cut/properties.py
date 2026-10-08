@@ -260,6 +260,8 @@ class PropertiesPanel(QWidget):
         key_form.addRow("Similarity (%)",self.key_similarity); key_form.addRow("Edge softness (%)",self.key_softness); root.addWidget(self.key_panel)
         self.effect_amount_panel=QWidget(); amount_layout=QFormLayout(self.effect_amount_panel)
         self.effect_amount=ValueRow(0,100,100,1); self.effect_amount.edited.connect(lambda value,delta:self.edit_effect("amount",value)); amount_layout.addRow("Strength (%)",self.effect_amount); root.addWidget(self.effect_amount_panel)
+        from .voice_ui import VoiceControls
+        self.voice_panel=VoiceControls(self); root.addWidget(self.voice_panel)
 
         # Visual FX dedicated controls
         self.vfx_panel=QWidget(); vfx_root=QVBoxLayout(self.vfx_panel); vfx_root.setContentsMargins(0,0,0,0); vfx_root.setSpacing(6)
@@ -511,6 +513,7 @@ class PropertiesPanel(QWidget):
         from .effects import ADJUSTABLE, DESCRIPTIONS
         from .visual_fx import VISUAL_FX_SET, SUBSECTION_BY_EFFECT
         effect=self.effect()
+        self.voice_panel.refresh(effect)
         tracking=bool(effect and effect.get('name')=='Object Tracking')
         self.tracking_panel.setVisible(tracking)
         self.vision_reanalyse.hide()

@@ -166,7 +166,7 @@ class PolishTests(unittest.TestCase):
     def test_all_new_presets_are_editable_and_exported(self):
         w=self.window
         for name in ADJUSTABLE:
-            item=w.project.timeline[1 if name in {"Voice Clarity","Low Cut"} else 0]
+            item=next(item for item in w.project.timeline if compatible(name,item,w.project))
             w.timeline.select_ids({item.id},item.id); w.apply_effect(name)
             self.assertEqual(item.effects[-1]["name"],name)
             w.inspector.edit_effect("amount",37); self.assertEqual(item.effects[-1]["amount"],37)

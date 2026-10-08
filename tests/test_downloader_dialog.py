@@ -22,6 +22,36 @@ app = QApplication.instance() or QApplication([])
 
 
 class MediaDownloaderDialogTests(unittest.TestCase):
+    def test_packaged_downloader_uses_own_interpreter_and_ffmpeg(self):
+        from kinetic_cut import downloader_dialog as d
+        with patch.object(d.sys,'frozen',True,create=True),patch.object(d.sys,'executable','KineticCut.exe'),patch.object(d,'resource_path',return_value=Path('bundle/tools')):
+            self.assertEqual(d.ytdlp_command(),['KineticCut.exe','--media-download-helper'])
+            args=d.get_ytdlp_runtime_args()
+            self.assertEqual(args[args.index('--ffmpeg-location')+1],str(Path('bundle/tools')))
+
+    def test_runtime_arguments_preserve_unicode_output(self):
+        from kinetic_cut.downloader_dialog import get_ytdlp_runtime_args
+        with patch('kinetic_cut.downloader_dialog.find_cookie_file',return_value=None):
+            args=get_ytdlp_runtime_args()
+        self.assertEqual(args[args.index('--encoding')+1],'utf-8')
+
+    def test_unicode_filename_reports_are_exact(self):
+        import json,tempfile,sys
+        from kinetic_cut.downloader_dialog import _DownloadWorker
+        from kinetic_cut.process import popen
+        for filename in ('Lowkey tho😭 [123].mp4','日本語 🎧 [456].mp3'):
+            with tempfile.TemporaryDirectory() as temp:
+                path=Path(temp)/filename; path.write_bytes(b'media')
+                (Path(temp)/'unrelated.mp4').write_bytes(b'other')
+                worker=_DownloadWorker('url','video',Path(temp)); found=[]; errors=[]
+                worker.finished.connect(found.append); worker.error.connect(errors.append)
+                def download(cmd,**kwargs):
+                    self.assertIn('after_move:KC_PATH:%(filepath)j',cmd)
+                    self.assertEqual(cmd[cmd.index('--encoding')+1],'utf-8')
+                    return popen([sys.executable,'-c','import sys,json; print("KC_PATH:"+json.dumps(sys.argv[1]),flush=True)',str(path)],**kwargs)
+                with patch('kinetic_cut.downloader_dialog.popen',side_effect=download),patch('kinetic_cut.downloader_dialog.get_ytdlp_runtime_args',return_value=[]):worker.run()
+                self.assertEqual(errors,[]); self.assertEqual(found,[str(path.resolve())]); worker.deleteLater()
+
     def test_video_download_prefers_edit_friendly_codec_without_dropping_size(self):
         selector, sorting = video_download_format("1920x1080")
         self.assertIn("height<=1080", selector)

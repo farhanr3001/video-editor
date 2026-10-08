@@ -6,6 +6,13 @@ from kinetic_cut.process import install_desktop_process_policy
 
 
 if __name__ == "__main__":
+    if len(sys.argv)>1 and sys.argv[1]=='--media-download-helper':
+        # Run yt-dlp inside the packaged interpreter, without creating Qt UI or
+        # requiring the development PC's Python installation on other devices.
+        install_desktop_process_policy()
+        import yt_dlp
+        yt_dlp.main(sys.argv[2:])
+        sys.exit(0)
     if len(sys.argv) == 1:
         from kinetic_cut.update_helper import recover_on_startup
         if recover_on_startup():sys.exit(0)

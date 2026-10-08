@@ -33,6 +33,12 @@ from .export_process import ChildJob, stop
 PYTHON_BIN = r"C:\Python310\python.exe" if Path(r"C:\Python310\python.exe").exists() else sys.executable
 
 
+def ytdlp_command() -> list[str]:
+    if getattr(sys,'frozen',False):
+        return [sys.executable,'--media-download-helper']
+    return [PYTHON_BIN,'-m','yt_dlp']
+
+
 def default_download_dir() -> Path:
     # Never put user downloads inside the replaceable PyInstaller bundle.
     if os.environ.get('KINETIC_CUT_HOME'):
@@ -137,7 +143,12 @@ def find_cookie_file() -> Path | None:
 
 def get_ytdlp_runtime_args(cookies_path: str = "") -> list[str]:
     """Return optimal yt-dlp arguments including JavaScript runtime solver and cookie authentication."""
-    args = []
+    # A redirected Windows stdout otherwise uses the local code page and yt-dlp
+    # silently drops emoji from printed paths while retaining them on disk.
+    args = ['--encoding', 'utf-8']
+    if getattr(sys,'frozen',False):
+        # Audio extraction/merging must use the FFmpeg already in the app too.
+        args.extend(['--ffmpeg-location',str(resource_path('assets','tools'))])
 
     # 1. Node.js runtime for JavaScript challenge solving
     node_bin = shutil.which("node")
@@ -393,8 +404,7 @@ class _FetchMetadataWorker(_DownloaderTask):
                 if not self._cancel.is_set():self.finished.emit(data)
                 return
 
-            cmd = [
-                PYTHON_BIN, "-m", "yt_dlp",
+            cmd = ytdlp_command() + [
                 "--dump-single-json",
                 "--no-warnings",
                 "--no-playlist",
@@ -501,7 +511,7 @@ class _DownloadWorker(_DownloaderTask):
 
             out_template = str(self.output_dir / "%(title).80s [%(id)s].%(ext)s")
             
-            cmd = [PYTHON_BIN, "-m", "yt_dlp", "--newline", "--no-playlist",'--progress','--no-simulate','--socket-timeout','15','--retries','3','--fragment-retries','3','--print','after_move:KC_PATH:%(filepath)s']
+            cmd = ytdlp_command() + ["--newline", "--no-playlist",'--encoding','utf-8','--progress','--no-simulate','--socket-timeout','15','--retries','3','--fragment-retries','3','--print','after_move:KC_PATH:%(filepath)j']
             cmd.extend(get_ytdlp_runtime_args(self.cookies_path))
             
             if self.mode == "audio":
@@ -541,7 +551,10 @@ class _DownloadWorker(_DownloaderTask):
                                 line=line.strip()
                                 if not line:continue
                                 raw_output.append(line)
-                                if line.startswith('KC_PATH:'):final_file=Path(line[len('KC_PATH:'):])
+                                if line.startswith('KC_PATH:'):
+                                    reported=json.loads(line[len('KC_PATH:'):])
+                                    if not isinstance(reported,str):raise ValueError('Downloader returned an invalid output path')
+                                    final_file=Path(reported)
                                 m=re.search(r'\[download\]\s+([\d\.]+)%',line)
                                 if m:
                                     pct=float(m.group(1)); self.progress.emit(min(98.0,max(5.0,pct)),f'Downloading... {pct:.1f}%')

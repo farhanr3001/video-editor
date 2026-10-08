@@ -429,7 +429,8 @@ class TimelineTransport(QObject):
         QMetaObject.invokeMethod(player,"deleteLater",Qt.QueuedConnection)
 
     def processed_audio(self,item,media):
-        effects=[e for e in item.effects if e.get("enabled",True) and e.get("name") in {"Noise Clean","Voice Clarity","Low Cut"}]
+        from .voice_effects import PROCESSED_NAMES
+        effects=[e for e in item.effects if e.get("enabled",True) and e.get("name") in PROCESSED_NAMES]
         if item.pan==0 and item.pitch_semitones==0 and item.pitch_cents==0 and item.gain_db<=0 and item.speed==1 and not effects:return ""
         from .config import CACHE_DIR
         from .ui import Worker

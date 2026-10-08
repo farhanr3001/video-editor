@@ -1846,8 +1846,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Select an unlocked, compatible video or audio clip to apply "+name,4000); return
         for item in targets:
             from .visual_fx import VISUAL_FX_SET, default_visual_fx
+            from .voice_effects import NAMES as VOICE_NAMES, default_effect as default_voice_effect
             if name in VISUAL_FX_SET:
                 item.effects.append(default_visual_fx(name))
+            elif name in VOICE_NAMES:
+                item.effects.append(default_voice_effect(name))
             elif name in {"Chroma Key","Green Screen"}:
                 item.effects.append(dict(name=name,enabled=True,color="#00ff00",similarity=15.,softness=8.))
             elif name in ADJUSTABLE:

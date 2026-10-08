@@ -128,3 +128,5 @@ Karaoke typography on another device. Its embedded credits identify WolfBainX &
 Apostrophe / Apostrophic Labs, 1999–2001. No license is invented for these files.
 Owner font binaries are excluded from source history; existing available notices
 remain in the installer.
+yt-dlp (bundled media downloader): https://github.com/yt-dlp/yt-dlp
+License: Unlicense; license text: https://github.com/yt-dlp/yt-dlp/blob/master/LICENSE
