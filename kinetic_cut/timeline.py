@@ -1553,6 +1553,10 @@ class TimelineWidget(BaseTimeline):
         from .effects import TITLES, GRAPHICS, compatible
         if not self.project or self.read_only or pos.x()<self.LABEL_WIDTH:return None
         track=self.track_at(pos)
+        if name in TITLES or name in GRAPHICS:
+            top=self.project.video_tracks[-1]
+            if track=='__new_video' or (self.section_rect(top).contains(pos) and pos.y()<self.track_rect(top).top()):
+                return (name,'','__new_video',self.time_for_x(pos.x()))
         if self.project.track_states.get(track,{}).get("locked",False):return None
         if (name in TITLES or name in GRAPHICS) and track in self.project.video_tracks:return (name,"",track,self.time_for_x(pos.x()))
         hit=next((i for i in reversed(self.project.timeline) if self.visible_item_rect(i).contains(pos)),None)
@@ -1579,12 +1583,15 @@ class TimelineWidget(BaseTimeline):
         self.transition_hover=None
         if mime.hasFormat("application/x-kinetic-effect"):
             name=bytes(mime.data("application/x-kinetic-effect")).decode(errors="replace")
-            self.effect_hover=self.effect_target(name,event.position()); self.viewport().update()
+            self.effect_hover=self.effect_target(name,event.position())
+            self.set_provisional('__new_video' if self.effect_hover and self.effect_hover[2]=='__new_video' else '')
+            self.viewport().update()
             if self.effect_hover:event.acceptProposedAction()
             else:event.ignore()
         else:self.preview_incoming(event)
 
     def dragLeaveEvent(self,event):
+        self.set_provisional('')
         self.transition_hover=None; self.effect_hover=None; self.snap_guide=None; self.clear_incoming(); self.viewport().update(); event.accept()
 
     def dropEvent(self,event):
@@ -1644,7 +1651,7 @@ class TimelineWidget(BaseTimeline):
 
         if event.mimeData().hasFormat("application/x-kinetic-effect"):
             name=bytes(event.mimeData().data("application/x-kinetic-effect")).decode(errors="replace")
-            target=self.effect_target(name,event.position()); self.effect_hover=None; self.viewport().update()
+            target=self.effect_target(name,event.position()); self.effect_hover=None; self.set_provisional(''); self.viewport().update()
             if target:
                 if target[2]:self.titleDropped.emit(name,target[2],target[3])
                 else:self.effectDropped.emit(name,target[1])

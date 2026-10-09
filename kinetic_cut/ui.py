@@ -1165,6 +1165,7 @@ class MainWindow(QMainWindow):
     @edit_only
     def add_title_object(self,name="Text",track="",start=None):
         from .effects import GRAPHICS
+        if track=='__new_video':track=self.project.add_track('video')
         if name in GRAPHICS:
             self.add_graphic_object(name,track,start)
             return
@@ -1186,6 +1187,7 @@ class MainWindow(QMainWindow):
     @edit_only
     def add_graphic_object(self,name="Circle",track="",start=None,duration=None,properties=None):
         from .graphics import default_graphic_data, GRAPHICS_CATALOG
+        if track=='__new_video':track=self.project.add_track('video')
         track=track if track in self.project.video_tracks else self.timeline.selected_track if self.timeline.selected_track in self.project.video_tracks else self.project.video_tracks[-1]
         if self.project.track_states.get(track,{}).get("locked"):self.statusBar().showMessage("Unlock the destination track before adding a graphic.",4000); return None
         start=self.project.playhead if start is None else max(0.,float(start))
@@ -1621,7 +1623,7 @@ class MainWindow(QMainWindow):
         item=self.project.item_by_id(item_id)
         if item:
             if item.role=='title':
-                attributes=('zoom_x','zoom_y') if self.preview.drag_mode=='headline_scale' else ('position_x','position_y')
+                attributes=('zoom_x','zoom_y') if self.preview.drag_mode=='headline_scale' else ('size',) if self.preview.drag_mode=='title_scale' else ('position_x','position_y')
                 for other in self.inspector.targets(False):
                     for attr in attributes:setattr(other.title_style,attr,getattr(item.title_style,attr))
             else:

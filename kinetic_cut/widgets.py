@@ -318,6 +318,11 @@ class PreviewCanvas(QWidget):
         painter.setPen(QPen(QColor("#3d8cff"),2)); painter.setBrush(QColor("#3d8cff") if active_anchor else QColor("#f5f6fa")); painter.drawEllipse(anchor,6,6)
         active_rotation=self.drag_item is item and self.drag_mode=="rotate"
         painter.setBrush(QColor("#3d8cff") if active_rotation else QColor("#f5f6fa")); painter.drawEllipse(rotation_handle,5,5)
+        # Thin shapes can overlap grips; keep the pressed corner visibly active.
+        if self.drag_item is item and self.drag_mode=='scale' and isinstance(self.drag_handle,int):
+            corner=corners[self.drag_handle]
+            painter.setPen(QPen(QColor('#3d8cff'),1)); painter.setBrush(QColor('#3d8cff'))
+            painter.drawRect(QRectF(corner.x()-5,corner.y()-5,10,10))
 
     def _prepare_layer_image(self, item: TimelineItem, layer_source: QImage, target: QRectF, frame_rect: QRectF) -> QImage:
         from .preview_raster import RasterContext, prepare_layer_image
@@ -700,7 +705,9 @@ class PreviewCanvas(QWidget):
 
     def _draw_text_box(self,painter,rect):
         painter.save(); painter.setPen(QPen(QColor("#50df74"),2)); painter.setBrush(Qt.NoBrush); painter.drawRect(rect)
-        for point in self._handles(rect):painter.setBrush(QColor("#f5f6fa")); painter.setPen(QPen(QColor("#50df74"),1)); painter.drawRect(QRectF(point.x()-4,point.y()-4,8,8))
+        for index,point in enumerate(self._handles(rect)):
+            active=self.drag_mode in {'headline_scale','title_scale'} and self.drag_handle==index
+            painter.setBrush(QColor("#3d8cff") if active else QColor("#f5f6fa")); painter.setPen(QPen(QColor("#3d8cff") if active else QColor("#50df74"),1)); painter.drawRect(QRectF(point.x()-4,point.y()-4,8,8))
         painter.restore()
     def mousePressEvent(self, event):
         if event.button()==Qt.MiddleButton:
@@ -711,13 +718,19 @@ class PreviewCanvas(QWidget):
         selected_title=self.project.item_by_id(self.selected_item_id)
         title_rect=self.text_rects.get(('title',self.selected_item_id))
         if (self.transform_controls_visible and selected_title and selected_title.role=='title'
-                and selected_title.title_style.box_style=='headline' and title_rect
+                and title_rect
                 and not self.project.track_states.get(selected_title.track,{}).get('locked')):
-            if any((point-QPointF(handle)).manhattanLength()<=12 for handle in self._handles(title_rect)):
+            nearby=[((point-QPointF(handle)).manhattanLength(),index) for index,handle in enumerate(self._handles(title_rect))]
+            closest=min((entry for entry in nearby if entry[0]<=12),default=None)
+            handle_index=closest[1] if closest else None
+            if handle_index is not None:
+                self.drag_handle=handle_index; self.setCursor(Qt.ArrowCursor)
                 self.drag_text=('title',selected_title.id,selected_title.title_style)
-                self.drag_mode='headline_scale'; self.drag_origin=point.toPoint()
-                self.drag_position=title_rect.center(); self.drag_scale=selected_title.title_style.zoom_x
+                headline=selected_title.title_style.box_style=='headline'
+                self.drag_mode='headline_scale' if headline else 'title_scale'; self.drag_origin=point.toPoint()
+                self.drag_position=title_rect.center(); self.drag_scale=selected_title.title_style.zoom_x if headline else selected_title.title_style.size
                 self.drag_distance=max(1.,math.hypot(point.x()-self.drag_position.x(),point.y()-self.drag_position.y()))
+                self.update()
                 return
         text_hit=next(((kind,item_id,rect) for (kind,item_id),rect in reversed(list(self.text_rects.items())) if kind!='graphic' and rect.adjusted(-5,-5,5,5).contains(point)),None)
         if text_hit:
@@ -762,6 +775,7 @@ class PreviewCanvas(QWidget):
                 if grip==('scale',index):
                     self.drag_item = selected[0]; self.drag_mode = "scale"; self.drag_origin = point.toPoint()
                     self.drag_handle = index
+                    self.setCursor(Qt.ArrowCursor); self.update()
                     self.drag_scale = selected[0].transform.scale
                     self.drag_scale_y = selected[0].transform.effective_scale_y
                     self.drag_distance = max(1.0, math.hypot(point.x()-selected[2].center().x(), point.y()-selected[2].center().y()))
@@ -769,6 +783,7 @@ class PreviewCanvas(QWidget):
             side_modes=("scale_y","scale_x","scale_y","scale_x")
             for index,(handle,mode) in enumerate(zip(sides,side_modes)):
                 if grip==(mode,f'side-{index}'):
+                    self.setCursor(Qt.ArrowCursor)
                     angle=math.radians(-selected[0].transform.rotation); dx=point.x()-anchor.x(); dy=point.y()-anchor.y()
                     local_x=math.cos(angle)*dx-math.sin(angle)*dy; local_y=math.sin(angle)*dx+math.cos(angle)*dy
                     self.drag_item=selected[0]; self.drag_mode=mode; self.drag_handle=f"side-{index}"; self.drag_origin=point.toPoint(); self.drag_scale=selected[0].transform.scale; self.drag_scale_y=selected[0].transform.effective_scale_y; self.drag_distance=max(1,abs(local_x) if mode=="scale_x" else abs(local_y)); self.update(); return
@@ -801,17 +816,25 @@ class PreviewCanvas(QWidget):
             point = event.position()
             title=self.project.item_by_id(self.selected_item_id) if self.project else None
             title_rect=self.text_rects.get(('title',self.selected_item_id))
-            if (title and title.role=='title' and title.title_style.box_style=='headline' and title_rect
+            if (title and title.role=='title' and title_rect
                     and not self.project.track_states.get(title.track,{}).get('locked')
                     and any((point-QPointF(handle)).manhattanLength()<=12 for handle in self._handles(title_rect))):
-                self.setCursor(Qt.SizeFDiagCursor); return
+                self.setCursor(Qt.ArrowCursor); return
             selected = next(((item,rect) for item,_,rect in self._visible_items() if item.id == self.selected_item_id),None)
             geometry=self._transform_geometry(*selected) if selected else None
-            if geometry and (point-geometry[3]).manhattanLength()<=16:
+            grip=None
+            if geometry:
+                hover_grips=[((point-geometry[3]).manhattanLength(),16,'rotate'),
+                             ((point-geometry[0]).manhattanLength(),18,'anchor')]
+                hover_grips += [((point-h).manhattanLength(),14,'resize') for h in geometry[1]]
+                hover_grips += [((point-h).manhattanLength(),12,'resize') for h in geometry[2]]
+                nearest=min((g for g in hover_grips if g[0]<=g[1]),key=lambda g:g[0],default=None)
+                grip=nearest[2] if nearest else None
+            if grip=='rotate':
                 self.setCursor(Qt.CrossCursor)
-            elif geometry and any((point-h).manhattanLength() <= 14 for h in geometry[1]):
-                self.setCursor(Qt.SizeFDiagCursor)
-            elif geometry and QPolygonF(geometry[1]).containsPoint(point,Qt.OddEvenFill):
+            elif grip=='resize':
+                self.setCursor(Qt.ArrowCursor)
+            elif grip=='anchor' or geometry and QPolygonF(geometry[1]).containsPoint(point,Qt.OddEvenFill):
                 self.setCursor(Qt.SizeAllCursor)
             else:
                 self.setCursor(Qt.CrossCursor if self.tool == "crop" else Qt.ArrowCursor)
@@ -821,6 +844,11 @@ class PreviewCanvas(QWidget):
             kind,item_id,style=self.drag_text
             distance=math.hypot(point.x()-self.drag_position.x(),point.y()-self.drag_position.y())
             style.zoom_x=style.zoom_y=min(2.5,max(.2,self.drag_scale*distance/self.drag_distance))
+            self.transformChanged.emit(item_id); self.update(); return
+        if self.drag_mode=='title_scale' and self.drag_text:
+            kind,item_id,style=self.drag_text
+            distance=math.hypot(point.x()-self.drag_position.x(),point.y()-self.drag_position.y())
+            style.size=min(200,max(8,self.drag_scale*distance/self.drag_distance))
             self.transformChanged.emit(item_id); self.update(); return
         if self.drag_mode=="text_move" and self.drag_text:
             kind,item_id,style=self.drag_text; style.position_x=self.drag_position[0]+(point.x()-self.drag_origin.x())/frame_rect.width(); style.position_y=self.drag_position[1]+(point.y()-self.drag_origin.y())/frame_rect.height()
