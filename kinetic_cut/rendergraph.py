@@ -122,8 +122,8 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
             ox=width/2; oy=height/2
         else:
             lw,lh=_target_size(item,media,width,.92 if item.role=="facecam" else 1.,height)
-            # Clamp per-layer intermediate dimensions to avoid pathological memory use.
-            lw=min(8192,lw); lh=min(8192,lh)
+            # Never shrink static geometry: that changes framing relative to the
+            # viewer. Large ordinary layers sample only their visible source ROI.
             chain=f"{'null' if processed else _crop_filter(item)},scale={lw}:{lh}{_flip_filter(item)},format={pixel_format}"
             if animated:
                 crop=item.crop.clamped(); factor=max(width/max(1,media.width),height/max(1,media.height))*(.92 if item.role=='facecam' else 1.)
@@ -153,6 +153,15 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
                 ox+=ax-rotated_x; oy+=ay-rotated_y
             if item.retain_image_position:
                 crop=item.crop.clamped(); ox+=(crop.x+crop.width/2-.5)*lw/crop.width; oy+=(crop.y+crop.height/2-.5)*lh/crop.height
+            crop=item.crop.clamped()
+            if (opaque and max(lw,lh)>8192 and media.width%2==0 and media.height%2==0
+                    and crop.x==0 and crop.y==0 and crop.width==1 and crop.height==1
+                    and not item.sharpen and not any(e.get('enabled',True) for e in item.effects)):
+                from .export_geometry import visible_source
+                region=visible_source(media.width,media.height,lw,lh,ox,oy,width,height)
+                if region:
+                    rx,ry,rw,rh,lw,lh,ox,oy=region
+                    chain=f"null{_flip_filter(item)},crop={rw}:{rh}:{rx}:{ry},scale={lw}:{lh},format={pixel_format}"
         from .chroma import NAMES,filter_string
         keys=[filter_string(effect) for effect in item.effects if effect.get("enabled",True) and effect.get("name") in NAMES]
         if keys:chain=",".join(keys)+","+chain

@@ -708,10 +708,23 @@ class PreviewCanvas(QWidget):
         if event.button() != Qt.LeftButton or not self.project or self.read_only:
             return
         point = event.position()
+        selected_title=self.project.item_by_id(self.selected_item_id)
+        title_rect=self.text_rects.get(('title',self.selected_item_id))
+        if (self.transform_controls_visible and selected_title and selected_title.role=='title'
+                and selected_title.title_style.box_style=='headline' and title_rect
+                and not self.project.track_states.get(selected_title.track,{}).get('locked')):
+            if any((point-QPointF(handle)).manhattanLength()<=12 for handle in self._handles(title_rect)):
+                self.drag_text=('title',selected_title.id,selected_title.title_style)
+                self.drag_mode='headline_scale'; self.drag_origin=point.toPoint()
+                self.drag_position=title_rect.center(); self.drag_scale=selected_title.title_style.zoom_x
+                self.drag_distance=max(1.,math.hypot(point.x()-self.drag_position.x(),point.y()-self.drag_position.y()))
+                return
         text_hit=next(((kind,item_id,rect) for (kind,item_id),rect in reversed(list(self.text_rects.items())) if kind!='graphic' and rect.adjusted(-5,-5,5,5).contains(point)),None)
         if text_hit:
             kind,item_id,_=text_hit
             if kind=="title":
+                candidate=self.project.item_by_id(item_id)
+                if candidate and self.project.track_states.get(candidate.track,{}).get('locked'):return
                 item=self.project.item_by_id(item_id); self.selected_item_id=item_id; self.selected_caption_id=""; self.itemSelected.emit(item_id); style=item.title_style if item else None
             elif kind=="graphic":
                 item=self.project.item_by_id(item_id); self.selected_item_id=item_id; self.selected_caption_id=""; self.itemSelected.emit(item_id)
@@ -786,6 +799,12 @@ class PreviewCanvas(QWidget):
         if not self.drag_origin or not self.project or (not self.drag_item and not self.drag_text):
             # Hover feedback makes resize affordances discoverable.
             point = event.position()
+            title=self.project.item_by_id(self.selected_item_id) if self.project else None
+            title_rect=self.text_rects.get(('title',self.selected_item_id))
+            if (title and title.role=='title' and title.title_style.box_style=='headline' and title_rect
+                    and not self.project.track_states.get(title.track,{}).get('locked')
+                    and any((point-QPointF(handle)).manhattanLength()<=12 for handle in self._handles(title_rect))):
+                self.setCursor(Qt.SizeFDiagCursor); return
             selected = next(((item,rect) for item,_,rect in self._visible_items() if item.id == self.selected_item_id),None)
             geometry=self._transform_geometry(*selected) if selected else None
             if geometry and (point-geometry[3]).manhattanLength()<=16:
@@ -798,6 +817,11 @@ class PreviewCanvas(QWidget):
                 self.setCursor(Qt.CrossCursor if self.tool == "crop" else Qt.ArrowCursor)
             return
         frame_rect = self.composition_rect(); point = event.position(); item = self.drag_item
+        if self.drag_mode=='headline_scale' and self.drag_text:
+            kind,item_id,style=self.drag_text
+            distance=math.hypot(point.x()-self.drag_position.x(),point.y()-self.drag_position.y())
+            style.zoom_x=style.zoom_y=min(2.5,max(.2,self.drag_scale*distance/self.drag_distance))
+            self.transformChanged.emit(item_id); self.update(); return
         if self.drag_mode=="text_move" and self.drag_text:
             kind,item_id,style=self.drag_text; style.position_x=self.drag_position[0]+(point.x()-self.drag_origin.x())/frame_rect.width(); style.position_y=self.drag_position[1]+(point.y()-self.drag_origin.y())/frame_rect.height()
             (self.transformChanged if kind=="title" else self.captionTransformChanged).emit(item_id); self.update(); return

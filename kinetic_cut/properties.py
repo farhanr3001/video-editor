@@ -870,13 +870,14 @@ class PropertiesPanel(QWidget):
         self.headline_controls=QWidget(); headline_layout=QFormLayout(self.headline_controls); headline_layout.setContentsMargins(0,4,0,0)
         self.headline_color=QPushButton(); self.headline_color.setFixedSize(40,22); self.headline_color.clicked.connect(lambda:self.pick_color("color")); headline_layout.addRow("Color",self.headline_color)
         self.headline_size=ValueRow(20,250,100,1); self.headline_size.spin.setSuffix(" %"); self.headline_size.edited.connect(lambda v,d:self.edit_headline_size(v)); headline_layout.addRow("Size",self.headline_size)
+        self.headline_bold=QCheckBox("Bold"); self.headline_bold.toggled.connect(self.edit_headline_bold); headline_layout.addRow("Font",self.headline_bold)
         self.headline_duration=ValueRow(.05,60,5,.01); self.headline_duration.spin.setMaximum(3600); self.headline_duration.spin.setSuffix(" s"); self.headline_duration.edited.connect(lambda v,d:self.edit_headline_duration(v)); headline_layout.addRow("Duration",self.headline_duration)
         transform_body=QWidget(); positions=QFormLayout(transform_body); positions.setContentsMargins(0,4,0,4)
         self.headline_positions={}
         for axis,dimension in (("X","width"),("Y","height")):
             row=ValueRow(-20000,20000,getattr(self.window.project.settings,dimension)/2,.001,False); row.spin.setDecimals(3); row.edited.connect(lambda v,d,a=axis:self.edit_style("position_"+a.lower(),v/getattr(self.window.project.settings,"width" if a=="X" else "height"))); positions.addRow("Position "+axis,row); self.headline_positions[axis]=row
         headline_layout.addRow(InspectorSection("Transform",transform_body,reset_callback=lambda:self.center_headline()))
-        hint=QLabel("Text wraps automatically. Press Enter for a new line.\nDrag the headline in the viewer to position it."); hint.setWordWrap(True); headline_layout.addRow(hint); root.addWidget(self.headline_controls); self.headline_controls.hide()
+        hint=QLabel("Text wraps automatically. Press Enter for a new line.\nDrag the headline to position it; drag its corner handles to resize."); hint.setWordWrap(True); headline_layout.addRow(hint); root.addWidget(self.headline_controls); self.headline_controls.hide()
         self.title_style_host=QWidget(); self.title_style_layout=QVBoxLayout(self.title_style_host); self.title_style_layout.setContentsMargins(0,0,0,0); root.addWidget(self.title_style_host,1)
         self.title_bottom_space=QWidget(); root.addWidget(self.title_bottom_space,1); self.title_bottom_space.hide(); return panel
 
@@ -985,6 +986,7 @@ class PropertiesPanel(QWidget):
         if not item or item.role!="title":return
         self.updating=True; style=item.title_style; self.filename.setText("Title — "+(item.title_text or "Basic Title").replace("\n"," ")[:45])
         self.headline_size.set_values([style.zoom_x*100])
+        self.headline_bold.setChecked('Bold' in style.font_face)
         self.headline_duration.set_values([item.duration]); self.headline_color.setStyleSheet(f"QPushButton {{background:{style.color};border:1px solid #7d8590;border-radius:2px;}} QPushButton:hover {{border:2px solid #d8e4f2;}}")
         for axis,row in self.headline_positions.items():row.set_values([getattr(style,"position_"+axis.lower())*getattr(self.window.project.settings,"width" if axis=="X" else "height")])
         for attr,row in self.style_bindings:
@@ -1013,6 +1015,15 @@ class PropertiesPanel(QWidget):
         for w in (self.title_tts_voice,self.title_tts_speed,self.title_tts_pitch,self.title_tts_preview_btn,self.title_tts_generate_btn,self.title_tts_match_duration):
             w.setEnabled(is_tts)
         self.updating=False
+
+    @edit_only
+    def edit_headline_bold(self,checked):
+        if self.updating:return
+        self.window.flush_text_edit()
+        for style in self.style_targets(True):
+            italic='Italic' in style.font_face
+            style.font_face=('Bold Italic' if italic else 'Bold') if checked else ('Italic' if italic else 'Regular')
+        self.changed.emit()
 
     @edit_only
     def edit_headline_size(self,value):

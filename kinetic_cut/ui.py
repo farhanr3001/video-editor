@@ -1621,7 +1621,9 @@ class MainWindow(QMainWindow):
         item=self.project.item_by_id(item_id)
         if item:
             if item.role=='title':
-                for other in self.inspector.targets(False):other.title_style.position_x=item.title_style.position_x; other.title_style.position_y=item.title_style.position_y
+                attributes=('zoom_x','zoom_y') if self.preview.drag_mode=='headline_scale' else ('position_x','position_y')
+                for other in self.inspector.targets(False):
+                    for attr in attributes:setattr(other.title_style,attr,getattr(item.title_style,attr))
             else:
                 attributes={'move':('x','y'),'graphic_move':('x','y'),'rotate':('rotation',),'anchor':('anchor_x','anchor_y'),'scale':('scale','scale_y'),'scale_x':('scale',),'scale_y':('scale_y',)}.get(self.preview.drag_mode,())
                 for other in self.inspector.targets(False):

@@ -33,11 +33,11 @@ def wrap_lines(text,measure,max_width):
 
 
 @lru_cache(maxsize=128)
-def layout(text,width,font_name,size):
+def layout(text,width,font_name,size,bold=True):
     global _font_application
     # CLI exports also need a font database, but never a visible window.
     if QGuiApplication.instance() is None:_font_application=QGuiApplication([])
-    font=QFont(font_name); font.setPixelSize(max(8,round(size))); font.setBold(True)
+    font=QFont(font_name); font.setPixelSize(max(8,round(size))); font.setBold(bold)
     metrics=QFontMetricsF(font); padding=size*.28; line_height=metrics.height()
     from .emoji import measure,text_path
     rows=wrap_lines(text,lambda value:measure(value,font),max(1,width*.9-padding*2))
@@ -53,16 +53,16 @@ def layout(text,width,font_name,size):
     return letters,backing,emojis
 
 
-def geometry(text,width,font_name,size):return layout(text,width,font_name,size)[:2]
+def geometry(text,width,font_name,size,bold=True):return layout(text,width,font_name,size,bold)[:2]
 
 
 def emoji_positions(text,style,width,height):
     transform=QTransform(); transform.translate(width*style.position_x,height*style.position_y); transform.scale(style.zoom_x,style.zoom_x)
-    return [(sequence,transform.mapRect(rect)) for sequence,rect in layout(text,width,style.font,style.size)[2]]
+    return [(sequence,transform.mapRect(rect)) for sequence,rect in layout(text,width,style.font,style.size,'Bold' in style.font_face)[2]]
 
 
 def paths(text,style,width,height):
-    letters,backing=geometry(text,width,style.font,style.size)
+    letters,backing=geometry(text,width,style.font,style.size,'Bold' in style.font_face)
     transform=QTransform(); transform.translate(width*style.position_x,height*style.position_y)
     # A single uniform scale intentionally leaves wrapping unchanged.
     transform.scale(style.zoom_x,style.zoom_x)
