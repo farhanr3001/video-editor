@@ -108,7 +108,7 @@ class TimelineMarquee(QObject):
     def wheel(self,event):
         self.move(event.position()); metric=self.resolve_endpoint()
         if metric:
-            name=metric[0]; bar=getattr(self.view,name+'_scroll'); delta=event.angleDelta().y() or event.pixelDelta().y()
+            name=metric[0]; bar=getattr(self.view,name+'_scroll'); delta=self.view.layer_wheel_delta(event,name)
             bar.setValue(bar.value()+(delta if name in {'video','subtitle'} else -delta))
         bar=self.view.horizontalScrollBar(); bar.setValue(bar.value()-(event.angleDelta().x() or event.pixelDelta().x()))
         self.update(); event.accept()

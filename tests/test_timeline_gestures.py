@@ -9,6 +9,25 @@ from kinetic_cut.timeline_gestures import roll,roll_snapshots,roll_pair
 
 
 class GestureTests(unittest.TestCase):
+    def test_layer_wheel_notch_moves_half_row_without_skipping_layers(self):
+        t=self.t;t.resize(900,220);self.app.processEvents()
+        for section in ('video','audio'):
+            bar=getattr(t,section+'_scroll');bar.setValue(bar.maximum()//2);before=bar.value()
+            pos=t._sections()[section].center();pos.setX(t.LABEL_WIDTH+100)
+            wheel=QWheelEvent(pos,pos,QPoint(),QPoint(0,120),Qt.NoButton,Qt.NoModifier,Qt.NoScrollPhase,False)
+            t.wheelEvent(wheel);movement=bar.value()-before
+            self.assertGreater(abs(movement),0);self.assertLessEqual(abs(movement),28)
+            self.assertEqual(movement>0,section=='video')
+            reverse=QWheelEvent(pos,pos,QPoint(),QPoint(0,-120),Qt.NoButton,Qt.NoModifier,Qt.NoScrollPhase,False)
+            t.wheelEvent(reverse);self.assertEqual(bar.value(),before)
+    def test_layer_wheel_preserves_pixels_and_accumulates_fractional_ticks(self):
+        t=self.t;pos=QPointF(250,180)
+        pixel=QWheelEvent(pos,pos,QPoint(0,3),QPoint(0,120),Qt.NoButton,Qt.NoModifier,Qt.NoScrollPhase,False)
+        self.assertEqual(t.layer_wheel_delta(pixel,'video'),3)
+        tick=QWheelEvent(pos,pos,QPoint(),QPoint(0,1),Qt.NoButton,Qt.NoModifier,Qt.NoScrollPhase,False)
+        for section in ('subtitle','video','audio'):
+            total=sum(t.layer_wheel_delta(tick,section) for _ in range(120))
+            self.assertEqual(total,round(max(8,min(28,t.section_track_heights.get(section,t.track_height)/2))))
     def setUp(self):
         self.app=QApplication.instance(); self.t=TimelineWidget(); self.t.resize(900,370); self.t.show(); self.t.linked_selection=False
         p=Project(); p.playhead=12

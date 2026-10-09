@@ -1454,11 +1454,20 @@ class TimelineWidget(BaseTimeline):
             action=speeds.addAction(f"{percent}%",lambda p=percent:self.set_speed(p/100)); action.setCheckable(True); action.setChecked(abs(item.speed-percent/100)<.00001)
         menu.addAction("Reset to 100%",lambda:self.set_speed(1.)); menu.popup(position); self._menu=menu
 
+    def layer_wheel_delta(self,event,section):
+        if event.pixelDelta().y():return event.pixelDelta().y()
+        step=max(8,min(28,self.section_track_heights.get(section,self.track_height)/2))
+        remainders=getattr(self,'_layer_wheel_remainders',{})
+        value=event.angleDelta().y()/120*step+remainders.get(section,0)
+        delta=round(value);remainders[section]=value-delta
+        self._layer_wheel_remainders=remainders
+        return delta
+
     def wheelEvent(self,event):
         if self.drag_mode=='pan' or event.buttons()&Qt.MiddleButton:event.accept(); return
         if self.drag_mode in {'trim_left','trim_right','roll','fade_in','fade_out','caption_left','caption_right','retime_left','retime_right'}:event.accept(); return
         if self.drag_mode in self.clip_scroll.MODES and self.clip_scroll.section:
-            name=self.clip_scroll.section; bar=getattr(self,name+'_scroll'); delta=event.angleDelta().y() or event.pixelDelta().y()
+            name=self.clip_scroll.section; bar=getattr(self,name+'_scroll'); delta=self.layer_wheel_delta(event,name)
             bar.setValue(bar.value()+(delta if name=='video' else -delta)); self.clip_scroll.remember(event); self.clip_scroll.refresh_drag(); event.accept(); return
         if self.drag_mode=='marquee':self.marquee_controller.wheel(event); return
         delta=event.angleDelta().y() or event.pixelDelta().y() or event.angleDelta().x()
@@ -1487,7 +1496,7 @@ class TimelineWidget(BaseTimeline):
         if bar and bar.maximum()>0:
             # Video has a bottom-origin offset: up reveals higher video lanes;
             # down returns towards V1. Subtitles also use a bottom origin.
-            delta=event.angleDelta().y() or event.pixelDelta().y()
+            delta=self.layer_wheel_delta(event,section)
             bar.setValue(bar.value()+(delta if section in {"video","subtitle"} else -delta)); event.accept()
         else:self.horizontalScrollBar().setValue(self.horizontalScrollBar().value()-event.angleDelta().x()); event.accept()
 

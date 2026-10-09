@@ -121,6 +121,7 @@ class PreviewCanvas(QWidget):
         self.set_theme(palette())
 
     def set_project(self, project: Project):
+        self.center_guide_active=False
         self.effect_cache.clear(); self.crop_cache.clear()
         self.still_cache.clear()
         self.project = project
@@ -300,6 +301,7 @@ class PreviewCanvas(QWidget):
         return anchor, corners, sides, rotation_handle, handle_distance
 
     def _draw_transform_box(self,painter,item,target):
+        self._draw_center_guide(painter)
         anchor,corners,sides,rotation_handle,rotation_radius=self._transform_geometry(item,target)
         painter.setPen(QPen(QColor("#dadde4"), 1))
         painter.setBrush(Qt.NoBrush); painter.drawPolygon(QPolygonF(corners))
@@ -704,12 +706,34 @@ class PreviewCanvas(QWidget):
             painter.setPen(QColor('#ffdd88')); painter.setFont(QFont('Segoe UI',9)); painter.drawText(frame_rect.adjusted(8,8,-8,-8),Qt.AlignBottom|Qt.AlignHCenter|Qt.TextWordWrap,message)
 
     def _draw_text_box(self,painter,rect):
+        self._draw_center_guide(painter)
         painter.save(); painter.setPen(QPen(QColor("#50df74"),2)); painter.setBrush(Qt.NoBrush); painter.drawRect(rect)
         for index,point in enumerate(self._handles(rect)):
             active=self.drag_mode in {'headline_scale','title_scale'} and self.drag_handle==index
             painter.setBrush(QColor("#3d8cff") if active else QColor("#f5f6fa")); painter.setPen(QPen(QColor("#3d8cff") if active else QColor("#50df74"),1)); painter.drawRect(QRectF(point.x()-4,point.y()-4,8,8))
         painter.restore()
+    def _begin_center_drag(self,rect,position_x):
+        frame=self.composition_rect()
+        self.drag_center_offset=(rect.center().x()-frame.left())/max(1.,frame.width())-position_x
+        self.center_guide_active=False
+
+    def _snap_drag_center(self,position_x):
+        frame=self.composition_rect()
+        target=.5-getattr(self,'drag_center_offset',0.)
+        threshold=8 if getattr(self,'center_guide_active',False) else 5
+        self.center_guide_active=abs(position_x-target)*frame.width()<=threshold
+        return target if self.center_guide_active else position_x
+
+    def _draw_center_guide(self,painter):
+        if (not self.drag_origin or self.drag_mode not in {'move','text_move','graphic_move'}
+                or not getattr(self,'center_guide_active',False) or self.read_only
+                or not self.transform_controls_visible):return
+        frame=self.composition_rect()
+        painter.save();painter.setRenderHint(QPainter.Antialiasing,False)
+        painter.setPen(QPen(QColor('#3d8cff'),1));painter.drawLine(QPointF(frame.center().x(),frame.top()),QPointF(frame.center().x(),frame.bottom()));painter.restore()
+
     def mousePressEvent(self, event):
+        self.center_guide_active=False
         if event.button()==Qt.MiddleButton:
             self.pan_origin=event.position(); self.setCursor(Qt.ClosedHandCursor); return
         if event.button() != Qt.LeftButton or not self.project or self.read_only:
@@ -743,6 +767,7 @@ class PreviewCanvas(QWidget):
                 item=self.project.item_by_id(item_id); self.selected_item_id=item_id; self.selected_caption_id=""; self.itemSelected.emit(item_id)
                 if item and self.transform_controls_visible:
                     self.drag_text=(kind,item_id,item.transform); self.drag_mode="graphic_move"; self.drag_origin=point.toPoint(); self.drag_position=(item.transform.x,item.transform.y)
+                    self._begin_center_drag(text_hit[2],item.transform.x)
                 self.update(); return
             else:
                 caption=next((c for c in self.project.captions if c.id==item_id),None); self.selected_caption_id=item_id; self.selected_item_id=""; self.captionSelected.emit(item_id); style=self.project.caption_style(caption) if caption else None
@@ -753,6 +778,7 @@ class PreviewCanvas(QWidget):
             if style:
                 if self.transform_controls_visible:
                     self.drag_text=(kind,item_id,style); self.drag_mode="text_move"; self.drag_origin=point.toPoint(); self.drag_position=(style.position_x,style.position_y)
+                    self._begin_center_drag(text_hit[2],style.position_x)
                 self.update(); return
         visible = self._visible_items()
         selected = next(((i, image, rect) for i, image, rect in visible if i.id == self.selected_item_id), None)
@@ -805,6 +831,7 @@ class PreviewCanvas(QWidget):
             return
         self.drag_item = item; self.drag_mode = "move"; self.drag_origin = point.toPoint()
         self.drag_position=(item.transform.x,item.transform.y)
+        self._begin_center_drag(QPolygonF(self._transform_geometry(item,hit[2])[1]).boundingRect(),item.transform.x)
 
     def mouseMoveEvent(self, event):
         if self.pan_origin is not None:
@@ -851,13 +878,13 @@ class PreviewCanvas(QWidget):
             style.size=min(200,max(8,self.drag_scale*distance/self.drag_distance))
             self.transformChanged.emit(item_id); self.update(); return
         if self.drag_mode=="text_move" and self.drag_text:
-            kind,item_id,style=self.drag_text; style.position_x=self.drag_position[0]+(point.x()-self.drag_origin.x())/frame_rect.width(); style.position_y=self.drag_position[1]+(point.y()-self.drag_origin.y())/frame_rect.height()
+            kind,item_id,style=self.drag_text; style.position_x=self._snap_drag_center(self.drag_position[0]+(point.x()-self.drag_origin.x())/frame_rect.width()); style.position_y=self.drag_position[1]+(point.y()-self.drag_origin.y())/frame_rect.height()
             (self.transformChanged if kind=="title" else self.captionTransformChanged).emit(item_id); self.update(); return
         if self.drag_mode=="graphic_move" and self.drag_text:
-            kind,item_id,transform=self.drag_text; transform.x=self.drag_position[0]+(point.x()-self.drag_origin.x())/frame_rect.width(); transform.y=self.drag_position[1]+(point.y()-self.drag_origin.y())/frame_rect.height()
+            kind,item_id,transform=self.drag_text; transform.x=self._snap_drag_center(self.drag_position[0]+(point.x()-self.drag_origin.x())/frame_rect.width()); transform.y=self.drag_position[1]+(point.y()-self.drag_origin.y())/frame_rect.height()
             self.transformChanged.emit(item_id); self.update(); return
         if self.drag_mode == "move":
-            item.transform.x=self.drag_position[0]+(point.x()-self.drag_origin.x())/frame_rect.width()
+            item.transform.x=self._snap_drag_center(self.drag_position[0]+(point.x()-self.drag_origin.x())/frame_rect.width())
             item.transform.y=self.drag_position[1]+(point.y()-self.drag_origin.y())/frame_rect.height()
         elif self.drag_mode=="anchor":
             factor=max(.0001,frame_rect.width()/self.project.settings.width)
@@ -886,6 +913,7 @@ class PreviewCanvas(QWidget):
         self.transformChanged.emit(item.id); self.update()
 
     def mouseReleaseEvent(self, _):
+        self.center_guide_active=False
         if self.pan_origin is not None:self.pan_origin=None; self.setCursor(Qt.ArrowCursor); return
         if self.drag_item:self.interactionFinished.emit(self.drag_item.id)
         if self.drag_text:self.interactionFinished.emit(self.drag_text[1])

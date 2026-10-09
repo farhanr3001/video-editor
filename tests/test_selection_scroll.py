@@ -42,7 +42,9 @@ class SelectionScrollTests(unittest.TestCase):
         start=QPoint(round(t.x_for_time(4)),round(rect.bottom()-3)); end=QPoint(round(t.x_for_time(.5)),round(rect.top()+3))
         QTest.mousePress(t.viewport(),Qt.LeftButton,pos=start); QTest.mouseMove(t.viewport(),end)
         self.assertIn('video_1',t.selected_ids); count=len(t.selected_ids)
-        self.wheel(t,end,120); self.assertGreater(t.video_scroll.value(),0); self.assertGreater(len(t.selected_ids),count); self.assertIn('video_1',t.selected_ids)
+        # Fine layer scrolling now needs several notches to cross another lane.
+        for _ in range(5):self.wheel(t,end,120)
+        self.assertGreater(t.video_scroll.value(),0); self.assertGreater(len(t.selected_ids),count); self.assertIn('video_1',t.selected_ids)
         t.video_scroll.setValue(t.video_scroll.maximum()); self.assertEqual(t.selected_ids,set(t.project.video_tracks)); self.assertFalse(set(t.project.audio_tracks)&t.selected_ids)
         QTest.mouseRelease(t.viewport(),Qt.LeftButton,pos=end); self.assertFalse(t.marquee_controller.timer.isActive()); self.assertEqual(t.project.timeline,original)
     def test_timeline_stationary_edge_scrolls_both_video_directions(self):
