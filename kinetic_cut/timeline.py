@@ -1031,8 +1031,9 @@ class TimelineWidget(BaseTimeline):
         p.drawText(QRectF(8,0,self.LABEL_WIDTH-16,self.RULER_HEIGHT),Qt.AlignCenter,self._timecode(self.project.playhead))
         x=self.x_for_time(self.project.playhead); self._painted_playhead_x=round(x)
         if x>=self.LABEL_WIDTH:
+            p.setPen(QPen(QColor(0,0,0,175),4)); p.drawLine(round(x),0,round(x),self.viewport().height())
             p.setPen(QPen(QColor('#ed3545'),2)); p.drawLine(round(x),0,round(x),self.viewport().height())
-            p.setRenderHint(QPainter.Antialiasing,True); p.setPen(Qt.NoPen); p.setBrush(QColor('#ed3545'))
+            p.setRenderHint(QPainter.Antialiasing,True); p.setPen(QPen(QColor(0,0,0,175),1)); p.setBrush(QColor('#ed3545'))
             p.drawPolygon(QPolygonF([QPointF(x-7,0),QPointF(x+7,0),QPointF(x+7,6),QPointF(x,13),QPointF(x-7,6)]))
 
     def mousePressEvent(self,event):

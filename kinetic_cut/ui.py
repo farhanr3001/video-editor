@@ -355,7 +355,7 @@ class MainWindow(QMainWindow):
         # only unused wrappers, never referenced media or any source file.
         used_media={i.media_id for i in project.timeline}
         project.media=[m for m in project.media if not m.timeline_preset or m.id in used_media]
-        project.ensure_track_model(); self.project=project; self.preview.set_project(project); self.timeline.set_project(project); self.project_label.setText(project.name); self.caption_panel.refresh(); self.refresh_media(); self.seek(project.playhead)
+        project.ensure_track_model(); self.project=project; self.preview.set_project(project); self.timeline.set_project(project); self.project_label.setText(Path(project.path).stem if project.path else project.name); self.caption_panel.refresh(); self.refresh_media(); self.seek(project.playhead)
         self.timeline.set_audio_levels({}); self.inspector.set_audio_levels({})
         self.timeline.waveforms={key:value for key,value in self.timeline.waveforms.items() if project.media_by_id(key)}
         self.timeline.waveform_pending.clear(); self.timeline.waveform_failures.clear()
@@ -439,7 +439,7 @@ class MainWindow(QMainWindow):
             position=self.project.playhead
             old_media=self.project.media if self.project else []
             self.project=copy.deepcopy(self._history[index]); self.project.playhead=position
-            self.project.ensure_track_model(); self.preview.set_project(self.project); self.timeline.set_project(self.project); self.project_label.setText(self.project.name); self.caption_panel.refresh()
+            self.project.ensure_track_model(); self.preview.set_project(self.project); self.timeline.set_project(self.project); self.project_label.setText(Path(self.project.path).stem if self.project.path else self.project.name); self.caption_panel.refresh()
             if self.project.media!=old_media:
                 self.refresh_media()
             self.seek(position); self.refresh_inspector()
@@ -964,7 +964,7 @@ class MainWindow(QMainWindow):
             save_settings(self.settings)
             try:remember(self,path,capture=True)
             except Exception:logging.exception("Could not cache project thumbnail")
-            self.project_label.setText(self.project.name); self.statusBar().showMessage(f"Saved {Path(path).name}",3000); return True
+            self.project_label.setText(Path(self.project.path).stem if self.project.path else self.project.name); self.statusBar().showMessage(f"Saved {Path(path).name}",3000); return True
         return False
 
     def restore_saved_version(self):
@@ -1103,7 +1103,7 @@ class MainWindow(QMainWindow):
                 self.queue_proxy(media)
 
     def refresh_media(self):
-        if hasattr(self,"media_panel"):self.media_panel.refresh(); return
+        if hasattr(self,"media_panel"):self.media_panel.refresh(preserve=True); return
         if not hasattr(self,"media_list"):return
         filter_text=self.media_filter.currentText(); self.media_list.clear()
         for media in self.project.media:
@@ -1207,10 +1207,8 @@ class MainWindow(QMainWindow):
 
     @edit_only
     def remove_media(self,media_id:str):
-        media=self.project.media_by_id(media_id)
-        if not media:return
-        if any(i.media_id==media_id for i in self.project.timeline):return QMessageBox.information(self,"Media in use","Remove its timeline clips before removing it from the Media Pool.")
-        self.project.media=[m for m in self.project.media if m.id!=media_id]; self.current_media_id="" if self.current_media_id==media_id else self.current_media_id; self.model_changed(); self.refresh_media()
+        from .pool_removal import remove
+        remove(self.media_panel,{media_id},'project')
 
     @edit_only
     def apply_vertical(self):

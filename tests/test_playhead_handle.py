@@ -17,7 +17,12 @@ class PlayheadHandleTests(unittest.TestCase):
                 c=image.pixelColor(x+dx,y); return c.red()>200 and c.green()<100 and c.blue()<120
             self.assertTrue(red(-5,2)); self.assertTrue(red(5,2))
             self.assertTrue(red(2,8)); self.assertFalse(red(5,10))
-            self.assertTrue(red(0,12)); self.assertTrue(red(0,70))
+            self.assertTrue(red(0,10)); self.assertTrue(red(0,70))
+            for dx in (-2,1):
+                self.assertLess(image.pixelColor(x+dx,70).red(),image.pixelColor(x+5,70).red())
+            tip=image.pixelColor(x,12)
+            self.assertLess(tip.red(),200)  # translucent black outline at the tip
+            self.assertLess(image.pixelColor(x-7,3).red(),image.pixelColor(x,3).red())
             out=Path('build/playhead-handle-check'); out.mkdir(parents=True,exist_ok=True)
             image.save(str(out/'timeline.png'))
             QTest.mousePress(t.viewport(),Qt.LeftButton,Qt.NoModifier,QPoint(x,5))

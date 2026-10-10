@@ -45,6 +45,16 @@ class TitleDeliveryTests(unittest.TestCase):
         self.assertEqual(len(set(self.w.settings['export_recent_locations'])),5); self.assertTrue(d.location.isEditable())
     def job(self,name,state='Queued'):
         return dict(project=copy.deepcopy(self.w.project),output=str(self.root/(name+'.mp4')),preset=next(iter(PRESETS.values())),hardware='CPU',burn=False,audio=False,state=state,elapsed=0.)
+    def test_delivery_has_no_phone_or_wireless_buttons_and_queue_still_updates(self):
+        from PySide6.QtWidgets import QPushButton
+        d=self.w.delivery
+        texts={button.text() for button in d.queue.findChildren(QPushButton)}
+        self.assertNotIn('Send Completed Video to Phone',texts)
+        self.assertNotIn('Wireless Download',texts)
+        for state in ('Queued','Rendering','Complete','Failed'):
+            d.jobs=[self.job('fixture',state)];d.refresh();d.list.setCurrentRow(0);d.update_controls()
+            self.assertEqual(d.remove.isEnabled(),state!='Rendering')
+        d.jobs=[];d.refresh();self.assertFalse(d.remove.isEnabled())
     def test_elapsed_starts_only_on_own_turn_and_freezes_on_completion(self):
         from kinetic_cut.render_queue import elapsed
         d=self.w.delivery; first=self.job('one'); second=self.job('two'); d.jobs=[first,second]

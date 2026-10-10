@@ -217,6 +217,17 @@ class BinMediaList(MediaList):
 
 
 class PowerFolderTree(QTreeWidget):
+    def drawBranches(self,painter,rect,index):
+        # Theme styles can omit the native disclosure glyph; retain Qt's
+        # existing branch hit area and expansion behavior with a small chevron.
+        if not self.model().hasChildren(index):return
+        x=rect.right()-self.indentation()/2; y=rect.center().y()
+        painter.save();painter.setPen(QPen(QColor(ui_color('text_sub')),1));painter.setRenderHint(QPainter.Antialiasing)
+        if self.isExpanded(index):
+            painter.drawLine(round(x-2),round(y-1),round(x),round(y+1));painter.drawLine(round(x),round(y+1),round(x+2),round(y-1))
+        else:
+            painter.drawLine(round(x-1),round(y-2),round(x+1),round(y));painter.drawLine(round(x+1),round(y),round(x-1),round(y+2))
+        painter.restore()
     def paintEvent(self,event):
         super().paintEvent(event)
         if getattr(self,'folder_hover_rect',None):
@@ -227,7 +238,7 @@ class PowerFolderTree(QTreeWidget):
         if event.type()==QEvent.ShortcutOverride and event.key()==Qt.Key_Delete:event.accept(); return True
         return super().event(event)
     def __init__(self,panel):
-        super().__init__(); self.panel=panel; self.setAcceptDrops(True); self.viewport().setAcceptDrops(True); self.setDropIndicatorShown(True)
+        super().__init__(); self.setStyleSheet("QTreeWidget#powerFolderTree { padding-left: 6px; }"); self.panel=panel; self.setAcceptDrops(True); self.viewport().setAcceptDrops(True); self.setDropIndicatorShown(True)
         self.setDragEnabled(True); self.setSelectionMode(QAbstractItemView.ExtendedSelection)
     def startDrag(self,actions):self.panel.drag_folders(self,[i.data(0,Qt.UserRole) for i in self.selectedItems()])
     def keyPressEvent(self,event):
@@ -287,7 +298,7 @@ class MediaPanel(QWidget):
         self.project_tree=ProjectFolderTree(self); self.project_tree.setObjectName("poolFolderTree"); self.project_tree.setHeaderHidden(True); self.project_tree.setMinimumHeight(65); self.project_tree.itemClicked.connect(self.choose_folder); navigation.addWidget(self.project_tree)
         self.project_tree.setContextMenuPolicy(Qt.CustomContextMenu); self.project_tree.customContextMenuRequested.connect(self.project_context)
         lower=QWidget(); lower.setMinimumHeight(105); lower_layout=QVBoxLayout(lower); lower_layout.setContentsMargins(0,0,0,0); lower_layout.setSpacing(0); lower_layout.addWidget(QLabel("Power Bins",objectName="powerBinsTitle"))
-        self.tree=PowerFolderTree(self); self.tree.setObjectName("powerFolderTree"); self.tree.setHeaderHidden(True); lower_layout.addWidget(self.tree); navigation.addWidget(lower); navigation.setSizes([210,160]); self.navigation_split=navigation
+        self.tree=PowerFolderTree(self); self.tree.setObjectName("powerFolderTree"); self.tree.setHeaderHidden(True); self.tree.setIndentation(8); lower_layout.addWidget(self.tree); navigation.addWidget(lower); navigation.setSizes([210,160]); self.navigation_split=navigation
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu); self.tree.customContextMenuRequested.connect(self.context); self.tree.itemClicked.connect(self.choose_folder)
         split.addWidget(navigation)
         self.grid=BinMediaList(self); self.grid.setViewMode(QListWidget.IconMode); self.grid.setResizeMode(QListWidget.Adjust); self.grid.setMovement(QListWidget.Static); self.grid.setWrapping(True); self.grid.setIconSize(QSize(110,65)); self.grid.setGridSize(QSize(130,100)); self.grid.setWordWrap(False); self.grid.setTextElideMode(Qt.ElideRight)
@@ -372,6 +383,7 @@ class MediaPanel(QWidget):
                 pieces.append(piece); path="/".join(pieces)
                 if path not in nodes:
                     item=QTreeWidgetItem([piece]); item.setData(0,Qt.UserRole,path)
+                    if path!='Master':item.setIcon(0,lucide_icon('folder'))
                     if parent:parent.addChild(item)
                     else:self.tree.addTopLevelItem(item)
                     nodes[path]=item
@@ -466,6 +478,7 @@ class MediaPanel(QWidget):
                 item.setSelected(m.id in selected)
         self.grid.blockSignals(False)
         if preserve:
+            self.grid.doItemsLayout()
             self.grid.verticalScrollBar().setValue(scroll); self.grid.horizontalScrollBar().setValue(horizontal)
     def media_icon(self,media):
         from .missing_media import is_missing,offline_icon
@@ -662,18 +675,8 @@ class MediaPanel(QWidget):
         if getattr(self.window,"current_page",0):return
         if self.is_watch():return
         ids={i.data(Qt.UserRole) for i in self.selected_media_items()}
-        if self.folder=="project":
-            in_use={i.media_id for i in self.window.project.timeline}&ids; removable=ids-in_use
-            from .missing_media import is_missing
-            hidden={m.id for m in self.window.project.media if m.id in in_use and is_missing(m)}
-            for m in self.window.project.media:
-                if m.id in hidden:m.pool_hidden=True
-            self.window.project.media=[m for m in self.window.project.media if m.id not in removable]; self.window.model_changed()
-            self.window.statusBar().showMessage(f"Removed {len(removable|hidden)} pool entries; timeline clips and source files are unchanged.",6500)
-        else:
-            self.power.data["media"]=[e for e in self.power.data["media"] if not(e["folder"]==self.folder and e["media"]["id"] in ids)]; self.power.save()
-            self.window.statusBar().showMessage(f"Removed {len(ids)} Power Bin entries. Source files and timeline clips are unchanged.",5000)
-        self.refresh()
+        from .pool_removal import remove
+        remove(self,ids,self.folder)
     def append_item(self,media_id):
         media_id=self.materialize(media_id); p=self.window.project; media=self.resolve_media(media_id)
         if not media:return
@@ -685,8 +688,8 @@ class MediaPanel(QWidget):
         if media:self.power.add(media,folder)
     def remove(self,id):
         if self.is_watch():return
-        if self.folder=="project":self.window.remove_media(id)
-        else:self.power.data["media"]=[e for e in self.power.data["media"] if not(e["folder"]==self.folder and e["media"]["id"]==id)]; self.power.save(); self.refresh()
+        from .pool_removal import remove
+        remove(self,{id},self.folder)
 
 
 class EffectsPanel(QWidget):
@@ -838,8 +841,6 @@ class DeliveryPage:
         self.render=QPushButton("Render All"); self.render.clicked.connect(self.render_all); qr.addWidget(self.render)
         self.cancel_render=QPushButton("Cancel Render"); self.cancel_render.clicked.connect(self.cancel_current); self.cancel_render.setEnabled(False); qr.addWidget(self.cancel_render)
         self.remove=QPushButton("Remove Selected Job"); self.remove.clicked.connect(self.remove_job); qr.addWidget(self.remove)
-        self.phone=QPushButton("Send Completed Video to Phone"); self.phone.clicked.connect(self.send_phone); qr.addWidget(self.phone)
-        self.wireless=QPushButton("Wireless Download"); self.wireless.clicked.connect(self.share); qr.addWidget(self.wireless)
         self.list.currentRowChanged.connect(self.update_controls); self.list.itemDoubleClicked.connect(self.job_details)
         self.list.setContextMenuPolicy(Qt.CustomContextMenu); self.list.customContextMenuRequested.connect(self.queue_context)
         self.clock=QTimer(window); self.clock.setInterval(250); self.clock.timeout.connect(self.tick_elapsed)
@@ -911,7 +912,6 @@ class DeliveryPage:
         if hasattr(self.window,'page_group'):self.window.page_group.button(0).setEnabled(not self.running)
         if hasattr(self.window,'page_group') and self.window.page_group.button(2):self.window.page_group.button(2).setEnabled(not self.running)
         index=self.list.currentRow(); selected=self.jobs[index] if 0<=index<len(self.jobs) else None
-        self.phone.setEnabled(bool(selected and selected["state"]=="Complete")); self.wireless.setEnabled(self.phone.isEnabled())
         self.remove.setEnabled(bool(selected and selected["state"]!="Rendering"))
         self.render.setEnabled(not self.running and any(j["state"]=="Queued" for j in self.jobs))
         self.render.setText("Render All")

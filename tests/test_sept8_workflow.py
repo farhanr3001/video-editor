@@ -4,7 +4,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
 from PySide6.QtCore import Qt,QPoint,QPointF,QEvent
 from PySide6.QtGui import QFontDatabase,QMouseEvent,QColor
-from PySide6.QtWidgets import QApplication,QListWidget,QListWidgetItem,QAbstractItemView,QDialogButtonBox
+from PySide6.QtWidgets import QApplication,QListWidget,QListWidgetItem,QAbstractItemView,QDialogButtonBox,QMessageBox
 from PySide6.QtTest import QTest
 from kinetic_cut.ui import MainWindow
 from kinetic_cut.model import Project,MediaItem,TimelineItem,Caption,Crop
@@ -91,12 +91,15 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual([(i.start,i.duration) for i in w.project.timeline],[(4,2),(6,3)]); w.undo(); self.assertFalse(w.project.timeline)
         grid.clearSelection(); folder=QListWidgetItem("folder"); folder.setData(Qt.UserRole+1,"folder"); grid.addItem(folder); folder.setSelected(True)
         with patch("kinetic_cut.workspace.QDrag") as drag:grid.startDrag(Qt.CopyAction); drag.assert_not_called()
-    def test_batch_remove_pool_preserves_used_media_and_powerbin_files(self):
+    def test_batch_remove_pool_cancel_and_confirm_used_powerbin_media(self):
         w=self.window(); w.project.media=[MediaItem("one","one.png","image","1"),MediaItem("two","two.png","image","2")]; w.project.timeline=[TimelineItem("v","one","video_1",0,5)]; w.refresh_media()
         for n in range(w.media_panel.grid.count()):w.media_panel.grid.item(n).setSelected(True)
-        w.media_panel.remove_selected(); self.assertEqual([m.id for m in w.project.media],["one"])
+        with patch("kinetic_cut.pool_removal.QMessageBox.warning",return_value=QMessageBox.Cancel):w.media_panel.remove_selected()
+        self.assertEqual([m.id for m in w.project.media],["one","two"])
         with tempfile.TemporaryDirectory() as directory:
-            panel=w.media_panel; panel.power=PowerBins(Path(directory)/"bins.json"); panel.power.add_folder("Master/Test"); panel.power.add(w.project.media[0],"Master/Test"); panel.folder="Master/Test"; panel.refresh(); panel.grid.item(0).setSelected(True); panel.remove_selected(); self.assertFalse(panel.power.data["media"]); self.assertEqual(len(w.project.timeline),1)
+            panel=w.media_panel; panel.power=PowerBins(Path(directory)/"bins.json"); panel.power.add_folder("Master/Test"); panel.power.add(w.project.media[0],"Master/Test"); panel.folder="Master/Test"; panel.refresh(); panel.grid.item(0).setSelected(True);
+            with patch("kinetic_cut.pool_removal.QMessageBox.warning",return_value=QMessageBox.Ok):panel.remove_selected()
+            self.assertFalse(panel.power.data["media"]); self.assertEqual(len(w.project.timeline),0); self.assertEqual(len(w.project.media),2)
     def test_attribute_dialog_defaults_off_and_master_selects_compatible_fields(self):
         dialog=attributes.PasteAttributesDialog("Source","Target","video"); self.assertFalse(dialog.selected()); self.assertFalse(dialog.buttons.button(QDialogButtonBox.Apply).isEnabled())
         dialog.master.click(); self.assertEqual(dialog.selected(),{key for _,key in attributes.VIDEO}); dialog.master.click(); self.assertFalse(dialog.selected()); dialog.close()

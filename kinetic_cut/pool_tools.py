@@ -65,6 +65,9 @@ def set_view(panel,enabled,persist=True):
     grid.setMovement(QListWidget.Static); grid.setDragEnabled(True); grid.setAcceptDrops(True); grid.viewport().setAcceptDrops(True)
     panel.column_header.setVisible(enabled)
     panel.view_button.setText('Gallery' if enabled else 'List'); panel.view_button.setToolTip('Switch to gallery view' if enabled else 'Switch to list view')
+    from .icons import lucide_icon
+    panel.view_button.setIcon(lucide_icon('layout-grid' if enabled else 'list'))
+    panel.view_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
     grid.doItemsLayout()
     if persist:
         from .config import save_settings
