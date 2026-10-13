@@ -19,6 +19,7 @@ class PreviewSeekGateTests(unittest.TestCase):
         self.w.deleteLater()
     def stamp(self,start,end):self.frame.startTime.return_value=start; self.frame.endTime.return_value=end
     def test_loading_source_zero_never_published_or_paused(self):
+        self.player.mediaStatus.return_value=QMediaPlayer.LoadingMedia
         self.t.position_decoder(self.key,31102); self.stamp(83000,100000)
         self.t.poll_frames(); self.frame.toImage.assert_not_called(); self.player.pause.assert_not_called()
         self.assertNotIn(self.key,self.w.preview.frames)

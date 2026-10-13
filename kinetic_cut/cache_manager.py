@@ -145,7 +145,7 @@ class CacheManagerDialog(QDialog):
             ready = installed(key)
             if ready and key not in self.component_rows:
                 row = QHBoxLayout(); check = QCheckBox(metadata.get(key,{}).get('name',
-                    {'android':'Android mirroring','iphone':'iPhone mirroring','vision':'Face / background tools','vocals':'Vocal separation'}[key]))
+                    {'vision':'Face / background tools','vocals':'Vocal separation'}[key]))
                 amount = QLabel(); row.addWidget(check,1); row.addWidget(amount); self.component_layout.addLayout(row)
                 self.component_rows[key] = (check,amount,row)
             if key in self.component_rows:
@@ -173,7 +173,7 @@ class CacheManagerDialog(QDialog):
         window = self.window_
         from .component_ui import active_downloads
         from PySide6.QtCore import QProcess
-        if window._workers or getattr(window.delivery, 'running', False) or getattr(window.phone_connect, 'active_job', None) or window.transport.playing or active_downloads or getattr(window,'_vision_busy',False) or getattr(window,'_vocal_busy',False) or (components and window.phone_connect.mirror.process.state() != QProcess.NotRunning):
+        if window._workers or getattr(window.delivery, 'running', False) or window.transport.playing or active_downloads or getattr(window,'_vision_busy',False) or getattr(window,'_vocal_busy',False):
             QMessageBox.information(self, 'Cache busy', 'Stop playback, transfers and rendering, and wait for background jobs to finish before clearing caches.')
             return
         summary = scan()

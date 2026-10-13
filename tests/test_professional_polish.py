@@ -200,7 +200,7 @@ class PolishTests(unittest.TestCase):
         self.assertEqual(job["error"],"Encoder was not available")
         self.assertIn("1 failed",d.status.text()); self.assertIn("Encoder",d.list.item(0).toolTip())
         self.assertFalse(d.render.isEnabled()); self.assertEqual(d.render.text(),"Render All")
-        self.assertFalse(d.phone.isEnabled())
+        self.assertFalse(hasattr(d,"phone"))  # Removed Delivery button; failed-render retry state remains covered.
         with patch.object(d,"next_job"):d.render_all()
         self.assertEqual(job["state"],"Failed"); self.assertIn("error",job)
         from kinetic_cut.render_queue import elapsed_text

@@ -126,16 +126,13 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(names.index('Check for updates…')+1,names.index('UI Themes…'))
         window.close(); window.deleteLater(); app.processEvents()
 
-    def test_missing_phone_is_blurred_and_removal_refreshes_effect_buttons(self):
+    def test_removal_refreshes_effect_buttons(self):
         from kinetic_cut.ui import MainWindow
         from kinetic_cut.cache_manager import CacheManagerDialog
         from kinetic_cut.component_ui import InstallComponentDialog, events
         app = QApplication.instance() or QApplication([])
         window = MainWindow(); self.addCleanup(window.close)
         with patch('kinetic_cut.feature_packs.available',return_value=False):
-            window.phone_connect.refresh_download_gate()
-            self.assertTrue(window.phone_connect.download_blur.isEnabled())
-            self.assertFalse(window.phone_connect.download_content.isEnabled())
             window.effects_panel.categories.setCurrentRow(0); window.effects_panel.refresh()
             self.assertTrue(any(b.text()=='Download' for b in window.effects_panel.list.findChildren(QPushButton)))
             from PySide6.QtCore import QSize
@@ -149,8 +146,6 @@ class DistributionTests(unittest.TestCase):
                     self.assertLessEqual(button.geometry().right(),row.width())
         with patch('kinetic_cut.feature_packs.available',return_value=True):
             events().changed.emit(); app.processEvents()
-            self.assertFalse(window.phone_connect.download_blur.isEnabled())
-            self.assertTrue(window.phone_connect.download_content.isEnabled())
             self.assertFalse(any(window.effects_panel.list.itemWidget(window.effects_panel.list.item(i))
                                  for i in range(window.effects_panel.list.count())))
         dialog = InstallComponentDialog(window,'vision')
@@ -184,15 +179,15 @@ class DistributionTests(unittest.TestCase):
         app = QApplication.instance() or QApplication([])
         window = MainWindow(); self.addCleanup(window.close)
         with tempfile.TemporaryDirectory() as temp:
-            root=Path(temp)/'phone-android-v1';root.mkdir();(root/'scrcpy.exe').write_bytes(b'tool');(root/'pack-ready.json').write_text('{}')
-            with patch('kinetic_cut.feature_packs.component_root',side_effect=lambda key:root if key=='android' else Path(temp)/key):
+            root=Path(temp)/'vocal-only-v1';root.mkdir();(root/'python.exe').write_bytes(b'tool');(root/'pack-ready.json').write_text('{}')
+            with patch('kinetic_cut.feature_packs.component_root',side_effect=lambda key:root if key=='vocals' else Path(temp)/key),patch('kinetic_cut.feature_packs.installed',side_effect=lambda key:key=='vocals' and root.exists()):
                 dialog=CacheManagerDialog(window)
-                self.assertIn('android',dialog.component_rows)
-                dialog.component_rows['android'][0].setChecked(True)
+                self.assertIn('vocals',dialog.component_rows)
+                dialog.component_rows['vocals'][0].setChecked(True)
                 from PySide6.QtWidgets import QMessageBox
                 with patch.object(QMessageBox,'question',return_value=QMessageBox.Yes),patch.object(QMessageBox,'information'):
                     dialog.clear_selected()
-                self.assertFalse(root.exists());self.assertFalse(dialog.component_rows['android'][0].isEnabled())
+                self.assertFalse(root.exists());self.assertFalse(dialog.component_rows['vocals'][0].isEnabled())
                 dialog.close()
         window.close();window.deleteLater();app.processEvents()
 

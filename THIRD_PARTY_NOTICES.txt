@@ -1,21 +1,5 @@
 # Third-party notices
 
-## Phone Connect
-
-USB backends use pymobiledevice3 11.15.5 (GPL-3.0, upstream
-https://github.com/doronz88/pymobiledevice3) and adbutils 2.12.0 (MIT,
-https://github.com/openatx/adbutils), together with their Python dependencies.
-Their distribution metadata/licenses are retained in the package. This is the
-owner's private build; public redistribution needs a dependency/license review.
-
-The official scrcpy 4.1 Windows x64 distribution is bundled unmodified under
-`assets/phone-tools/scrcpy-win64-v4.1`, including its Apache-2.0 LICENSE.txt, ADB,
-SDL3 and FFmpeg libraries. Upstream source/build/license information:
-https://github.com/Genymobile/scrcpy/releases/tag/v4.1
-and https://github.com/Genymobile/scrcpy/blob/master/doc/windows.md.
-Archive SHA256: 5b12172b3264b2889f4583ee64752ce832e29bc8b1089dca81093459697165db.
-No Apple software, drivers, private branding or mock phone screenshots are bundled.
-
 ## Caption fonts
 
 Geometos Regular was supplied by the user for this private build as

@@ -60,14 +60,14 @@ class InstallComponentDialog(QDialog):
     def __init__(self, parent, key):
         super().__init__(parent); self.key = key; self.cancel = threading.Event(); self.running = False; self._closed=False; self._job=None
         item = feature_packs.manifest().get(key, {})
-        name = item.get('name', {'android':'Android mirroring','iphone':'iPhone mirroring',
+        name = item.get('name', {
                                  'vision':'Face / background tools','vocals':'Vocal separation'}[key])
         self.setWindowTitle('Download ' + name); self.resize(510,260)
         layout = QVBoxLayout(self)
         self.status = QLabel(name + ' is an optional download.'); self.status.setWordWrap(True); layout.addWidget(self.status)
         if item:
             info = f"Download: {item['download_bytes']/1e6:.1f} MB\nInstalled size: {item['installed_bytes']/1e6:.1f} MB"
-        else:info = 'Installed size: approximately ' + ('350 MB' if key == 'vision' else '1.2 GB' if key == 'vocals' else '27 MB' if key == 'android' else '267 MB')
+        else:info = 'Installed size: approximately ' + ('350 MB' if key == 'vision' else '1.2 GB')
         details = QLabel(info + '\nYour projects, sources and Power Bin are preserved.'); details.setWordWrap(True); layout.addWidget(details)
         self.progress = QProgressBar(); self.progress.setRange(0,100); self.progress.setValue(0); self.progress.setFormat('%p%'); layout.addWidget(self.progress)
         row = QHBoxLayout(); layout.addLayout(row); row.addStretch()
@@ -237,8 +237,7 @@ class ComponentsDialog(QDialog):
         title = QLabel("Editing and caption generation are included. Add optional tools when you need them.")
         title.setWordWrap(True); layout.addWidget(title)
         metadata = feature_packs.manifest()
-        for key, name, estimate in (("android", "Android mirroring", 26240000), ("iphone", "iPhone mirroring", 266850000),
-                                    ("vision", "Face / background tools", 350000000), ("vocals", "Vocal separation", 1200000000)):
+        for key, name, estimate in (("vision", "Face / background tools", 350000000), ("vocals", "Vocal separation", 1200000000)):
             row = QHBoxLayout(); layout.addLayout(row)
             size = metadata.get(key, {}).get("installed_bytes", estimate)
             label = QLabel(f"{name} · +{size / 1e6:.1f} MB" + (" estimated" if key not in metadata else ""))

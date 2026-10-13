@@ -217,12 +217,12 @@ class ComponentLifetimeTests(unittest.TestCase):
             progress((50,'Late progress'))
             if cancel.is_set():raise InterruptedError('cancelled')
         with patch('kinetic_cut.feature_packs.manifest',return_value={}),patch('kinetic_cut.feature_packs.install',side_effect=install):
-            dialog=InstallComponentDialog(None,'android'); dialog.begin()
-            self.assertTrue(entered.wait(2)); self.assertIn('android',active_downloads)
+            dialog=InstallComponentDialog(None,'vocals'); dialog.begin()
+            self.assertTrue(entered.wait(2)); self.assertIn('vocals',active_downloads)
             dialog.close(); dialog.deleteLater(); del dialog
             app.sendPostedEvents(None,QEvent.DeferredDelete); gc.collect()
-            self.assertTrue(drain(lambda:'android' not in active_downloads))
-            self.assertNotIn('android',_jobs); self.assertTrue(tokens[0].is_set())
+            self.assertTrue(drain(lambda:'vocals' not in active_downloads))
+            self.assertNotIn('vocals',_jobs); self.assertTrue(tokens[0].is_set())
         self.assertTrue(QThreadPool.globalInstance().waitForDone(3000))
 
     def test_two_component_dialogs_cannot_install_same_root_concurrently(self):
@@ -230,11 +230,11 @@ class ComponentLifetimeTests(unittest.TestCase):
         entered=[]
         def install(key,progress,cancel):entered.append(key); cancel.wait(1); raise InterruptedError('cancelled')
         with patch('kinetic_cut.feature_packs.manifest',return_value={}),patch('kinetic_cut.feature_packs.install',side_effect=install):
-            first=InstallComponentDialog(None,'android'); second=InstallComponentDialog(None,'android')
+            first=InstallComponentDialog(None,'vocals'); second=InstallComponentDialog(None,'vocals')
             try:
                 first.begin(); self.assertTrue(drain(lambda:len(entered)==1)); second.begin()
                 self.assertFalse(second.running); self.assertIn('already downloading',second.status.text())
-                first.close(); self.assertTrue(drain(lambda:'android' not in active_downloads)); self.assertEqual(entered,['android'])
+                first.close(); self.assertTrue(drain(lambda:'vocals' not in active_downloads)); self.assertEqual(entered,['vocals'])
             finally:first.close(); second.close(); first.deleteLater(); second.deleteLater()
 
     def test_installer_close_keeps_gui_responsive_until_own_worker_settles(self):
@@ -258,7 +258,7 @@ class ComponentLifetimeTests(unittest.TestCase):
         timer=QTimer(); timer.setInterval(10); timer.timeout.connect(heartbeat); timer.start()
         previous=app.quitOnLastWindowClosed(); app.setQuitOnLastWindowClosed(True); started=time.monotonic()
         try:
-            with patch('kinetic_cut.feature_packs.install',side_effect=install):code=installer_downloads(['android'])
+            with patch('kinetic_cut.feature_packs.install',side_effect=install):code=installer_downloads(['vocals'])
             self.assertEqual(code,1); self.assertTrue(cancellations[0].is_set())
             self.assertLess(time.monotonic()-started,1)
             self.assertGreaterEqual(len(ticks)-closed_at[0],6); self.assertEqual(snapshots[0],snapshots[1])
@@ -275,7 +275,7 @@ class ComponentLifetimeTests(unittest.TestCase):
         worker=Worker(unrelated); QThreadPool.globalInstance().start(worker)
         self.assertTrue(entered.wait(2)); started=time.monotonic()
         try:
-            with patch('kinetic_cut.feature_packs.install',side_effect=lambda key,progress,cancel,source:progress((100,'Done'))):code=installer_downloads(['android'])
+            with patch('kinetic_cut.feature_packs.install',side_effect=lambda key,progress,cancel,source:progress((100,'Done'))):code=installer_downloads(['vocals'])
             self.assertEqual(code,0); self.assertLess(time.monotonic()-started,1)
             self.assertFalse(release.is_set()); self.assertFalse(_installer_jobs)
         finally:
@@ -284,7 +284,7 @@ class ComponentLifetimeTests(unittest.TestCase):
     def test_installer_failure_is_terminal_and_preserves_error_log(self):
         from kinetic_cut.component_ui import installer_downloads,_installer_jobs
         from kinetic_cut.config import DATA_DIR
-        with self.assertLogs('root',level='ERROR'),patch('kinetic_cut.feature_packs.install',side_effect=ValueError('broken optional pack')):code=installer_downloads(['android'])
+        with self.assertLogs('root',level='ERROR'),patch('kinetic_cut.feature_packs.install',side_effect=ValueError('broken optional pack')):code=installer_downloads(['vocals'])
         self.assertEqual(code,1); self.assertFalse(_installer_jobs)
         self.assertIn('broken optional pack',(DATA_DIR/'component-install.log').read_text(encoding='utf-8'))
 
@@ -302,7 +302,7 @@ class ComponentLifetimeTests(unittest.TestCase):
                 app.sendPostedEvents(None,QEvent.DeferredDelete); release.set()
         timer=QTimer(); timer.setInterval(10); timer.timeout.connect(destroy_popup); timer.start()
         try:
-            with patch('kinetic_cut.feature_packs.install',side_effect=install):code=installer_downloads(['android'])
+            with patch('kinetic_cut.feature_packs.install',side_effect=install):code=installer_downloads(['vocals'])
             self.assertEqual(code,1); self.assertEqual(closed,[True]); self.assertFalse(_installer_jobs)
         finally:release.set(); timer.stop(); timer.deleteLater()
 
@@ -393,7 +393,6 @@ class CacheRemovalFailureTests(unittest.TestCase):
         self.window=QWidget()
         self.window._workers=set(); self.window.delivery=types.SimpleNamespace(running=False)
         self.window.transport=types.SimpleNamespace(playing=False)
-        self.window.phone_connect=types.SimpleNamespace(active_job=None,mirror=types.SimpleNamespace(process=types.SimpleNamespace(state=lambda:QProcess.NotRunning)))
         self.window.timeline=types.SimpleNamespace(thumbnails={},_scaled_thumbnails={},_waveform_pixmaps={},viewport=lambda:types.SimpleNamespace(update=lambda:None))
         self.window.proxies={}; self.window.media_panel=types.SimpleNamespace(refresh=lambda:None)
     def tearDown(self):self.window.close(); self.window.deleteLater(); app.processEvents()
@@ -401,9 +400,9 @@ class CacheRemovalFailureTests(unittest.TestCase):
     def test_component_only_removal_does_not_validate_unselected_cache(self):
         from kinetic_cut.cache_manager import CacheManagerDialog
         with tempfile.TemporaryDirectory() as temp:
-            root=Path(temp)/'phone-android-v1'; root.mkdir(); (root/'tool.exe').write_bytes(b'tool')
-            with patch('kinetic_cut.feature_packs.manifest',return_value={}),patch('kinetic_cut.feature_packs.installed',side_effect=lambda key:key=='android' and root.exists()),patch('kinetic_cut.feature_packs.component_root',return_value=root),patch('kinetic_cut.cache_manager.clear',side_effect=PermissionError('unselected cache inaccessible')) as clear,patch.object(QMessageBox,'question',return_value=QMessageBox.Yes),patch.object(QMessageBox,'information'),patch.object(QMessageBox,'warning') as warning:
-                dialog=CacheManagerDialog(self.window); dialog.component_rows['android'][0].setChecked(True)
+            root=Path(temp)/'vocal-only-v1'; root.mkdir(); (root/'tool.exe').write_bytes(b'tool')
+            with patch('kinetic_cut.feature_packs.manifest',return_value={}),patch('kinetic_cut.feature_packs.installed',side_effect=lambda key:key=='vocals' and root.exists()),patch('kinetic_cut.feature_packs.component_root',return_value=root),patch('kinetic_cut.cache_manager.clear',side_effect=PermissionError('unselected cache inaccessible')) as clear,patch.object(QMessageBox,'question',return_value=QMessageBox.Yes),patch.object(QMessageBox,'information'),patch.object(QMessageBox,'warning') as warning:
+                dialog=CacheManagerDialog(self.window); dialog.component_rows['vocals'][0].setChecked(True)
                 dialog.clear_selected(); clear.assert_not_called(); warning.assert_not_called()
                 self.assertFalse(root.exists()); dialog.close(); dialog.deleteLater()
 

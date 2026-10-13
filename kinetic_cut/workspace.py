@@ -910,7 +910,6 @@ class DeliveryPage:
 
     def update_controls(self,*_):
         if hasattr(self.window,'page_group'):self.window.page_group.button(0).setEnabled(not self.running)
-        if hasattr(self.window,'page_group') and self.window.page_group.button(2):self.window.page_group.button(2).setEnabled(not self.running)
         index=self.list.currentRow(); selected=self.jobs[index] if 0<=index<len(self.jobs) else None
         self.remove.setEnabled(bool(selected and selected["state"]!="Rendering"))
         self.render.setEnabled(not self.running and any(j["state"]=="Queued" for j in self.jobs))
@@ -989,11 +988,6 @@ class DeliveryPage:
         if getattr(self,'render_cancel',None):self.render_cancel.set(); self.cancel_render.setEnabled(False); self.status.setText('Cancelling render…')
     def completed(self):
         index=self.list.currentRow(); return self.jobs[index] if 0<=index<len(self.jobs) and self.jobs[index]["state"]=="Complete" else None
-    def send_phone(self):
-        job=self.completed()
-        if not job:return
-        set_page(self.window,2)
-        self.window.phone_connect.stage_files([job['output']])
     def share(self):
         job=self.completed()
         if not job:return
@@ -1069,10 +1063,8 @@ def build_workspace(w):
     w.normalize=QCheckBox(); w.normalize.setChecked(False); w.noise=QCheckBox(); w.duck=QCheckBox(); w.duck.setChecked(True)
     for box in [w.normalize,w.noise,w.duck]:box.toggled.connect(w.audio_settings)
     w.delivery=DeliveryPage(w); w.left_stack.addWidget(w.delivery.settings); w.right_stack.addWidget(w.delivery.queue)
-    from .phone_connect import PhoneConnectPage
-    w.phone_connect=PhoneConnectPage(w); w.page_content.addWidget(w.phone_connect)
     footer=QWidget(); footer.setObjectName("pageFooter"); fr=QHBoxLayout(footer); fr.setContentsMargins(0,2,0,2); fr.addStretch(); w.page_group=QButtonGroup(w)
-    for label,icon,page in [("Edit","sliders-horizontal",0),("Deliver","download",1),("Phone","smartphone",2)]:
+    for label,icon,page in [("Edit","sliders-horizontal",0),("Deliver","download",1)]:
         b=QToolButton(); b.setText(label); b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon); b.setCheckable(True); b.setProperty("pageNav",True); b.setProperty("navIcon",icon); b.setFixedSize(100,47); w.page_group.addButton(b,page); fr.addWidget(b)
     update_nav_icons(w)
     w.page_group.button(0).setChecked(True); w.page_group.idClicked.connect(lambda page:set_page(w,page)); fr.addStretch(); root.addWidget(footer)
@@ -1090,7 +1082,7 @@ def update_panels(w):
 
 
 def set_page(w,page):
-    if page not in (0,1,2):return
+    if page not in (0,1):return
     if page!=1 and getattr(getattr(w,'delivery',None),'running',False):
         w.page_group.button(1).setChecked(True); w.statusBar().showMessage('Wait for rendering to finish or cancel it before returning to Edit.',4000); return
     if page and w.current_page==0:
@@ -1098,10 +1090,8 @@ def set_page(w,page):
     elif not page and w.current_page!=0:
         w.left_stack.setMinimumWidth(280); w.left_stack.setMaximumWidth(16777215); w.workspace_split.handle(1).setEnabled(True)
         w.workspace_split.setSizes([getattr(w,'_edit_left_width',300),max(1,w.workspace_split.width()-getattr(w,'_edit_left_width',300))])
-    if w.current_page==2 and page!=2:w.phone_connect.deactivate()
-    if page==2:w.transport.pause()
     w.current_page=page; w.left_stack.setCurrentIndex(min(page,1)); w.right_stack.setCurrentIndex(min(page,1)); w.page_group.button(page).setChecked(True)
-    w.page_content.setCurrentIndex(1 if page==2 else 0)
+    w.page_content.setCurrentIndex(0)
     if page!=0:w.caption_focus_button.setChecked(False)
     w.caption_focus_button.setEnabled(page==0)
     for b in [w.media_toggle,w.effects_toggle,w.inspector_toggle,*w.edit_actions]:b.setVisible(page==0)
@@ -1112,11 +1102,10 @@ def set_page(w,page):
     w.update_keyframe_button()
     for action in getattr(w,"editing_actions",[]):action.setEnabled(page==0)
     for name,action in w.shortcut_actions.items():
-        if name in {"export","play_pause","shuttle_back","shuttle_stop","shuttle_forward"}:action.setEnabled(page!=2)
+        if name in {"export","play_pause","shuttle_back","shuttle_stop","shuttle_forward"}:action.setEnabled(True)
         elif name!="save":action.setEnabled(page==0)
     w.review_badge.setVisible(page!=0)
-    w.statusBar().showMessage("Phone · Local USB transfers" if page==2 else "Deliver · Timeline locked. Scrub the playhead or use Space to preview." if page else "Edit · Timeline editing enabled",5000)
-    if page==2:w.phone_connect.activate()
+    w.statusBar().showMessage("Deliver · Timeline locked. Scrub the playhead or use Space to preview." if page else "Edit · Timeline editing enabled",5000)
     if page==1:
         w.delivery.sync_project_settings()
         if not w.delivery.name.isModified():w.delivery.name.setText(w.project.name)
@@ -1134,7 +1123,6 @@ def update_nav_icons(w, palette: dict = None):
     color_map = {
         0: palette.get("nav_edit_color", "#e0796b"),
         1: palette.get("nav_deliver_color", "#68a8df"),
-        2: palette.get("nav_phone_color", "#8bbce3"),
     }
     inactive_color = palette.get("nav_inactive_color", palette.get("icon_color", "#8b919e"))
 

@@ -21,7 +21,6 @@ app = QApplication([])
 app.setStyle('Fusion')
 window = MainWindow()
 window.autosave_timer.stop()
-window.phone_connect.loaded = True  # No real device discovery, pairing or transfer.
 window.resize(1500, 900)
 window.show()
 steps = []

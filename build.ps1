@@ -16,7 +16,7 @@ try {
   & $python scripts/build_app.py --noconfirm --clean --windowed --name KineticCut --icon assets/kinetic-cut.ico --distpath $distPath `
     --runtime-hook scripts/runtime_hidden.py --version-file assets/windows-version.txt `
     --hidden-import PySide6.QtMultimedia --hidden-import PySide6.QtMultimediaWidgets `
-    --hidden-import pymobiledevice3.osu.win_util --copy-metadata pymobiledevice3 --copy-metadata adbutils `
+    --hidden-import kinetic_cut.phone_removal_diagnostics `
     --collect-data faster_whisper --collect-all edge_tts --collect-submodules fontTools.ttLib.tables --collect-submodules yt_dlp `
     --copy-metadata fonttools --copy-metadata uharfbuzz --add-data "$assetPath;assets" `
     --add-data "THIRD_PARTY_NOTICES.txt;." main.py

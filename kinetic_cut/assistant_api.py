@@ -350,7 +350,7 @@ class EditorAPI:
         result=dict(name=w.project.name,revision=revision(w.project),playhead=w.project.playhead,duration=w.project.duration,
             selected_ids=sorted(w.timeline.selected_ids),caption_ids=sorted(w.timeline.selected_caption_ids),
             selected_transition_id=getattr(w.timeline,'selected_transition_id',''),
-            background_tasks=len(w._workers),page={0:'Edit',1:'Deliver',2:'Phone Connect'}.get(w.current_page,'Edit'),jobs=self.call_get_jobs())
+            background_tasks=len(w._workers),page={0:'Edit',1:'Deliver'}.get(w.current_page,'Edit'),jobs=self.call_get_jobs())
         if section!='summary':result['project']=w.project.to_dict()
         return result
     def call_get_capabilities(self):

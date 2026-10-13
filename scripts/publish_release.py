@@ -14,7 +14,9 @@ def credentials():
     return values['password']
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--publish',action='store_true');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--publish',action='store_true')
+    parser.add_argument('--installer-update', action='store_true', help='Use the full installer update channel when native installer ownership/code must change.')
+    args=parser.parse_args()
     token=credentials()
     def request(url,data=None,method=None,content_type='application/json'):
         headers={'Authorization':'Bearer '+token,'User-Agent':'KineticCut-ReleasePublisher',
@@ -30,12 +32,27 @@ def main():
     files=[ROOT/f'release/KineticCut-Setup-{VERSION}.exe',ROOT/f'release/KineticCut-FullSetup-{VERSION}.exe',
            ROOT/f'release/KineticCut-Update-{VERSION}.json',ROOT/'release/KineticCut-Baseline-1.1.0.json',
            *(ROOT/'release/update-payloads').glob('KineticCut-Part-*.zip'),ROOT/'release/build-report.json']
+    if args.installer_update:
+        # Existing updaters prefer an exact-name manifest. Omit it for this
+        # checkpoint so they run Setup, replacing the native uninstaller too.
+        import shutil
+        shutil.copy2(ROOT/f'release/KineticCut-FullSetup-{VERSION}.exe',ROOT/f'release/KineticCut-Setup-{VERSION}.exe')
+        files=[p for p in files if p.name!=f'KineticCut-Update-{VERSION}.json']
+        inventory=ROOT/f'release/KineticCut-Inventory-{VERSION}.json'
+        shutil.copy2(ROOT/f'release/KineticCut-Update-{VERSION}.json',inventory)
+        files.extend([inventory,ROOT/'release/components.json'])
+        report_path=ROOT/'release/build-report.json'
+        report=json.loads(report_path.read_text(encoding='utf-8'))
+        report.update(update_channel='full-installer',migration_bytes=(ROOT/f'release/KineticCut-Setup-{VERSION}.exe').stat().st_size)
+        report_path.write_text(json.dumps(report,indent=2),encoding='utf-8')
     assets=[];page=1
     while True:
         batch=request(release['assets_url']+f'?per_page=100&page={page}');assets.extend(batch)
         if len(batch)<100:break
         page+=1
     existing={asset['name']:asset for asset in assets}
+    if args.installer_update and f'KineticCut-Update-{VERSION}.json' in existing:
+        raise RuntimeError('An incremental-channel manifest already exists; do not publish an installer-only checkpoint over it.')
     def upload_file(file):
         with file.open('rb') as stream:
             hasher=hashlib.sha256()

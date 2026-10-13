@@ -35,6 +35,23 @@ class BatchEditSafetyTests(unittest.TestCase):
         w=self.window(); w.set_project(self.project()); w.timeline.selected_ids={"v","a","t"}; w.timeline.selected_id="stale"
         w.delete_selected(); self.assertEqual([i.id for i in w.project.timeline],["locked"])
         before=w._history_index; w.delete_selected(); self.assertEqual(w._history_index,before)
+    def test_separated_ripple_selection_one_undo_redo_across_clips_and_subtitles(self):
+        w=self.window(); p=Project()
+        p.timeline=[TimelineItem(f"{lane}-{n}","",lane,n*2,2,group_id=str(n))
+                    for lane in ("video_1","audio_1") for n in range(6)]
+        p.captions=[Caption(str(n),n*2,n*2+2,str(n)) for n in range(6)]
+        w.set_project(p); original=w.project.to_dict(); before=w._history_index
+        w.timeline.select_ids({"video_1-1","video_1-3"},"video_1-1")
+        w.timeline.selected_caption_ids={"1","3"}; w.timeline.selected_caption="1"
+        w.delete_selected(True)
+        for lane in ("video_1","audio_1"):
+            self.assertEqual([(i.id,i.start) for i in w.project.timeline if i.track==lane],
+                             [(f"{lane}-{n}",index*2) for index,n in enumerate((0,2,4,5))])
+        self.assertEqual([(c.id,c.start,c.end) for c in w.project.captions],
+                         [(str(n),index*2,index*2+2) for index,n in enumerate((0,2,4,5))])
+        self.assertEqual(w._history_index,before+1); result=w.project.to_dict()
+        w.undo(); self.assertEqual(w.project.to_dict(),original)
+        w.redo(); self.assertEqual(w.project.to_dict(),result)
     def test_model_batch_delete_does_not_delete_or_ripple_locked_lanes(self):
         p=self.project(); p.track_states["subtitle_1"]={"locked":True}
         p.delete((i.id for i in p.timeline),True,{"c"})

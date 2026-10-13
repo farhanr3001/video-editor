@@ -97,3 +97,21 @@ class LayeredPlaybackTests(unittest.TestCase):
             timeline.ensure_playhead_visible(40)
             self.assertEqual(ranges.call_count,1)
         timeline.close(); timeline.deleteLater()
+
+    def test_full_preview_visible_blur_pixels_match_full_filter_after_moves(self):
+        from test_blur_filter import reference
+        self.p.settings.width=1080;self.p.settings.height=1920
+        painter=QPainter(self.image);painter.fillRect(600,300,800,600,QColor('#ffbc25'));painter.end()
+        self.item.effects=[dict(name='Gaussian Blur',horizontal=30.,vertical=30.,border='Reflect',blend=65.)]
+        def legacy(image,rx,ry,blend=1.,border='Replicate',**kwargs):return reference(image,rx,ry,blend,border)
+        def draw(target):
+            output=QImage(270,480,QImage.Format_RGBA8888);output.fill(Qt.black)
+            painter=QPainter(output);self.canvas._draw_layer_item(painter,self.item,self.image,target,self.frame);painter.end();return output
+        for target,rotation,flip in ((QRectF(-1200,-600,3200,1800),0,False),(QRectF(-700,-300,3200,1800),0,False),(QRectF(-700,-300,3200,1800),12,False),(QRectF(-700,-300,3200,1800),0,True)):
+            self.item.transform.rotation=rotation;self.item.transform.flip_horizontal=flip
+            actual=draw(target);self.canvas.effect_cache.clear()
+            with patch('kinetic_cut.visuals.blur_image',side_effect=legacy):expected=draw(target)
+            self.assertEqual(actual,expected)
+            self.canvas.effect_cache.clear()
+        self.owner.transport.playing=False
+        self.assertEqual(self.prepare().size(),self.image.size())

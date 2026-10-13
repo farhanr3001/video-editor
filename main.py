@@ -6,6 +6,9 @@ from kinetic_cut.process import install_desktop_process_policy
 
 
 if __name__ == "__main__":
+    if len(sys.argv)==3 and sys.argv[1]=='--phone-removal-selftest':
+        from kinetic_cut.phone_removal_diagnostics import run
+        sys.exit(run(sys.argv[2]))
     if len(sys.argv)>1 and sys.argv[1]=='--media-download-helper':
         # Run yt-dlp inside the packaged interpreter, without creating Qt UI or
         # requiring the development PC's Python installation on other devices.
@@ -64,9 +67,6 @@ if __name__ == "__main__":
     if len(sys.argv) in (3,4) and sys.argv[1]=='--editing-selftest':
         from kinetic_cut.editing_diagnostics import run
         sys.exit(run(sys.argv[2],sys.argv[3] if len(sys.argv)==4 else None))
-    if len(sys.argv) == 2 and sys.argv[1] == '--phone-worker':
-        from kinetic_cut.phone_worker import run
-        sys.exit(run())
     elif len(sys.argv) == 3 and sys.argv[1] == '--missing-selftest':
         from kinetic_cut.missing_diagnostics import run
         sys.exit(run(sys.argv[2]))
@@ -78,9 +78,6 @@ if __name__ == "__main__":
         sys.exit(run(sys.argv[2], sys.argv[3]))
     elif len(sys.argv) == 3 and sys.argv[1] == '--theme-selftest':
         from kinetic_cut.theme_diagnostics import run
-        sys.exit(run(sys.argv[2]))
-    elif len(sys.argv) == 3 and sys.argv[1] == '--phone-selftest':
-        from kinetic_cut.phone_diagnostics import run
         sys.exit(run(sys.argv[2]))
     elif len(sys.argv) == 4 and sys.argv[1] == "--caption-selftest":
         from kinetic_cut.captions import transcribe
@@ -130,12 +127,6 @@ if __name__ == "__main__":
             sys.exit(run_bridge())
         except Exception:
             sys.exit(0)
-    elif len(sys.argv) >= 2 and sys.argv[1] == '--phone-worker':
-        from kinetic_cut.phone_worker import run
-        sys.exit(run())
-    elif len(sys.argv) == 3 and sys.argv[1] == '--phone-selftest':
-        from kinetic_cut.phone_diagnostics import run
-        sys.exit(run(sys.argv[2]))
     else:
         from kinetic_cut.startup import run
         sys.exit(run())

@@ -28,10 +28,6 @@ def run(folder):
     painter.fillRect(230, 95, 280, 170, QColor('#448868')); painter.end()
     source = out/'fixture.png'; image.save(str(source))
     w = MainWindow(); w.resize(1500, 900); w.show(); w.autosave_timer.stop()
-    page = w.phone_connect; page.loaded = True
-    # UI fixtures only: even selecting a simulated phone cannot launch a worker.
-    page.connect_device = lambda: None
-    page.request = lambda *a, **k: None
     p = Project(media=[MediaItem('fixture', str(source), 'image', 'Theme QA image', 8, 640, 360)],
                 timeline=[TimelineItem('clip', 'fixture', 'video_1', 0, 8)],
                 captions=[Caption('caption', 0, 6, 'Caption colours stay unchanged')])
@@ -79,22 +75,6 @@ def run(folder):
             dialog(TTSDialogueDialog(w,'A caption and dialogue preview.'),theme+'-dialogue')
             dialog(MediaDownloaderDialog(w),theme+'-downloader')
             set_page(w,1); shot(w,theme+'-deliver')
-            set_page(w,2)
-            page.platform='iphone'; page.platform_buttons['iphone'].setChecked(True); page.apply_platform_text()
-            page.devices.clear(); page.device_changed()
-            shot(w,theme+'-iphone-disconnected')
-            page.platform='android'; page.platform_buttons['android'].setChecked(True); page.apply_platform_text()
-            page.devices.addItem('QA phone (simulated)',dict(name='QA phone (simulated)',model='UI fixture',state='unauthorized'))
-            page.device_changed(); shot(w,theme+'-android-authorize')
-            page.devices.setItemData(0,dict(name='QA phone (simulated)',model='UI fixture',state='ready'))
-            page.device_changed()
-            QTreeWidgetItem(page.files,['Videos','Folder',''])
-            QTreeWidgetItem(page.files,['Finished edit.mp4','26.4 MB','Today'])
-            shot(w,theme+'-android-files')
-            page.tabs.setCurrentIndex(1); shot(w,theme+'-phone-queue'); page.tabs.setCurrentIndex(0)
-            page.mirror.pop_out(); wait()
-            shot(page.mirror.popout_window,theme+'-mirror-popout')
-            page.mirror.dock_back()
             dialog(UIThemesDialog(w),theme+'-chooser')
         w.apply_theme('default',save=False); set_page(w,0); w.select_item('clip')
         shot(w,'default-roundtrip')

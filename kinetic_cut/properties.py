@@ -11,7 +11,7 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from .media_source import set_media_source
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QGridLayout,QLabel,QSlider,
     QToolButton,QTabWidget,QStackedWidget,QScrollArea,QCheckBox,QPlainTextEdit,
-    QTableWidget,QTableWidgetItem,QTableWidgetSelectionRange,QColorDialog,QPushButton,QProgressBar,QLayout,QMenu,QLineEdit)
+    QTableWidget,QTableWidgetItem,QTableWidgetSelectionRange,QColorDialog,QPushButton,QProgressBar,QLayout,QMenu,QLineEdit,QMessageBox)
 from .controls import SafeDoubleSpinBox, SafeComboBox, SafeSlider, InspectorSection
 from .icons import lucide_icon
 from .model import Caption, CaptionStyle, Crop, TimelineItem, Transform, uid
@@ -189,7 +189,11 @@ class PropertiesPanel(QWidget):
 
     def edit_background_blur(self,enabled=None,strength=None):
         if self.updating:return
-        for item in self.targets(False):
+        from .blur_policy import external_blur
+        targets=self.targets(False)
+        if enabled is not False and any(external_blur(item) for item in targets):
+            QMessageBox.information(self.window,"Blur already added","Remove the Gaussian Blur effect before enabling inspector blur.");return
+        for item in targets:
             effect=next((e for e in item.effects if e.get("inspector_background_blur")),None)
             if effect is None:
                 if enabled is False:continue
@@ -494,7 +498,12 @@ class PropertiesPanel(QWidget):
         self.filename.setText(p.media_by_id(item.media_id).name if item and p.media_by_id(item.media_id) else "No clip selected")
         if item:
             bg=next((e for e in item.effects if e.get("inspector_background_blur")),{})
-            self.background_blur_enabled.setChecked(bg.get("enabled",False)); self.background_blur_strength.setEnabled(bg.get("enabled",False))
+            from .blur_policy import external_blur
+            blocked=any(external_blur(target) for target in self.targets(False))
+            self.background_blur_enabled.setChecked(bg.get("enabled",False))
+            self.background_blur_enabled.setEnabled(not blocked or bool(bg.get("enabled",False)))
+            self.background_blur_enabled.setToolTip("Remove the Gaussian Blur effect to enable inspector blur." if blocked else "Enable background blur for this clip.")
+            self.background_blur_strength.setEnabled(bg.get("enabled",False) and not blocked)
             self.background_blur_strength.set_values([bg.get("horizontal",12.)])
             for attr,row in self.bindings+self.audio_bindings:row.set_values([self.property_value(i,attr) for i in self.targets(attr in {"gain_db","pan","pitch_semitones","pitch_cents"})])
             for attr,row in self.color_bindings:row.set_values([getattr(i,attr) for i in self.targets(False)])
@@ -712,6 +721,9 @@ class PropertiesPanel(QWidget):
         if self.updating:return
         self.window.flush_text_edit(); primary=self.effect()
         if not primary:return
+        from .blur_policy import conflicts
+        if key=='enabled' and value and any(conflicts(item,effect) for item,effect in self.effect_targets()):
+            QMessageBox.information(self.window,"Blur already enabled","Use either inspector blur or a Gaussian Blur effect, not both.");self.select(self.item_id);return
         for item,effect in self.effect_targets():
             if key=='enabled' and effect.get('before'):
                 from .effects import toggle_preset
@@ -738,6 +750,9 @@ class PropertiesPanel(QWidget):
             if occurrence<len(matches):result.append((target,matches[occurrence]))
         return result
     def reset_effect_section(self):
+        from .blur_policy import conflicts
+        if any(conflicts(item,effect) for item,effect in self.effect_targets()):
+            QMessageBox.information(self.window,"Blur already enabled","Use either inspector blur or a Gaussian Blur effect, not both.");return
         for _,effect in self.effect_targets():
             if effect.get("name")=="Gaussian Blur":effect.update(enabled=True,horizontal=12.,vertical=12.,linked=True,border="Reflect",blend=100.)
         self.changed.emit()

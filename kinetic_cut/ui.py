@@ -31,7 +31,6 @@ from .captions import CaptionBackendError, merge_captions, split_caption, transc
 from .controls import InspectorSection, SafeComboBox, SafeDoubleSpinBox
 from .config import (AUTOSAVE_PATH, CACHE_DIR, SESSION_LOCK_PATH, load_settings, load_templates, save_settings,
                      save_templates)
-from .delivery import WirelessShare, detect_adb_devices, detect_mtp_devices, send_adb, send_mtp
 from .exporter import PRESETS, estimate, export
 from .media import IMAGE_EXTENSIONS, AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, generate_proxy, probe, waveform
 from .model import Caption, CaptionStyle, Crop, Project, TimelineItem, Transform, make_vertical_group, uid
@@ -179,7 +178,7 @@ class ExportDialog(QDialog):
         self.path=QLineEdit(str(Path.home()/"Videos"/(project.name.replace(" ","-")+".mp4"))); browse=button("Browse",self.browse); pathrow=QHBoxLayout(); pathrow.addWidget(self.path,1); pathrow.addWidget(browse)
         self.estimate=QLabel(); form.addRow("Social preset",self.preset); form.addRow("Frame",self.resolution); form.addRow("Encoder",self.hardware); form.addRow("",self.burn); form.addRow("Save to",pathrow); form.addRow("Estimate",self.estimate); layout.addLayout(form)
         self.progress=QProgressBar(); self.progress.setRange(0,1000); self.status=QLabel("Ready"); layout.addWidget(self.progress); layout.addWidget(self.status)
-        actions=QHBoxLayout(); self.render=button("Export video",self.begin,accent=True); self.phone=button("Send to phone",self.send_phone); self.phone.setEnabled(False); self.wireless=button("Wireless link",self.wireless_share); self.wireless.setEnabled(False); actions.addWidget(self.render); actions.addWidget(self.phone); actions.addWidget(self.wireless); layout.addLayout(actions)
+        actions=QHBoxLayout(); self.render=button("Export video",self.begin,accent=True); actions.addWidget(self.render); layout.addLayout(actions)
         self.preset.currentTextChanged.connect(self.refresh_estimate); self.resolution.currentTextChanged.connect(self.refresh_estimate); self.refresh_estimate()
 
     def browse(self):
@@ -203,32 +202,11 @@ class ExportDialog(QDialog):
         worker.signals.result.connect(self.done); worker.signals.error.connect(self.failed); QThreadPool.globalInstance().start(worker)
 
     def done(self,path):
-        self.output=path; self.progress.setValue(1000); self.status.setText("Finished · ready for your phone"); self.phone.setEnabled(True); self.wireless.setEnabled(True); self.render.setEnabled(True)
+        self.output=path; self.progress.setValue(1000); self.status.setText("Finished"); self.render.setEnabled(True)
 
     def failed(self,detail):
         self.render.setEnabled(True); self.status.setText("Export failed"); QMessageBox.critical(self,"Export failed",detail[-2600:])
 
-    def send_phone(self):
-        adb=detect_adb_devices(); mtp=detect_mtp_devices();
-        try:
-            if adb: destination=send_adb(self.output,self.settings.get("phone_folder","/sdcard/Movies/KineticCut"),adb[0])
-            elif mtp: destination=send_mtp(self.output,mtp[0])
-            else: raise RuntimeError("No Android phone was detected. Unlock the phone, choose File Transfer for USB, or install ADB and enable USB debugging.")
-            QMessageBox.information(self,"Sent to phone",f"Copied to {destination}")
-        except Exception as error:QMessageBox.warning(self,"Phone delivery",str(error))
-
-    def wireless_share(self):
-        if self.share:self.share.stop()
-        self.share=WirelessShare(self.output); url=self.share.start(); dialog=QDialog(self); dialog.setWindowTitle("Wireless delivery"); box=QVBoxLayout(dialog); box.addWidget(QLabel("Scan on your phone while both devices are on the same Wi-Fi."))
-        try:
-            import qrcode
-            image=qrcode.make(url); from io import BytesIO; data=BytesIO(); image.save(data,format="PNG"); pix=QPixmap(); pix.loadFromData(data.getvalue()); label=QLabel(); label.setPixmap(pix.scaled(260,260,Qt.KeepAspectRatio,Qt.SmoothTransformation)); label.setAlignment(Qt.AlignCenter); box.addWidget(label)
-        except ImportError:pass
-        link=QLabel(f"<a style='color:#dfff45' href='{url}'>{url}</a>"); link.setOpenExternalLinks(True); link.setAlignment(Qt.AlignCenter); box.addWidget(link); close=QDialogButtonBox(QDialogButtonBox.Close); close.rejected.connect(dialog.reject); box.addWidget(close); dialog.exec()
-
-    def closeEvent(self,event):
-        if self.share:self.share.stop()
-        super().closeEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -1252,7 +1230,8 @@ class MainWindow(QMainWindow):
         self.project.playhead=max(0,value); self.time_label.setText(timecode(value,self.project.settings.fps)); self.timeline.viewport().update(); self.preview.update()
 
     def finish_scrub(self):
-        if hasattr(self,"transport"):self.transport.finish_scrub()
+        if hasattr(self,"transport"):
+            self.transport.finish_scrub(); return
         main=self.active_main()
         if main:
             media=self.project.media_by_id(main.media_id)
@@ -1846,6 +1825,9 @@ class MainWindow(QMainWindow):
         targets=[it for it in selected_candidates if it and compatible(name,it,self.project)]
         if not targets:
             self.statusBar().showMessage("Select an unlocked, compatible video or audio clip to apply "+name,4000); return
+        from .blur_policy import inspector_enabled
+        if name=='Gaussian Blur' and any(inspector_enabled(item) for item in targets):
+            QMessageBox.information(self,"Blur already enabled","Disable blur in the Video inspector before adding Gaussian Blur.");return
         for item in targets:
             from .visual_fx import VISUAL_FX_SET, default_visual_fx
             from .voice_effects import NAMES as VOICE_NAMES, default_effect as default_voice_effect
@@ -2172,7 +2154,7 @@ class MainWindow(QMainWindow):
         self.preview.effect_cache.clear(); self.delivery.sync_project_settings()
 
     def open_settings(self):
-        dialog=QDialog(self); dialog.setWindowTitle("Kinetic Cut settings"); dialog.resize(610,740); form=QFormLayout(dialog); ffmpeg=QLineEdit(self.settings.get("ffmpeg","ffmpeg")); ffprobe=QLineEdit(self.settings.get("ffprobe","ffprobe")); whisper_size=QComboBox(); whisper_size.addItems(["tiny.en","base.en","small.en"]); whisper_size.setCurrentText(self.settings.get("whisper_model","base.en")); whisper=QLineEdit(self.settings.get("whisper_cli","")); model=QLineEdit(self.settings.get("whisper_model_path","")); sfx=QLineEdit(self.settings.get("sfx_folder","")); phone=QLineEdit(self.settings.get("phone_folder","/sdcard/Movies/KineticCut")); buttons=QDialogButtonBox(QDialogButtonBox.Cancel|QDialogButtonBox.Save); buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow("FFmpeg command",ffmpeg); form.addRow("ffprobe command",ffprobe); form.addRow("Whisper model",whisper_size); form.addRow("whisper-cli override",whisper); form.addRow("whisper.cpp model",model); form.addRow("Auto-index SFX folder",sfx); form.addRow("Android folder",phone)
+        dialog=QDialog(self); dialog.setWindowTitle("Kinetic Cut settings"); dialog.resize(610,740); form=QFormLayout(dialog); ffmpeg=QLineEdit(self.settings.get("ffmpeg","ffmpeg")); ffprobe=QLineEdit(self.settings.get("ffprobe","ffprobe")); whisper_size=QComboBox(); whisper_size.addItems(["tiny.en","base.en","small.en"]); whisper_size.setCurrentText(self.settings.get("whisper_model","base.en")); whisper=QLineEdit(self.settings.get("whisper_cli","")); model=QLineEdit(self.settings.get("whisper_model_path","")); sfx=QLineEdit(self.settings.get("sfx_folder","")); buttons=QDialogButtonBox(QDialogButtonBox.Cancel|QDialogButtonBox.Save); buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow("FFmpeg command",ffmpeg); form.addRow("ffprobe command",ffprobe); form.addRow("Whisper model",whisper_size); form.addRow("whisper-cli override",whisper); form.addRow("whisper.cpp model",model); form.addRow("Auto-index SFX folder",sfx)
         from .playback_config import MODES
         decoder=QComboBox(); decoder.addItems(MODES); decoder.setCurrentText(self.settings.get('playback_decoder',MODES[0])); form.addRow('Playback decoder',decoder)
         note=QLabel('Restart after changing decoder. GPU decoding depends on codec/driver support.\nPreview effects/composition use CPU; export encoder is selected in Deliver.'); note.setWordWrap(True); form.addRow(note)
@@ -2182,7 +2164,7 @@ class MainWindow(QMainWindow):
         form.addRow(shortcut_box); form.addRow(buttons)
         if dialog.exec():
             self.settings['playback_decoder']=decoder.currentText()
-            self.settings.update(ffmpeg=ffmpeg.text(),ffprobe=ffprobe.text(),whisper_model=whisper_size.currentText(),whisper_cli=whisper.text(),whisper_model_path=model.text(),sfx_folder=sfx.text(),phone_folder=phone.text()); self.settings["shortcuts"].update({key:edit.text().strip() for key,edit in shortcut_edits.items()}); save_settings(self.settings); self.apply_shortcuts()
+            self.settings.update(ffmpeg=ffmpeg.text(),ffprobe=ffprobe.text(),whisper_model=whisper_size.currentText(),whisper_cli=whisper.text(),whisper_model_path=model.text(),sfx_folder=sfx.text()); self.settings["shortcuts"].update({key:edit.text().strip() for key,edit in shortcut_edits.items()}); save_settings(self.settings); self.apply_shortcuts()
             folder=Path(sfx.text())
             if folder.is_dir():self.add_media_paths([str(x) for x in folder.iterdir() if x.suffix.lower() in AUDIO_EXTENSIONS])
 
@@ -2227,16 +2209,12 @@ class MainWindow(QMainWindow):
             event.accept(); return
         if not confirm_close(self):
             event.ignore(); return
-        if hasattr(self,'phone_connect'):
-            if self.phone_connect.active_job and QMessageBox.question(self,'Cancel phone transfers?','A phone transfer is running. Cancel it and close Kinetic Cut?')!=QMessageBox.Yes:
-                event.ignore(); return
         self._closing=True
         self.setEnabled(False)
         self.autosave_timer.stop(); self.autosave_debounce_timer.stop()
         for name in ('_history_settle_timer','_text_history_timer'):
             timer=getattr(self,name,None)
             if timer:timer.stop()
-        if hasattr(self,'phone_connect'):self.phone_connect.shutdown()
         if hasattr(self.inspector,'cancel_title_tts'):self.inspector.cancel_title_tts()
         self.compounds.cancel()
         self.media_panel.watch_folders.stop()

@@ -12,10 +12,12 @@ Local object tracking adds moving censors, arrows, outlines, labels, image
 markers and following crops, with adjustable appearance and correction points.
 
 [Download the Windows installer](https://github.com/farhanr3001/video-editor/releases/latest).
-Editing and offline English caption generation are included. Optional phone
-mirroring, face/background tools and vocal separation can be installed during
+Editing and offline English caption generation are included. Optional face/background tools and vocal separation can be installed during
 setup or downloaded later inside the app.
 Use **FullSetup** for a new installation. Installed copies download changed files
 for updates; settings, Power Bins and optional downloads are preserved.
+Version 1.1.20 uses a full installer update to replace the native uninstaller.
+Uninstall removes Power Bins, settings, optional downloads, caches and files in
+the default Kinetic Cut download folder. Projects and media elsewhere stay intact.
 
 Built with Python, PySide6 and FFmpeg. See [dependency notices](THIRD_PARTY_NOTICES.txt).

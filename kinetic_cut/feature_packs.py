@@ -6,8 +6,7 @@ import zipfile
 from pathlib import Path
 from .updates import trusted_download
 
-ROOTS = {"android": "phone-android-v1", "iphone": "phone-iphone-v1",
-         "vision": "vision-v1", "vocals": "vocal-only-v1"}
+ROOTS = {"vision": "vision-v1", "vocals": "vocal-only-v1"}
 
 def effect_component(name):
     from .vision_effects import NAMES
@@ -15,9 +14,6 @@ def effect_component(name):
 
 
 def available(key, settings=None):
-    if key in ('android', 'iphone'):
-        from .phone_process import tool_path
-        return bool(tool_path(settings or {}, 'scrcpy' if key == 'android' else 'uxplay-windows'))
     return installed(key)
 
 
@@ -54,9 +50,7 @@ def installed(key):
     if key == "vocals":
         from .vocal_component import ready
         return ready(root)
-    marker = root / "pack-ready.json"
-    exe = root / ("scrcpy.exe" if key == "android" else "uxplay-windows.exe")
-    return marker.is_file() and exe.is_file()
+    return False
 
 
 def extract(archive, destination, cancel):
@@ -113,7 +107,7 @@ def install(key, progress, cancel, local_source=None):
                 archive = download(release, temp, cancel,
                                    lambda done, total: progress((round(done/total*85), "Downloading " + metadata["name"])))
             stage = temp / "runtime"; stage.mkdir(); extract(archive, stage, cancel)
-            expected = "scrcpy.exe" if key == "android" else "uxplay-windows.exe" if key == "iphone" else "python.exe"
+            expected = "python.exe"
             if not (stage / expected).is_file():
                 raise ValueError("Component archive is incomplete")
             if key in ("vision", "vocals"):
@@ -138,7 +132,7 @@ def install(key, progress, cancel, local_source=None):
     if key in ("vision", "vocals"):
         from . import vision_component, vocal_component
         return (vision_component if key == "vision" else vocal_component).install(progress, cancel, component_root(key))
-    raise RuntimeError("This build has no phone download manifest. Install the latest release or select your existing phone tools.")
+    raise RuntimeError("Unknown optional component.")
 
 
 def install_selected(keys, local_source=None):

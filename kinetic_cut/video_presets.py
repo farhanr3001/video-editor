@@ -65,6 +65,9 @@ def capture(panel, item):
 def apply(project, item, values):
     """Apply visible pixel values without inheriting the target's previous crop."""
     values = validate(values)
+    from .blur_policy import external_blur
+    if values['background_enabled'] and external_blur(item):
+        raise ValueError("Remove Gaussian Blur before applying a preset with inspector blur enabled.")
     item.transform = copy.deepcopy(item.transform)
     for key in TRANSFORM: setattr(item.transform, key, values[key])
     item.transform.x = .5 + values['position_x'] / project.settings.width
@@ -236,6 +239,9 @@ class VideoPresetStrip(QWidget):
         targets = [item for item in self.panel.targets(False) if compatible(project, item)]
         if not targets: return
         values = validate(current['values'])
+        from .blur_policy import external_blur
+        if values['background_enabled'] and any(external_blur(item) for item in targets):
+            QMessageBox.information(self.window,"Blur already added","Remove Gaussian Blur before applying a preset with inspector blur enabled.");self.refresh();return
         for item in targets:
             apply(project, item, values)
             item.video_preset_id = current['id']

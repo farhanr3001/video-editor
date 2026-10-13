@@ -100,7 +100,7 @@ def prepare_layer_image(self, item, layer_source, target, frame_rect):
             if len(self.crop_cache) >= 16:self.crop_cache.pop(next(iter(self.crop_cache)))
             self.crop_cache[item.id] = (key, result)
             return result
-        cache_key = (layer_source.cacheKey(), repr(item.crop), effect_key, item.crop_softness, item.grayscale, item.brightness, item.contrast, item.saturation, item.sharpen, target.width(), target.height(), frame_rect.width(), frame_rect.height(), interactive, raster_scale)
+        cache_key = (layer_source.cacheKey(), repr(item.crop), effect_key, item.crop_softness, item.grayscale, item.brightness, item.contrast, item.saturation, item.sharpen, item.transform.rotation, item.transform.pitch, item.transform.yaw, item.transform.flip_horizontal, item.transform.flip_vertical, target.x(), target.y(), target.width(), target.height(), frame_rect.x(), frame_rect.y(), frame_rect.width(), frame_rect.height(), interactive, raster_scale)
         cached = self.effect_cache.get(item.id)
         if cached and cached[0] == cache_key:
             return cached[1]
@@ -123,7 +123,24 @@ def prepare_layer_image(self, item, layer_source, target, frame_rect):
         sy = cropped.height() / max(1.0, target.height() / frame_rect.height() * self.project.settings.height)
         for effect in item.effects:
             if effect.get("enabled", True) and effect.get("name") == "Gaussian Blur":
-                cropped = blur_image(cropped, effect.get("horizontal", 12) * sx, effect.get("vertical", 12) * sy, effect.get("blend", 100) / 100, effect.get("border", "Reflect"), preview_fast=interactive)
+                rx, ry = effect.get("horizontal", 12) * sx, effect.get("vertical", 12) * sy
+                region = None
+                transform = item.transform
+                # Only a single isotropic blur on an axis-aligned layer is
+                # eligible. Everything else retains the complete-image path.
+                # Output remains source-sized; no visible pixel is downsampled.
+                single = sum(e.get("enabled",True) and e.get("name")=="Gaussian Blur" for e in item.effects)==1
+                visible = target.intersected(frame_rect)
+                if (interactive and single and abs(rx-ry)<1e-9 and not follow
+                        and not transform.rotation and not transform.pitch and not transform.yaw
+                        and not transform.flip_horizontal and not transform.flip_vertical
+                        and not visible.isEmpty() and target.width()>0 and target.height()>0
+                        and abs(target.width()/cropped.width()-target.height()/cropped.height())<1e-6):
+                    region = (max(0,math.floor((visible.left()-target.left())/target.width()*cropped.width())-3),
+                              max(0,math.floor((visible.top()-target.top())/target.height()*cropped.height())-3),
+                              min(cropped.width(),math.ceil((visible.right()-target.left())/target.width()*cropped.width())+3),
+                              min(cropped.height(),math.ceil((visible.bottom()-target.top())/target.height()*cropped.height())+3))
+                cropped = blur_image(cropped, rx, ry, effect.get("blend", 100) / 100, effect.get("border", "Reflect"), preview_fast=interactive, region=region)
             if effect.get("enabled", True) and effect.get("name") in MATRICES:
                 cropped = apply_color_effect(cropped, effect)
         if item.crop_softness > 0:

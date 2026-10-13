@@ -5,7 +5,7 @@ from PySide6.QtCore import Qt,QRectF,QPointF
 from PySide6.QtGui import QImage,QColor,QFont,QFontMetricsF,QPainterPath,QPen,QTransform
 
 
-def blur_image(image,rx,ry,blend=1.,border="Replicate", *, preview_fast=False):
+def blur_image(image,rx,ry,blend=1.,border="Replicate", *, preview_fast=False, region=None):
     if max(rx,ry)<.05 or blend<=0:return image
     if preview_fast:
         # Large Gaussian kernels remove high frequencies themselves. Filter a
@@ -27,12 +27,18 @@ def blur_image(image,rx,ry,blend=1.,border="Replicate", *, preview_fast=False):
             data=Image.blend(a,b,max(0.,min(1.,blend))).tobytes()
             return QImage(data,image.width(),image.height(),QImage.Format_RGBA8888).copy()
     converted=image.convertToFormat(QImage.Format_RGBA8888)
-    pil=Image.frombytes("RGBA",(converted.width(),converted.height()),bytes(converted.constBits()))
+    pil=Image.frombuffer("RGBA",(converted.width(),converted.height()),converted.constBits(),"raw","RGBA",converted.bytesPerLine(),1)
     import numpy as np
+    from .blur_filter import gaussian
     padding=max(2,min(128,round(max(rx,ry)*2)))
-    padded=Image.fromarray(np.pad(np.asarray(pil),((padding,padding),(padding,padding),(0,0)),mode="reflect" if border=="Reflect" else "edge"))
+    pixels=np.ndarray((converted.height(),converted.width(),4),dtype=np.uint8,buffer=converted.constBits(),strides=(converted.bytesPerLine(),4,1))
+    padded=Image.fromarray(np.pad(pixels,((padding,padding),(padding,padding),(0,0)),mode="reflect" if border=="Reflect" else "edge"))
     r=max(.1,min(rx,ry)); size=(max(4,round(padded.width*r/max(.1,rx))),max(4,round(padded.height*r/max(.1,ry))))
-    blurred=padded.resize(size,Image.Resampling.BILINEAR).filter(ImageFilter.GaussianBlur(r)).resize(padded.size,Image.Resampling.BILINEAR).crop((padding,padding,padding+pil.width,padding+pil.height))
+    working=padded if size==padded.size else padded.resize(size,Image.Resampling.BILINEAR)
+    filter_region = tuple(value + padding for value in region) if region is not None and size==padded.size else None
+    filtered=gaussian(working,r,filter_region)
+    restored=filtered if filtered.size==padded.size else filtered.resize(padded.size,Image.Resampling.BILINEAR)
+    blurred=restored.crop((padding,padding,padding+pil.width,padding+pil.height))
     if blend<1:blurred=Image.blend(pil,blurred,max(0,blend))
     data=blurred.tobytes(); return QImage(data,blurred.width,blurred.height,QImage.Format_RGBA8888).copy()
 

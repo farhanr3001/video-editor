@@ -461,24 +461,31 @@ class Project:
         removed_captions=[c for c in self.captions if c.id in caption_ids]
         if not removed and not removed_captions:
             return
-        first = min([i.start for i in removed]+[c.start for c in removed_captions])
-        last = max([i.start + i.duration for i in removed]+[c.end for c in removed_captions])
         ids={i.id for i in removed}
         self.timeline = [i for i in self.timeline if i.id not in ids]
         self.transitions = [t for t in self.transitions if t.left_item_id not in ids and t.right_item_id not in ids]
         self.captions = [c for c in self.captions if c.id not in caption_ids]
         if ripple:
-            gap = last - first
+            from .ripple_delete import deletion_clock
+            unlocked_items = [i for i in self.timeline if not self.track_states.get(i.track, {}).get("locked")]
+            unlocked_captions = self.captions if not self.track_states.get("subtitle_1", {}).get("locked") else []
+            clock = deletion_clock(
+                [(i.start, i.start + i.duration) for i in removed] + [(c.start, c.end) for c in removed_captions],
+                [(i.start, i.start + i.duration) for i in unlocked_items] + [(c.start, c.end) for c in unlocked_captions],
+            )
             for item in self.timeline:
-                if item.start >= last - 0.001 and not self.track_states.get(item.track,{}).get("locked"):
-                    item.start = max(first, item.start - gap)
+                if not self.track_states.get(item.track,{}).get("locked"):
+                    item.start = clock(item.start)
             for caption in self.captions:
-                if caption.start >= last - 0.001 and not self.track_states.get("subtitle_1",{}).get("locked"):
-                    caption.start -= gap
-                    caption.end -= gap
-            for transition in self.transitions:
-                if transition.start >= last - .001 and not self.track_states.get(transition.track,{}).get('locked'):
-                    transition.start = max(first, transition.start-gap)
+                if not self.track_states.get("subtitle_1",{}).get("locked"):
+                    delta = clock(caption.start) - caption.start
+                    caption.start += delta
+                    caption.end += delta
+            from .timeline_actions import transition_edges
+            self.transitions = [mapped for transition in self.transitions for mapped in (
+                [transition] if self.track_states.get(transition.track, {}).get("locked")
+                else transition_edges([transition], {}, time_map=clock)
+            )]
         self.touch()
 
     def ripple_ranges(self, group_id: str, keep: list[tuple[float, float]], item_id=None) -> None:

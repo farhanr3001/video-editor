@@ -361,7 +361,12 @@ class PreviewCanvas(QWidget):
         # These supported filters never need media/vision lookup.
         snapshot=SimpleNamespace(settings=copy.deepcopy(project.settings),playhead=project.playhead,
                                  media_by_id=lambda media_id: None)
-        return RasterContext(snapshot,True,self.devicePixelRatioF()),requests
+        transport=getattr(self.window(),'transport',None)
+        interactive=bool(transport and (transport.playing or transport.scrubbing))
+        # Paused seeks can also prepare static filters off the GUI thread. The
+        # worker must use the same quality as painting, or publishing its result
+        # would immediately miss the cache and run the filter again in paintEvent.
+        return RasterContext(snapshot,interactive,self.devicePixelRatioF()),requests
 
     def _draw_layer_item(self, painter: QPainter, item: TimelineItem, layer_source: QImage, target: QRectF,
                          frame_rect: QRectF, prepared_override: QImage | None = None) -> None:

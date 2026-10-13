@@ -30,7 +30,7 @@ def main():
         source=args.ffmpeg_bin.parent/name
         if source.is_file():shutil.copy2(source,tools/name)
     release=ROOT/'release';release.mkdir(exist_ok=True)
-    specs=[('android','Android mirroring',ROOT/'assets/phone-tools/scrcpy-win64-v4.1'),('iphone','iPhone mirroring',ROOT/'assets/phone-tools/uxplay'),('vision','Face / background tools',inputs/'components/vision-v1'),('vocals','Vocal separation',inputs/'components/vocal-only-v1')]
+    specs=[('vision','Face / background tools',inputs/'components/vision-v1'),('vocals','Vocal separation',inputs/'components/vocal-only-v1')]
     metadata={}
     for key,name,source in specs:
         if not source.is_dir():raise RuntimeError(f'Missing prepared component: {source}')
