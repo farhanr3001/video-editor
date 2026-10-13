@@ -311,5 +311,8 @@ begin
     end;
     RemoveOwnedTree(ExpandConstant('{app}\_internal'));
     RemoveOwnedTree(ExpandConstant('{app}\.kinetic-update'));
+    // Native directory removal ran before update-only residue was cleaned.
+    // Remove the now-empty installation folder without touching custom files.
+    RemoveDir(ExpandConstant('{app}'));
   end;
 end;

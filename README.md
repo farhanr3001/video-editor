@@ -16,7 +16,7 @@ Editing and offline English caption generation are included. Optional face/backg
 setup or downloaded later inside the app.
 Use **FullSetup** for a new installation. Installed copies download changed files
 for updates; settings, Power Bins and optional downloads are preserved.
-Version 1.1.20 uses a full installer update to replace the native uninstaller.
+Versions 1.1.20 and 1.1.21 use full installer updates to replace the native uninstaller.
 Uninstall removes Power Bins, settings, optional downloads, caches and files in
 the default Kinetic Cut download folder. Projects and media elsewhere stay intact.
 
