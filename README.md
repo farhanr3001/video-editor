@@ -8,6 +8,16 @@ Editable motion compositions add parented layers, animated typography, masks,
 vector reveals and morphs, Bézier easing and motion blur with matching exports.
 Typewriter text, animated counters, corner radii and soft shape shadows support
 interface motion design. Project frame rates include 120 fps export.
+Reusable product/price cards, animated totals, showcases and chapter titles
+offer editable images, colours, prices and animation timing. The motion editor
+includes a layer/keyframe timeline, canvas handles, multi-selection, marquee
+selection, inline text editing and its own undo/redo and playback shortcuts.
+Motion scale axes link by default and can be unlinked. Multi-selection inspector
+steps and drags preserve individual values; typed values assign an exact value.
+Selected video layers show their transform boxes together.
+Timeline tools include re-time controls (Ctrl+R) and round fade handles.
+Full Preview uses background source decoding and bounded composited-frame caching;
+waveform cache files clear after the editor finishes closing.
 Local object tracking adds moving censors, arrows, outlines, labels, image
 markers and following crops, with adjustable appearance and correction points.
 
@@ -16,7 +26,7 @@ Editing and offline English caption generation are included. Optional face/backg
 setup or downloaded later inside the app.
 Use **FullSetup** for a new installation. Installed copies download changed files
 for updates; settings, Power Bins and optional downloads are preserved.
-Versions 1.1.20 and 1.1.21 use full installer updates to replace the native uninstaller.
+Versions 1.1.20–1.1.22 use full installer updates so skipped versions also receive the repaired native uninstaller.
 Uninstall removes Power Bins, settings, optional downloads, caches and files in
 the default Kinetic Cut download folder. Projects and media elsewhere stay intact.
 

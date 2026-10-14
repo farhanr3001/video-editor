@@ -54,7 +54,8 @@ def draw_title(painter,project,item,rect,at):
 
 def required(item):
     from .model import Transform
-    return item.role in ('title','graphic') and (bool(item.keyframes) or item.graphic_type.lower() in ('motion','motion composition') or item.role=='title' and item.transform!=Transform())
+    from .motion_presets import is_motion
+    return item.role in ('title','graphic') and (bool(item.keyframes) or is_motion(item.graphic_type) or item.role=='title' and item.transform!=Transform())
 
 def frame(project,item,t,size=None):
     from .graphics import draw_graphic

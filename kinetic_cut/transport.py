@@ -4,7 +4,7 @@ import copy
 import hashlib
 from .process import run as run_process
 from .audio_levels import channel_peaks
-from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot, Qt, QMetaObject
+from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot, Qt, QMetaObject, QThreadPool
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink, QAudioBufferOutput
 
 
@@ -27,11 +27,17 @@ class TimelineTransport(QObject):
         self._pending_video_seeks={}; self._video_seek_floor={}; self._loading_video_seeks={}
         self._frame_epochs={}; self._frame_jobs=[]; self._frame_executor=None
         self._frame_sequence=0; self._published_sequences={}; self._cpu_frame_fallback=set(); self._frame_epoch=0; self._frame_cursor=0
+        self.video_pool=QThreadPool(self); self.video_pool.setMaxThreadCount(12)
+        self._worker_failed_media=set()
         self.scrubbing=False; self._last_scrub_sync=0.; self._scrub_pending_pos=None
         self._scrub_timer=QTimer(self); self._scrub_timer.setSingleShot(True); self._scrub_timer.timeout.connect(self._flush_scrub)
         self._scrub_retry_timer=QTimer(self); self._scrub_retry_timer.setSingleShot(True); self._scrub_retry_timer.timeout.connect(self._retry_scrub)
         self.timer=QTimer(self); self.timer.setInterval(20); self.timer.timeout.connect(self.tick)
-        self.frame_timer=QTimer(self); self.frame_timer.setInterval(17); self.frame_timer.timeout.connect(self.poll_frames)
+        self.timer.setTimerType(Qt.PreciseTimer)
+        initial_settings=getattr(getattr(window,'project',None),'settings',None)
+        initial_fps=getattr(initial_settings,'fps',60)
+        self.frame_timer=QTimer(self); self.frame_timer.setInterval(max(4,round(1000/(max(1,initial_fps)*2)))); self.frame_timer.timeout.connect(self.poll_frames)
+        self.frame_timer.setTimerType(Qt.PreciseTimer)
         self.result_timer=QTimer(self); self.result_timer.setInterval(4); self.result_timer.setTimerType(Qt.PreciseTimer)
         self.result_timer.timeout.connect(self.publish_frames)
 
@@ -122,12 +128,15 @@ class TimelineTransport(QObject):
         if self.closed:return
         from .missing_media import unavailable
         p=self.window.project; t=self.position; active=set(); preview=self.window.preview
+        interval=max(8,round(1000/max(1,p.settings.fps)))
+        if self.timer.interval()!=interval:self.timer.setInterval(interval)
         sources={m.id:m.path for m in p.media}
         previous=getattr(self,'_media_source_paths',{})
         changed={id for id,path in sources.items() if id in previous and previous[id]!=path}
         for key in list(self.decoders):
             if key[0] in changed:self.retire_decoder(key)
         if changed:
+            self._worker_failed_media.difference_update(changed)
             self.previous_video.clear(); self.boundary_holds.clear()
             for id in changed:
                 self.window.proxies.pop(id,None)
@@ -137,6 +146,7 @@ class TimelineTransport(QObject):
         is_different_project = (self._project is None or 
                                 getattr(self._project, 'created_at', None) != getattr(p, 'created_at', None))
         if is_different_project:
+            self._worker_failed_media.clear()
             for key in list(self.decoders):self.retire_decoder(key)
             self._meter_peaks.clear(); self._meter_last.clear(); self._meter_display.clear(); self._meter_clip.clear(); self._meter_published_clips.clear()
             self.previous_video={}; self.boundary_holds={}; self._seek_holds.clear(); self._scrub_decoder_targets.clear(); self._project=p
@@ -153,15 +163,22 @@ class TimelineTransport(QObject):
         if not caption_focus:
             for item in p.timeline:
                 if item.track not in p.video_tracks or item.muted:continue
+                present=item.start<=t<item.start+item.duration or item.id in transition_items
+                neighbour=t<item.start<=t+.75 or t-.75<=item.start+item.duration<=t
+                if not present and not neighbour:continue
                 state=p.track_states.get(item.track,{})
                 if not state.get('visible',True) or state.get('muted',False):continue
                 media=p.media_by_id(item.media_id)
                 if not media or media.kind!='video' or unavailable(media,item):continue
                 key=(media.id,round(item.in_point-item.start*item.speed,4),item.speed,'video')
-                if item.start<=t<item.start+item.duration or item.id in transition_items:
+                if present:
                     self._required_video_keys.add(key)
                 elif key in self.warm_keys and (t<item.start<=t+.75 or t-.75<=item.start+item.duration<=t):
                     self._protected_warm_video_keys.add(key)
+        # Paused/warmed workers must not occupy every pool slot while a new
+        # active lane waits forever. Capacity is bounded by current clocks plus
+        # the existing eight-neighbour warm limit, rather than timeline length.
+        self.video_pool.setMaxThreadCount(max(12,len(self._required_video_keys)+8))
         for item in p.timeline:
             if caption_focus and item.track not in p.audio_tracks:continue
             if item.muted or not item.start<=t<item.start+item.duration:continue
@@ -175,7 +192,7 @@ class TimelineTransport(QObject):
             video=item.track in p.video_tracks
             if not video and not (media.has_audio or media.kind=="audio"):continue
             quality=getattr(self.window,'preview_quality',None)
-            if video and quality and quality.needs_compatible(media):
+            if video and quality and self.needs_compatible(media):
                 # Qt can play AV1 audio while yielding no video frames on some
                 # Windows drivers. Show its FFmpeg thumbnail until the H.264
                 # preview is prepared instead of opening a failing decoder.
@@ -263,7 +280,7 @@ class TimelineTransport(QObject):
                     if not video:
                         continue
                     quality=getattr(self.window,'preview_quality',None)
-                    if quality and quality.needs_compatible(media):continue
+                    if quality and self.needs_compatible(media):continue
                     key = (media.id, round(item.in_point - item.start * item.speed, 4), item.speed, "video")
                     active.add(key)
                     if is_outgoing:
@@ -304,7 +321,7 @@ class TimelineTransport(QObject):
                 video=item.track in p.video_tracks
                 if not media or unavailable(media,item) or (media.kind!='video' if video else not (media.has_audio or media.kind=='audio')):continue
                 quality=getattr(self.window,'preview_quality',None)
-                if video and quality and quality.needs_compatible(media):continue
+                if video and quality and self.needs_compatible(media):continue
                 if media.compound:
                     from pathlib import Path
                     if not Path(media.path).is_file():continue
@@ -330,7 +347,7 @@ class TimelineTransport(QObject):
         for key in list(self.decoders):
             if key not in active|warm:self.retire_decoder(key)
         if any(sink for _,_,sink in self.decoders.values()):
-            interval=max(8,round(1000/max(1,p.settings.fps)))
+            interval=max(4,round(500/max(1,p.settings.fps)))
             # setInterval restarts an active QTimer, even when unchanged. The
             # timeline clock must not continually postpone the frame sampler.
             if self.frame_timer.interval()!=interval:self.frame_timer.setInterval(interval)
@@ -340,6 +357,13 @@ class TimelineTransport(QObject):
 
     def create_decoder(self,key,media,video,audio_path):
         if video and not self.playing and self._reuse_video_decoder(key):return True
+        from .video_worker import enabled_for, WorkerVideoPlayer
+        if video and enabled_for(self.window,media.id):
+            player=WorkerVideoPlayer(self,self.window.proxies.get(media.id,media.path))
+            output=QAudioOutput(player)
+            self.decoders[key]=(player,output,player); player._transport_key=key
+            player.mediaStatusChanged.connect(lambda status,p=player:self.decoder_loaded(p._transport_key,p,status))
+            return
         player=QMediaPlayer(self); output=QAudioOutput(player); player.setAudioOutput(output)
         if not video:
             buffer_output=QAudioBufferOutput(player)
@@ -352,6 +376,10 @@ class TimelineTransport(QObject):
         player.mediaStatusChanged.connect(lambda status,p=player:self.decoder_loaded(p._transport_key,p,status))
         from .media_source import set_media_source
         set_media_source(player,QUrl.fromLocalFile(self.window.proxies.get(media.id,media.path) if video else audio_path or media.path))
+
+    def needs_compatible(self,media):
+        from .video_worker import enabled_for
+        return not enabled_for(self.window,media.id) and self.window.preview_quality.needs_compatible(media)
 
     def _reuse_video_decoder(self,key):
         for previous,decoder in tuple(self.decoders.items()):
@@ -478,6 +506,23 @@ class TimelineTransport(QObject):
             decoders=decoders[offset:]+decoders[:offset]; self._frame_cursor+=1
         for key,(player,_,sink) in decoders:
             if not sink:continue
+            from .video_worker import WorkerVideoPlayer
+            if isinstance(player,WorkerVideoPlayer) and player.engine.error:
+                import logging
+                logging.warning('Worker video fallback for %s: %s',key[0],player.engine.error)
+                proxy=self.window.proxies.pop(key[0],None)
+                if proxy:
+                    quality=self.window.preview_quality
+                    media=self.window.project.media_by_id(key[0])
+                    for kind,paths in (('seek',quality.seek_ready),('compat',quality.compat_ready),('optimized',quality.ready)):
+                        if paths.get(key[0])==proxy:
+                            paths.pop(key[0],None)
+                            if media:quality.failed.add((kind,quality._signature(media)))
+                else:self._worker_failed_media.add(key[0])
+                self.retire_decoder(key)
+                self.window.preview_quality.request()
+                self.sync(True)
+                continue
             frame=sink.videoFrame()
             if not frame.isValid():continue
             stamp=(frame.startTime(),frame.endTime())
@@ -500,11 +545,15 @@ class TimelineTransport(QObject):
             # while pixels are prepared and must seek again when resumed.
             if (not self.playing or key in self.warm_keys) and player.playbackState()==QMediaPlayer.PlayingState:
                 player.pause()
-            image=frame.toImage().copy()
+            from .video_worker import CpuFrame
+            image=frame.toImage() if isinstance(frame,CpuFrame) else frame.toImage().copy()
             if image.isNull():continue
             self._frame_sequence+=1; sequence=self._frame_sequence
             prepare=getattr(self.window.preview,'frame_work',None)
-            work=prepare(key,image) if prepare and key not in self._cpu_frame_fallback else None
+            composed=(isinstance(player,WorkerVideoPlayer) and self.playing
+                      and not self.window.preview.transform_controls_visible
+                      and not self.window.preview.composition_cache.closed)
+            work=prepare(key,image) if prepare and key not in self._cpu_frame_fallback and not composed else None
             if work:
                 from .preview_raster import prepare_frame
                 if self._frame_executor is None:
@@ -612,6 +661,8 @@ class TimelineTransport(QObject):
         if (not self.playing or key in self.warm_keys) and key in self.decoders:self.decoders[key][0].pause()
 
     def shutdown(self):
+        cache=getattr(self.window.preview,'composition_cache',None)
+        if cache:cache.close()
         self._scrub_timer.stop()
         self._scrub_retry_timer.stop()
         self._meter_timer.stop()

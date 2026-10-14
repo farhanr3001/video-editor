@@ -100,23 +100,65 @@ def make_thumbnail(path: str | Path, kind: str, ffmpeg: str = "ffmpeg", *, timeo
     return str(target) if target.exists() else ""
 
 
+def proxy_path(media: MediaItem, *, compatibility=False, seek_cache=False):
+    profile = 'seek-full-v2' if seek_cache else 'compat-h264-full-v1' if compatibility else 'seek-proxy-v3'
+    stat=Path(media.path).stat()
+    digest = hashlib.sha1((media.path + str(stat.st_mtime_ns)+(str(stat.st_size) if seek_cache else '')+profile).encode()).hexdigest()[:16]
+    return CACHE_DIR / "proxies" / f"{'full-seek-' if seek_cache else ''}{digest}.mp4"
+
+
 def generate_proxy(media: MediaItem, ffmpeg: str = "ffmpeg", cancel=None,
-                   compatibility: bool = False, progress=None) -> str:
-    profile = 'compat-h264-full-v1' if compatibility else 'seek-proxy-v3'
-    digest = hashlib.sha1((media.path + str(Path(media.path).stat().st_mtime_ns)+profile).encode()).hexdigest()[:16]
-    target = CACHE_DIR / "proxies" / f"{digest}.mp4"
+                   compatibility: bool = False, progress=None, seek_cache: bool = False, protected=()) -> str:
+    target=proxy_path(media,compatibility=compatibility,seek_cache=seek_cache)
     if target.exists():
         return str(target)
-    from .exporter import automatic_encoder
-    codec=['-c:v','h264_nvenc','-preset','p2','-cq','18','-b:v','0'] if automatic_encoder(ffmpeg,'h264')=='NVIDIA' else ['-c:v','libx264','-preset','ultrafast','-crf','18']
+    if seek_cache:
+        import av,shutil,os
+        if target.parent.is_symlink() or not target.parent.resolve().is_relative_to(CACHE_DIR.resolve()):
+            raise ValueError('Keeping original preview for linked cache directory')
+        protected={os.path.normcase(str(Path(path).resolve())) for path in protected}
+        with av.open(media.path) as source:
+            first=next(source.decode(video=0))
+            if first.format.name not in ('yuv420p','yuvj420p','nv12') or getattr(first,'rotation',0) or first.interlaced_frame:
+                raise ValueError('Keeping original preview for this source colour/field/orientation format')
+        # Seek copies are regenerable, with a bounded footprint. Never evict a
+        # path currently used by a player or an open project cache map.
+        entries=[]
+        for path in target.parent.glob('full-seek-*.mp4'):
+            import re
+            if path.is_symlink() or not re.fullmatch(r'full-seek-[0-9a-f]{16}\.mp4',path.name):continue
+            info=path.stat(); entries.append((info.st_mtime,info.st_size,path))
+        total=sum(size for _,size,_ in entries)
+        for _,size,path in sorted(entries):
+            if total<=1536*1024**2:break
+            if os.path.normcase(str(path.resolve())) not in protected:
+                path.unlink(); total-=size
+        if total>1536*1024**2 or shutil.disk_usage(target.parent).free<768*1024**2:
+            raise ValueError('Keeping original preview: seek-cache storage budget reached')
+    if seek_cache:
+        codec=['-c:v','libx264','-preset','veryfast','-crf','14','-threads','2']
+    else:
+        from .exporter import automatic_encoder
+        codec=['-c:v','h264_nvenc','-preset','p2','-cq','18','-b:v','0'] if automatic_encoder(ffmpeg,'h264')=='NVIDIA' else ['-c:v','libx264','-preset','ultrafast','-crf','18']
     pending=target.with_suffix('.pending.mp4')
     # Short GOPs bound random-seek decoding. Compatibility previews preserve
     # the source's dimensions (up to 1920px wide); export and audio stay original.
     from .export_process import render
-    args=[ffmpeg,'-hide_banner','-loglevel','error','-y','-threads','0' if compatibility else '2','-i',media.path,
-          '-vf',f"scale='min({1920 if compatibility else 960},iw)':-2",'-an']+codec+['-g','15','-bf','0','-pix_fmt','yuv420p','-progress','pipe:1','-nostats',str(pending)]
-    code,tail=render(args,media.duration,progress,cancel)
-    if code or cancel and cancel.is_set():raise RuntimeError('Preview preparation stopped: '+'\n'.join(tail)[-1500:])
+    args=[ffmpeg,'-hide_banner','-loglevel','error','-y','-threads','0' if compatibility and not seek_cache else '2','-i',media.path]
+    if not seek_cache:args += ['-vf',f"scale='min({1920 if compatibility else 960},iw)':-2"]
+    else:args += ['-fps_mode','passthrough']
+    args += ['-an']+codec+['-g','15','-bf','0','-pix_fmt','yuv420p','-progress','pipe:1','-nostats',str(pending)]
+    def report(fraction,message):
+        if seek_cache and pending.exists() and pending.stat().st_size>512*1024**2:
+            raise RuntimeError('Keeping original preview: per-source seek-cache budget reached')
+        if progress:progress(fraction,message)
+    try:code,tail=render(args,media.duration,report if seek_cache else progress,cancel)
+    except BaseException:
+        if seek_cache:pending.unlink(missing_ok=True)
+        raise
+    if code or cancel and cancel.is_set():
+        if seek_cache:pending.unlink(missing_ok=True)
+        raise RuntimeError('Preview preparation stopped: '+'\n'.join(tail)[-1500:])
     pending.replace(target)
     return str(target)
 

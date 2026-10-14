@@ -17,7 +17,7 @@ def run(output):
     from .keyframes import put
     from .exporter import export,PRESETS
     from .caption_fonts import load_fonts
-    app=QApplication([]); app.setStyle('Fusion'); app.setQuitOnLastWindowClosed(False); load_fonts()
+    app=QApplication([]); app.setStyle('Fusion'); app.setQuitOnLastWindowClosed(False); app.setProperty('kineticTestDiscardUnsaved',True); load_fonts()
     w=MainWindow(); w.resize(1480,920); w.show(); w.autosave_timer.stop(); report={'frozen':bool(getattr(sys,'frozen',False)), 'themes':[], 'parity':[]}
     def settle(ms=70):
         loop=QEventLoop(); QTimer.singleShot(ms,loop.quit); loop.exec()
@@ -35,6 +35,7 @@ def run(output):
         for theme in ('default','final_cut_obsidian','ableton_gray'):
             w.apply_theme(theme,save=False); d=MotionEditor(w,item); d.show(); d.time.setValue(.7); settle()
             d.node_id='path'; d.channel.setCurrentText('morph'); d.seek(.7); d.refresh()
+            d.property_tabs.setCurrentIndex(1)
             for size in ((1180,820),(950,720)):
                 d.resize(*size); settle(); path=output/f'motion-{theme}-{size[0]}.png'; assert d.grab().save(str(path)); report['themes'].append(path.name)
             d.reject(); settle()
@@ -78,8 +79,9 @@ def run(output):
         report['ui_design_themes']=[]
         for theme in ('default','final_cut_obsidian','ableton_gray'):
             w.apply_theme(theme,save=False); d=MotionEditor(w,ui_item); d.show(); d.node_id='typing'; d.time.setValue(.4); d.refresh(); d.resize(950,720); settle()
+            d.property_tabs.setCurrentIndex(1); settle()
             assert d.caret.isVisible() and d.text_align.currentText()=='left'; image=output/f'typing-{theme}.png'; assert d.grab().save(str(image)); report['ui_design_themes'].append(image.name)
-            d.node_id='panel'; d.refresh(); settle(); assert d.shadow.isChecked(); assert d.grab().save(str(output/f'shadow-{theme}.png')); d.reject(); settle()
+            d.node_id='panel'; d.refresh(); d.property_tabs.setCurrentIndex(2); settle(); assert d.shadow.isChecked(); assert d.grab().save(str(output/f'shadow-{theme}.png')); d.reject(); settle()
             settings=ProjectSettingsDialog(ui_project,w); settings.show(); settle(); assert settings.fps.findText('120')>=0; assert settings.grab().save(str(output/f'fps-{theme}.png')); settings.reject(); settle()
         target=output/'ui-120.mp4'; export(ui_project,str(target),PRESETS['TikTok · Fast'],False,'CPU',export_audio=False)
         with av.open(str(target)) as movie:
@@ -97,6 +99,8 @@ def run(output):
         started=time.perf_counter(); draw(scene,.75,(1080,1920),30); report['full_frame_draw_ms']=round((time.perf_counter()-started)*1000,2)
         before=p.to_dict(); p.save(output/'editable.kcut'); loaded=Project.load(output/'editable.kcut'); assert loaded.timeline[0].graphic_data==p.timeline[0].graphic_data; report['roundtrip']=True
         assert 'motion_composition' in w.assistant_connection.api.call_get_capabilities(); report['mcp_schema']=True
+        from .motion_workbench_diagnostics import check
+        check(w,output,report,settle)
         report['passed']=True
     except Exception:report['passed']=False; report['error']=traceback.format_exc()
     finally:

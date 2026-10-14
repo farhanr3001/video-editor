@@ -36,6 +36,7 @@ class ValueRow(QWidget):
         layout.addWidget(self.slider,1); layout.addWidget(self.spin)
         reset=QToolButton(); self.reset=reset; reset.setIcon(lucide_icon("rotate-ccw","#96989f",13)); reset.setToolTip("Reset to default"); layout.addWidget(reset)
         self.low=low; self.high=high; self.default=default
+        self._typed_changed=False; self.spin.editingFinished.connect(self.finish_numeric_edit)
         self.spin.valueChanged.connect(self.change); self.slider.valueChanged.connect(lambda v:self.spin.setValue(self.slider_to_value(v)))
         self.spin.scrubStarted.connect(lambda:self.scrub_history(True)); self.spin.scrubFinished.connect(lambda:self.scrub_history(False))
         self.slider.sliderPressed.connect(lambda:self.scrub_history(True)); self.slider.sliderReleased.connect(lambda:self.scrub_history(False))
@@ -60,11 +61,17 @@ class ValueRow(QWidget):
         self.spin.setValue(value); self.slider.setValue(self.value_to_slider(value))
         self.spin.blockSignals(False); self.slider.blockSignals(False); self.updating=False
         if self.mixed:self.spin.lineEdit().setText("…")
+    def finish_numeric_edit(self):
+        if self.spin._committing_typed_value and not self._typed_changed:self.change(self.spin.value(),True)
+        self._typed_changed=False
+
     def change(self,value,reset=False):
         if self.updating:return
         delta=value-self.previous; self.previous=value
         self.slider.blockSignals(True); self.slider.setValue(self.value_to_slider(value)); self.slider.blockSignals(False)
-        self.edited.emit(value,float("nan") if reset else delta)
+        typed=self.spin._typing or self.spin._committing_typed_value
+        if typed:self._typed_changed=True
+        self.edited.emit(value,float("nan") if reset or typed else delta)
 
     def value_to_slider(self,value):
         if self.low<self.default<self.high:
@@ -144,7 +151,7 @@ class PropertiesPanel(QWidget):
         self.zoom_x=compact(.01,10,1,.01); self.zoom_y=compact(.01,10,1,.01); grid.addWidget(QLabel("Zoom",alignment=Qt.AlignRight|Qt.AlignVCenter),0,0); grid.addWidget(QLabel("X"),0,1,alignment=Qt.AlignRight|Qt.AlignVCenter); grid.addWidget(self.zoom_x,0,2)
         self.link=QToolButton(); self.link.setCheckable(True); self.link.setChecked(True); self.link.setIcon(lucide_icon("link")); self.link.setToolTip("Link Zoom X/Y"); grid.addWidget(self.link,0,3); grid.addWidget(QLabel("Y"),0,4,alignment=Qt.AlignRight|Qt.AlignVCenter); grid.addWidget(self.zoom_y,0,5)
         zoom_reset=QToolButton(); zoom_reset.setIcon(lucide_icon("rotate-ccw","#96989f",13)); zoom_reset.setToolTip("Reset Zoom"); zoom_reset.clicked.connect(self.reset_zoom); grid.addWidget(zoom_reset,0,6)
-        self.bindings.extend([("transform.scale",self.zoom_x),("transform.scale_y",self.zoom_y)]); self.zoom_x.edited.connect(lambda v,d:self.edit_zoom("scale",v)); self.zoom_y.edited.connect(lambda v,d:self.edit_zoom("scale_y",v)); self.link.toggled.connect(self.set_link)
+        self.bindings.extend([("transform.scale",self.zoom_x),("transform.scale_y",self.zoom_y)]); self.zoom_x.edited.connect(lambda v,d:self.edit_zoom("scale",v,d)); self.zoom_y.edited.connect(lambda v,d:self.edit_zoom("scale_y",v,d)); self.link.toggled.connect(self.set_link)
         pair(1,"Position","position_x","position_y",-10000,10000); slider_row(2,"Rotation Angle","transform.rotation",-180,180,0,.1); pair(3,"Anchor Point","transform.anchor_x","transform.anchor_y",-4000,4000); slider_row(4,"Pitch","transform.pitch",-80,80,0,.1); slider_row(5,"Yaw","transform.yaw",-80,80,0,.1)
         flips=QWidget(); row=QHBoxLayout(flips); row.setContentsMargins(0,0,0,0); row.setSpacing(7)
         self.flip_h=QToolButton(); self.flip_v=QToolButton()
@@ -429,7 +436,12 @@ class PropertiesPanel(QWidget):
         if self.updating:return
         audio=attr in {"gain_db","pan","pitch_semitones","pitch_cents"}
         self.window.flush_text_edit()
-        for item in self.targets(audio):self.set_property(item,attr,value)
+        targets=self.targets(audio)
+        for item in targets:
+            desired=self.property_value(item,attr)+delta if len(targets)>1 and math.isfinite(delta) else value
+            row=next((r for a,r in self.bindings+self.audio_bindings+self.color_bindings if a==attr),None)
+            if row:desired=max(row.low,min(row.high,desired))
+            self.set_property(item,attr,desired)
         self.changed.emit()
 
     def edit_bool(self,attr,value):
@@ -445,18 +457,20 @@ class PropertiesPanel(QWidget):
         if self.updating:return
         for item in self.targets(False):item.transform.scale=1.; item.transform.scale_y=1.
         self.zoom_x.set_values([1.]); self.zoom_y.set_values([1.]); self.changed.emit()
-    def edit_zoom(self,attr,value):
+    def edit_zoom(self,attr,value,delta=float("nan")):
         if self.updating:return
         for item in self.targets(False):
             transform=item.transform; x=transform.scale; y=transform.effective_scale_y
+            current=x if attr=='scale' else y
+            desired=max(.01,min(10,current+delta if math.isfinite(delta) else value))
             if transform.scale_linked:
-                factor=value/(x if attr=='scale' else y)
+                factor=desired/current
                 factor=max(.01/min(x,y),min(10/max(x,y),factor))
                 transform.scale=x*factor; transform.scale_y=y*factor
             else:
                 # Materialize the implicit Y before changing X independently.
                 transform.scale_y=y
-                setattr(transform,attr,value)
+                setattr(transform,attr,desired)
         targets=self.targets(False)
         self.zoom_x.set_values([i.transform.scale for i in targets])
         self.zoom_y.set_values([i.transform.effective_scale_y for i in targets])
@@ -1464,6 +1478,9 @@ class PropertiesPanel(QWidget):
         item = self.window.project.item_by_id(self.item_id)
         if not item or item.role != "graphic": return
         new_dur = max(0.05, float(val))
+        if item.graphic_data.get('preset'):
+            from .motion_presets import update
+            item.graphic_data=update(item.graphic_data,{},item.in_point+new_dur*item.speed)
         item.duration = new_dur
         kind = getattr(item, "graphic_type", "").lower()
         if "timer" in kind:
@@ -1472,6 +1489,14 @@ class PropertiesPanel(QWidget):
                 data["duration"] = new_dur
                 self.gt_dur.set_values([new_dur])
         self.changed.emit()
+
+    @edit_only
+    def edit_motion_preset(self,values):
+        if self.updating:return
+        item=self.window.project.item_by_id(self.item_id)
+        if not item or self.window.project.track_states.get(item.track,{}).get('locked'):return
+        from .motion_presets import update
+        item.graphic_data=update(item.graphic_data,values); self.changed.emit(); self.refresh_graphic()
 
     @edit_only
     def _timer_mode_changed(self, mode):
@@ -1563,6 +1588,8 @@ class PropertiesPanel(QWidget):
         self.motion_edit.clicked.connect(lambda:self.window.open_motion_composition(self.item_id))
         top_layout.addRow(self.motion_edit)
         root.addWidget(top_box)
+        from .motion_preset_controls import PresetControls
+        self.motion_preset=PresetControls(self.edit_motion_preset,panel); root.addWidget(self.motion_preset)
 
         def color_btn(key, default="#00e5ff"):
             btn = QPushButton()
@@ -1751,7 +1778,9 @@ class PropertiesPanel(QWidget):
 
         self.graphic_type_badge.setText(item.graphic_type or "Graphic")
         self.graphic_duration.set_values([item.duration])
-        self.motion_edit.setVisible(kind in ('motion','motion composition'))
+        from .motion_presets import is_motion
+        self.motion_edit.setVisible(is_motion(item.graphic_type))
+        self.motion_preset.refresh(data)
 
         self.sec_circle.setVisible("circle" in kind)
         self.sec_arrow.setVisible("arrow" in kind)

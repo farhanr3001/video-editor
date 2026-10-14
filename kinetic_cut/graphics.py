@@ -22,6 +22,8 @@ GRAPHICS_CATALOG: dict[str, dict[str, Any]] = {
     "Progress Bar": {"kind": "progress_bar", "default_duration": 5.0},
     "Callout Badge": {"kind": "callout_badge", "default_duration": 2.5},
 }
+from .motion_presets import PRESETS
+GRAPHICS_CATALOG.update({name:{'kind':'motion','default_duration':4.0} for name in PRESETS})
 
 DEFAULT_GRAPHIC_DATA: dict[str, dict[str, Any]] = {
     "circle": {
@@ -116,6 +118,9 @@ DEFAULT_GRAPHIC_DATA: dict[str, dict[str, Any]] = {
 
 
 def default_graphic_data(kind: str) -> dict[str, Any]:
+    if kind in PRESETS:
+        from .motion_presets import build
+        return build(kind)
     if kind.lower() in ('motion','motion composition'):
         from .motion import default_scene
         return {'scene':default_scene()}
@@ -230,6 +235,7 @@ def draw_graphic(
 
     data = getattr(item, "graphic_data", {}) or {}
     kind = getattr(item, "graphic_type", "circle").lower()
+    if getattr(item,'graphic_type','') in PRESETS:kind='motion composition'
 
     painter.save()
     if kind in ('motion','motion composition'):painter.setClipRect(frame_rect,Qt.IntersectClip)

@@ -1029,9 +1029,10 @@ def build_workspace(w):
     for attr,icon,mode,hint in [("select_tool","mouse-pointer-2","select","Selection · A"),("blade_tool","razor","blade","Cut/Split · B")]:
         b=tool_button(icon,lambda checked=False,m=mode:w.set_timeline_tool(m),hint,True); setattr(w,attr,b); w.tool_group.addButton(b); bar.addWidget(b)
     w.select_tool.setChecked(True)
-    w.keyframe_button=button('◇',w.open_keyframes,quiet=True); w.keyframe_button.setToolTip('Manage keyframes for the selected image/video clip'); w.keyframe_button.setEnabled(False); bar.addWidget(w.keyframe_button)
     w.transform_box_tool=tool_button("box-select",lambda checked:w.preview.set_transform_controls_visible(checked and not w.transport.playing and w.current_page==0),"Show on-screen transform controls",True); w.transform_box_tool.setChecked(True); bar.insertWidget(1,w.transform_box_tool)
     w.crop_tool=tool_button("crop",lambda:w.frame_source(w.timeline.selected_id),"Crop selected clip… · C"); bar.insertWidget(2,w.crop_tool)
+    from .timeline_retime_control import TimelineRetimeButton
+    w.retime_button=TimelineRetimeButton(w); bar.addWidget(w.retime_button)
     def toggle_links(checked):
         w.timeline.linked_selection=checked
         ids=w.timeline.expanded(w.timeline.selected_ids) if checked else ({w.timeline.selected_id} if w.timeline.selected_id else set())
@@ -1040,7 +1041,7 @@ def build_workspace(w):
     w.snap_tool=tool_button("magnet",w.toggle_snapping,"Magnetic Snapping · N",True); w.snap_tool.setChecked(True); bar.addWidget(w.snap_tool); bar.addWidget(w.link_toggle)
     undo_tool=tool_button("rotate-ccw",w.undo,"Undo · Ctrl+Z"); redo_tool=tool_button("rotate-cw",w.redo,"Redo · Ctrl+Shift+Z")
     bar.addWidget(undo_tool); bar.addWidget(redo_tool)
-    w.timeline_edit_tools=[w.select_tool,w.transform_box_tool,w.crop_tool,w.blade_tool,w.link_toggle,w.snap_tool,undo_tool,redo_tool]
+    w.timeline_edit_tools=[w.select_tool,w.transform_box_tool,w.crop_tool,w.blade_tool,w.retime_button,w.link_toggle,w.snap_tool,undo_tool,redo_tool]
     w.review_badge=QLabel("REVIEW ONLY · Scrub or play to preview"); w.review_badge.setObjectName("reviewBadge"); w.review_badge.hide(); bar.addWidget(w.review_badge); bar.addStretch()
     w.timeline_zoom=SafeSlider(Qt.Horizontal); w.timeline_zoom.setRange(0,1000); w.timeline_zoom.setValue(round(1000*math.log(45/.6)/math.log(400))); w.timeline_zoom.setFixedWidth(110)
     bar.addWidget(tool_button("zoom-out",lambda:w.timeline_zoom.setValue(w.timeline_zoom.value()-50),"Timeline zoom out")); bar.addWidget(w.timeline_zoom); bar.addWidget(tool_button("zoom-in",lambda:w.timeline_zoom.setValue(w.timeline_zoom.value()+50),"Timeline zoom in"))
@@ -1048,6 +1049,7 @@ def build_workspace(w):
     w.monitor_control=MonitorControl(w); bar.addWidget(w.monitor_control); layout.addLayout(bar)
     w.timeline=TimelineWidget(); w.timeline.itemSelected.connect(w.select_item); w.timeline.playheadChanged.connect(w.seek); w.timeline.scrubFinished.connect(w.finish_scrub); w.timeline.itemChanged.connect(lambda _:w.model_changed()); w.timeline.mediaDropped.connect(w.add_media_to_track); w.timeline.mediaBatchDropped.connect(w.add_media_batch); w.timeline.titleDropped.connect(w.add_title_object); w.timeline.commandRequested.connect(w.timeline_command); w.timeline.bladeRequested.connect(w.split_at); w.timeline.captionBladeRequested.connect(w.split_caption_at); w.timeline.effectDropped.connect(lambda name,id:w.apply_effect_to(name,id)); w.timeline.captionSelected.connect(w.select_caption); w.timeline.transitionSelected.connect(w.select_transition)
     w.timeline.setMinimumHeight(140); tl.setMinimumHeight(185)
+    for signal in (w.timeline.itemSelected,w.timeline.selectionChanged,w.timeline.captionSelected,w.timeline.transitionSelected):signal.connect(w.retime_button.update_state)
     w.timeline.power_bin_target=w.media_panel.power_bin_target; w.timeline.power_bin_drag_handler=w.media_panel.begin_timeline_drag
     w.timeline.media_resolver=w.media_panel.resolve_media
     from .external_drop import FileDropController

@@ -31,6 +31,11 @@ if __name__ == "__main__":
     install_desktop_process_policy()
     import multiprocessing
     multiprocessing.freeze_support()
+    if len(sys.argv)==4 and sys.argv[1]=='--performance-selftest':
+        from kinetic_cut.performance_diagnostics import run
+        from kinetic_cut import close_guard
+        close_guard.DIAGNOSTIC_CLEANUP=True
+        sys.exit(run(sys.argv[2],sys.argv[3]))
     if len(sys.argv)>1 and sys.argv[1].endswith('-selftest') and sys.argv[1]!='--close-guard-selftest':
         from kinetic_cut import close_guard
         close_guard.DIAGNOSTIC_CLEANUP=True  # Existing diagnostic fixture shutdown only.

@@ -1,6 +1,7 @@
 """Effect metadata shared by the library, drop validation and render pipelines."""
 from .visual_fx import VISUAL_FX_NAMES, VISUAL_FX_SET, VISUAL_FX_SUBSECTIONS
 from .voice_effects import NAMES as VOICE_NAMES, DESCRIPTIONS as VOICE_DESCRIPTIONS
+from .motion_presets import PRESETS
 from .transitions import (
     TRANSITION_NAMES,
     TRANSITION_SET,
@@ -21,7 +22,7 @@ CATALOG = {
     "Colour": ["Black & White", "Light Boost", "Cinematic Contrast", "Warm Tone", "Cool Tone", "Sepia", "Channel Swap"],
     "Titles": ["Text", "Headline"],
     "Audio": [*VOICE_NAMES, "Noise Clean", "Voice Clarity", "Low Cut", "Auto Duck", "Fade In / Out", "Cut curse words", "Remove Silence", "Vocal Only"],
-    "Graphics": ["Motion Composition", "Circle", "Pointing Arrow", "Square", "Rectangle", "Timer / Countdown", "Speech Bubble / Quote Card", "Progress Bar", "Callout Badge"],
+    "Graphics": ["Motion Composition", *PRESETS, "Circle", "Pointing Arrow", "Square", "Rectangle", "Timer / Countdown", "Speech Bubble / Quote Card", "Progress Bar", "Callout Badge"],
 }
 # Browser-only grouping: keep the established Face Filters catalog and effect
 # names intact so saved projects, drag/drop, and automation remain compatible.
@@ -35,6 +36,7 @@ TITLES = set(CATALOG["Titles"])
 GRAPHICS = set(CATALOG["Graphics"])
 
 EFFECT_ICONS = {
+    **{name:'layers' for name in PRESETS},
     "Object Tracking": "crosshair",
     "Puppy Ears & Nose": "smile",
     "Cat Ears & Whiskers": "smile",
@@ -102,6 +104,7 @@ MATRICES = {
 }
 ADJUSTABLE = set(MATRICES) | {"Voice Clarity", "Low Cut"} | set(VOICE_NAMES)
 DESCRIPTIONS = {
+    **{name:info['description'] for name,info in PRESETS.items()},
     **VOICE_DESCRIPTIONS,
     "Object Tracking": "Follow a selected region with censor blur, pixelation, a censor bar, arrows, outlines, labels, an image or a following crop. Analyse locally and refine with correction points.",
     **TRANSITION_DESCRIPTIONS,

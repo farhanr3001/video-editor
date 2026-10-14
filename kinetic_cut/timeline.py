@@ -37,6 +37,7 @@ class TimelineWidget(BaseTimeline):
         self._waveform_pixmaps={}; self._scaled_thumbnails={}; self._frame_track_rects=None; self._frame_sec_rects=None; self.alt_drag=False
         self._vfx_flash_item_id = None
         self._timeline_backing=None; self._playhead_damage=QRegion(); self._painted_marquee=QRegion()
+        self._content_damage=QRegion()
         self._audio_levels={}; self._meter_damage=QRegion()
         super().__init__()
         self._vfx_flash_timer = QTimer(self)
@@ -623,17 +624,33 @@ class TimelineWidget(BaseTimeline):
                      and self._timeline_backing.devicePixelRatioF()==scale
                      and not (self._playhead_damage|self._meter_damage).isEmpty()
                      and event.region().subtracted(self._playhead_damage|self._meter_damage).isEmpty()
+                     and event.region().intersected(self._content_damage).isEmpty()
                      and self.drag_mode in {'','marquee','playhead'} and self.snap_guide is None)
         self._playhead_damage=self._playhead_damage.subtracted(event.region())
         self._meter_damage=self._meter_damage.subtracted(event.region())
+        self._content_damage=self._content_damage.subtracted(event.region())
         if cursor_only:
             p=QPainter(viewport); p.drawPixmap(0,0,self._timeline_backing)
             self._paint_clock(p,pal); self._paint_selection_overlay(p); self._paint_audio_levels(p); return
         # Keep the static content separate from the clock/cursor. Any ordinary
-        # update (edits, hover, selection, scroll, waveforms, theme, resize) rebuilds
-        # it. Only explicit, narrow update_playhead damage may reuse this raster.
-        backing=QPixmap(size); backing.setDevicePixelRatio(scale)
-        p=QPainter(backing); p.setRenderHint(QPainter.Antialiasing); p.fillRect(viewport.rect(),QColor(pal.get("timeline_bg", "#191a1e"))); p.setFont(QFont("Segoe UI",9))
+        # update rebuilds its damaged content; explicit cursor/meter damage above
+        # may reuse the raster without redrawing any clips.
+        partial=(self._timeline_backing is not None and self._timeline_backing.size()==size
+                 and self._timeline_backing.devicePixelRatioF()==scale
+                 and event.region()!=QRegion(viewport.rect()))
+        backing=QPixmap(size)
+        backing.setDevicePixelRatio(scale)
+        p=QPainter(backing); p.setRenderHint(QPainter.Antialiasing)
+        dirty=QRegion(viewport.rect())
+        if partial:
+            # Include neighbouring antialiased path edges in the work list.
+            # Commit only the original damage after rasterization.
+            dirty=QRegion()
+            for rect in event.region():dirty|=QRegion(rect.adjusted(-3,-3,3,3))
+            # Rasterize without a complex damage clip; Qt's antialiased path
+            # clipping at fractional device scales can otherwise blend edges
+            # against retained pixels. The final copy is hard-clipped instead.
+        p.fillRect(viewport.rect(),QColor(pal.get("timeline_bg", "#191a1e"))); p.setFont(QFont("Segoe UI",9))
         if not self.project:
             p.end(); screen=QPainter(viewport); screen.drawPixmap(0,0,backing); return
         self._frame_sec_rects=self._sections()
@@ -644,8 +661,10 @@ class TimelineWidget(BaseTimeline):
             if k:link_counts[k]=link_counts.get(k,0)+1
         try:
             w=self.viewport().width(); h=self.viewport().height()
-            dirty=QRegion(viewport.rect())
-            p.save(); p.setClipRect(QRectF(0,self.RULER_HEIGHT,w,h-self.RULER_HEIGHT))
+            # Keep nested content clips inside the fixed track/section bounds.
+            # The scratch pixmap has no QWidget system damage clip: partial
+            # results are committed to the retained raster below.
+            p.save(); p.setClipRect(QRectF(0,self.RULER_HEIGHT,w,h-self.RULER_HEIGHT),Qt.IntersectClip)
             for track in self.tracks():
                 r=self.track_rect(track); audio=self._section_name(track)=="audio"; subtitle=track=="subtitle_1"
                 p.save(); p.setClipRect(self.section_rect(track),Qt.IntersectClip)
@@ -656,10 +675,10 @@ class TimelineWidget(BaseTimeline):
             for divider in (self._subtitle_divider_rect(),self._av_divider_rect()):
                 if divider.isEmpty():continue
                 p.fillRect(divider,QColor(pal.get("timeline_divider", "#0b0c0f"))); p.setPen(QPen(QColor(pal.get("border_subtle", "#464950")),1)); p.drawLine(0,round(divider.center().y()),w,round(divider.center().y()))
-            # Replace the broad track-header clip with a hard media-area boundary.
+            # Narrow the track-header clip to a hard media-area boundary.
             # Clip names, thumbnails, fades and captions alike so horizontal zoom or
             # scrolling can never paint over the fixed track controls.
-            p.setClipRect(QRectF(self.LABEL_WIDTH+1,self.RULER_HEIGHT,max(0,w-self.LABEL_WIDTH-1),h-self.RULER_HEIGHT),Qt.ReplaceClip)
+            p.setClipRect(QRectF(self.LABEL_WIDTH+1,self.RULER_HEIGHT,max(0,w-self.LABEL_WIDTH-1),h-self.RULER_HEIGHT),Qt.IntersectClip)
             painted=self.project.timeline
             damage=dirty.intersected(QRegion(QRect(self.LABEL_WIDTH,self.RULER_HEIGHT,w-self.LABEL_WIDTH,h-self.RULER_HEIGHT))).boundingRect()
             visible_start=self.time_for_x(max(self.LABEL_WIDTH-6,damage.left()-6)); visible_end=self.time_for_x(min(w+6,damage.right()+6))
@@ -675,7 +694,7 @@ class TimelineWidget(BaseTimeline):
                 ghost=getattr(item,"_drag_ghost",False)
                 if self.move_preview and item.id in self.snapshots and not ghost and not self.alt_drag:continue
                 r=self.item_rect(item)
-                if not dirty.intersects(r.toAlignedRect()):continue
+                if not dirty.intersects(r.toAlignedRect().adjusted(-2,-2,2,2)):continue
                 item_clip=self.section_rect(item.track).intersected(QRectF(self.LABEL_WIDTH+1,self.RULER_HEIGHT,max(0,w-self.LABEL_WIDTH-1),h-self.RULER_HEIGHT))
                 if not r.intersects(item_clip):continue
                 p.save(); p.setClipRect(item_clip,Qt.IntersectClip)
@@ -750,17 +769,21 @@ class TimelineWidget(BaseTimeline):
                 if r.width()>=26 and (audio or item.id==self.hover_id or item.id in self.selected_ids or item.fade_in or item.fade_out):
                     p.setPen(QPen(QColor("#faf0c2"),1))
                     fi=min(r.width(),item.fade_in*self.pixels_per_second); fo=min(r.width(),item.fade_out*self.pixels_per_second)
+                    span=r.bottom()-r.top()-3
+                    ramp_in=QPainterPath(r.bottomLeft()); ramp_in.cubicTo(QPointF(r.left()+fi*.3,r.bottom()-span*.35),QPointF(r.left()+fi*.7,r.top()+3+span*.25),QPointF(r.left()+fi,r.top()+3))
+                    ramp_out=QPainterPath(QPointF(r.right()-fo,r.top()+3)); ramp_out.cubicTo(QPointF(r.right()-fo*.7,r.top()+3+span*.25),QPointF(r.right()-fo*.3,r.bottom()-span*.35),r.bottomRight())
                     p.save(); p.setPen(Qt.NoPen); p.setBrush(QColor(0,0,0,125))
                     if fi>0:
-                        shade=QPainterPath(); shade.moveTo(r.topLeft()); shade.lineTo(r.bottomLeft()); shade.lineTo(QPointF(r.left()+fi,r.top()+3)); shade.closeSubpath(); p.drawPath(shade)
+                        shade=QPainterPath(ramp_in); shade.lineTo(r.topLeft()); shade.closeSubpath(); p.drawPath(shade)
                     if fo>0:
-                        shade=QPainterPath(); shade.moveTo(QPointF(r.right()-fo,r.top()+3)); shade.lineTo(r.topRight()); shade.lineTo(r.bottomRight()); shade.closeSubpath(); p.drawPath(shade)
+                        shade=QPainterPath(ramp_out); shade.lineTo(r.topRight()); shade.closeSubpath(); p.drawPath(shade)
                     p.restore()
-                    p.drawLine(r.bottomLeft(),QPointF(r.left()+fi,r.top()+3)); p.drawLine(QPointF(r.right()-fo,r.top()+3),r.bottomRight())
+                    if fi>0:p.drawPath(ramp_in)
+                    if fo>0:p.drawPath(ramp_out)
                     for mode,x in (("fade_in",r.left()+max(5,fi)),("fade_out",r.right()-max(5,fo))):
                         if r.width()<34:continue
                         active=self.drag_mode==mode and item.id==self.selected_id
-                        p.fillRect(QRectF(x-4,r.top()+1,8,8),QColor("#ef6657" if active else "#f3ead1"))
+                        p.save(); p.setRenderHint(QPainter.Antialiasing); p.setPen(QPen(QColor(0,0,0,160),1)); p.setBrush(QColor("#ef6657" if active else "#f3ead1")); p.drawEllipse(QPointF(x,r.top()+5),4,4); p.restore()
                 k=item.group_id if item.link_id is None else item.link_id
                 is_linked=bool(k and link_counts.get(k,0)>1)
                 if text_r.width()>=44:
@@ -877,7 +900,7 @@ class TimelineWidget(BaseTimeline):
             for caption in self.caption_painted if self.caption_painted is not None else self.project.captions:
                 if caption.end<visible_start or caption.start>visible_end:continue
                 r=self.caption_rect(caption)
-                if not dirty.intersects(r.toAlignedRect()):continue
+                if not dirty.intersects(r.toAlignedRect().adjusted(-2,-2,2,2)):continue
                 p.save(); p.setClipRect(self._sections()["subtitle"],Qt.IntersectClip)
                 shape=QPainterPath(); shape.addRoundedRect(r,3,3); p.setClipPath(shape,Qt.IntersectClip)
                 base=QColor("#b8aa7c"); p.fillRect(r,base.lighter(112) if caption.id in self.selected_caption_ids else base); p.setPen(QPen(QColor("#08090b"),1)); p.setBrush(Qt.NoBrush); p.drawRoundedRect(r.adjusted(.5,.5,-.5,-.5),3,3)
@@ -905,7 +928,7 @@ class TimelineWidget(BaseTimeline):
                 if not self.project.track_states.get(trans.track,{}).get("visible",True):continue
                 if trans.start+trans.duration<visible_start or trans.start>visible_end:continue
                 r_trans=self.transition_rect(trans)
-                if r_trans.isEmpty() or not dirty.intersects(r_trans.toAlignedRect()):continue
+                if r_trans.isEmpty() or not dirty.intersects(r_trans.toAlignedRect().adjusted(-2,-2,2,2)):continue
                 item_clip=self.section_rect(trans.track).intersected(QRectF(self.LABEL_WIDTH+1,self.RULER_HEIGHT,max(0,w-self.LABEL_WIDTH-1),h-self.RULER_HEIGHT))
                 if not r_trans.intersects(item_clip):continue
                 p.save(); p.setClipRect(item_clip,Qt.IntersectClip)
@@ -1004,13 +1027,17 @@ class TimelineWidget(BaseTimeline):
             if self.roll_hover:
                 left,right=self.roll_hover; boundary=self.x_for_time(right.start)
                 rect=self.track_rect(left.track).intersected(self.section_rect(left.track))
-                p.save(); p.setClipRect(rect.intersected(QRectF(self.LABEL_WIDTH+1,self.RULER_HEIGHT,w-self.LABEL_WIDTH-1,h-self.RULER_HEIGHT)))
+                p.save(); p.setClipRect(rect.intersected(QRectF(self.LABEL_WIDTH+1,self.RULER_HEIGHT,w-self.LABEL_WIDTH-1,h-self.RULER_HEIGHT)),Qt.IntersectClip)
                 p.fillRect(QRectF(boundary-4,rect.top()+3,8,max(0,rect.height()-6)),QColor(85,235,132,90))
                 p.setPen(QPen(QColor('#55eb84'),2)); p.drawLine(QPointF(boundary-2,rect.top()+3),QPointF(boundary-2,rect.bottom()-3)); p.drawLine(QPointF(boundary+2,rect.top()+3),QPointF(boundary+2,rect.bottom()-3)); p.restore()
         finally:
             self._frame_sec_rects=None
             self._frame_track_rects=None
             p.end()
+        if partial:
+            merged=QPixmap(self._timeline_backing)
+            commit=QPainter(merged); commit.setClipRegion(event.region())
+            commit.drawPixmap(0,0,backing); commit.end(); backing=merged
         self._timeline_backing=backing
         screen=QPainter(viewport); screen.drawPixmap(0,0,backing); self._paint_clock(screen,pal); self._paint_selection_overlay(screen); self._paint_audio_levels(screen)
 
@@ -1168,6 +1195,8 @@ class TimelineWidget(BaseTimeline):
             self.viewport().setCursor(self._trim_cursor("left" if self.drag_mode=="retime_left" else "right"))
         elif hit.id not in self.retime_ids and pos.y()-r.top()<12 and min(abs(pos.x()-fi),abs(pos.x()-fo))<7:
             self.drag_mode="fade_in" if abs(pos.x()-fi)<abs(pos.x()-fo) else "fade_out"
+            endpoint=r.left()+hit.fade_in*self.pixels_per_second if self.drag_mode=='fade_in' else r.right()-hit.fade_out*self.pixels_per_second
+            self._fade_drag_offset=pos.x()-endpoint; self.viewport().setCursor(Qt.SizeHorCursor)
         elif pos.x()-r.left()<8 and 12<=pos.y()-r.top()<=r.height()-12:
             self.drag_mode="trim_left"; self.viewport().setCursor(self._trim_cursor("left"))
         elif r.right()-pos.x()<8 and 12<=pos.y()-r.top()<=r.height()-12:
@@ -1351,12 +1380,17 @@ class TimelineWidget(BaseTimeline):
             delta=max(-min(i.start for i in self.snapshots.values()),delta)
             self.move_preview=[]; self.set_provisional(provisional if used_provisional else "")
             for old in self.snapshots.values():
-                item=copy.deepcopy(old); item._drag_ghost=True
+                # Only placement and the ephemeral ghost marker change during a
+                # move. The press snapshot already detached nested motion scenes,
+                # effects and curves; copying those on every pointer event is
+                # unnecessary. Commit still deep-copies the accepted placements.
+                item=copy.copy(old); item._drag_ghost=True
                 item.start=old.start+delta
                 if old.track in tracks:item.track=destinations[destinations.index(old.track)+shift]
                 self.move_preview.append(item)
         elif self.drag_mode in {"fade_in","fade_out"}:
-            value=self.time_for_x(pos.x())-hit.start if self.drag_mode=="fade_in" else hit.start+hit.duration-self.time_for_x(pos.x())
+            x=pos.x()-getattr(self,'_fade_drag_offset',0)
+            value=self.time_for_x(x)-hit.start if self.drag_mode=="fade_in" else hit.start+hit.duration-self.time_for_x(x)
             for item in self.selected_items():
                 if item.id in self.snapshots:setattr(item,self.drag_mode,max(0,min(item.duration,value)))
             QToolTip.showText(event.globalPosition().toPoint(),f"{self.drag_mode.replace('_',' ').title()}: {max(0,value):.2f} s",self.viewport())
@@ -1512,8 +1546,8 @@ class TimelineWidget(BaseTimeline):
     def dragEnterEvent(self,event):
         if self.read_only:event.ignore(); return
         if event.mimeData().hasFormat("application/x-kinetic-effect"):
-            from .effects import DESCRIPTIONS
-            if bytes(event.mimeData().data("application/x-kinetic-effect")).decode(errors="replace") in DESCRIPTIONS:event.acceptProposedAction()
+            from .effects import DESCRIPTIONS, GRAPHICS, TITLES
+            if bytes(event.mimeData().data("application/x-kinetic-effect")).decode(errors="replace") in set(DESCRIPTIONS)|set(GRAPHICS)|set(TITLES):event.acceptProposedAction()
             else:event.ignore()
         elif event.mimeData().hasFormat("application/x-kinetic-media-id") or event.mimeData().hasFormat("application/x-kinetic-media-ids") or event.mimeData().hasUrls():
             self.preview_incoming(event)

@@ -75,7 +75,7 @@ class MotionUIDesignEditorTests(unittest.TestCase):
         app=QApplication.instance() or QApplication([]); w=MainWindow(); w.show(); w.autosave_timer.stop()
         try:
             p=Project(timeline=[TimelineItem('ui','','video_1',0,2,role='graphic',graphic_type='Motion Composition',graphic_data={'scene':fixture()})]); w.set_project(p); before=copy.deepcopy(w.project.timeline[0])
-            d=MotionEditor(w,w.project.timeline[0]); d.show(); d.node_id='typing'; d.refresh(); self.assertTrue(d.caret.isVisible()); d.text_align.setCurrentText('right'); d.text_mode.setCurrentText('counter'); self.assertTrue(d.spins['number'].isVisible()); self.assertFalse(d.caret.isVisible())
+            d=MotionEditor(w,w.project.timeline[0]); d.show(); d.node_id='typing'; d.refresh(); d.property_tabs.setCurrentIndex(1); self.assertTrue(d.caret.isVisible()); d.text_align.setCurrentText('right'); d.text_mode.setCurrentText('counter'); self.assertTrue(d.spins['number'].isVisible()); self.assertFalse(d.caret.isVisible())
             d.spins['number_decimals'].setValue(2); d.preview.repaint(); d.reject(); self.assertEqual(w.project.timeline[0],before)
             d=MotionEditor(w,w.project.timeline[0]); d.show(); d.shadow.setChecked(False); d.accept(); self.assertFalse(w.project.timeline[0].graphic_data['scene']['nodes'][0]['shadow']['enabled']); w.undo(); self.assertEqual(w.project.timeline[0],before)
             settings=ProjectSettingsDialog(w.project,w); self.assertGreaterEqual(settings.fps.findText('120'),0); settings.fps.setCurrentText('120'); self.assertEqual(settings.values()[1].fps,120); settings.reject()

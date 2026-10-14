@@ -6,6 +6,7 @@ for removal. In particular, analysis is referenced by saved projects.
 from __future__ import annotations
 
 import os
+import logging
 from pathlib import Path
 
 from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel,
@@ -84,6 +85,20 @@ def clear(categories, root: Path = CACHE_DIR) -> tuple[int, int]:
     return count, size
 
 
+def clear_waveforms_on_exit(root=None):
+    """Run only at terminal shutdown, after all retained writers have finished."""
+    root=Path(root) if root is not None else CACHE_DIR
+    folder=root/'waveforms'
+    try:
+        if not folder.is_dir() or folder.is_symlink():return (0,0)
+        # A Windows junction must not turn this into cleanup outside the cache.
+        if not folder.resolve().is_relative_to(root.resolve()):return (0,0)
+        return clear(('waveforms',),root)
+    except (OSError,ValueError):
+        logging.exception('Could not clear waveform cache on exit')
+        return (0,0)
+
+
 def size_text(value: int) -> str:
     unit = 'B'
     number = float(value)
@@ -106,7 +121,7 @@ class CacheManagerDialog(QDialog):
         title = QLabel('Cache Manager')
         set_ui_style(title, 'font-size:18px; font-weight:600;')
         layout.addWidget(title)
-        note = QLabel('Free space used by previews that Kinetic Cut can rebuild. Projects, original media, recovery copies, generated speech, and face analysis are protected.')
+        note = QLabel('Free space used by previews that Kinetic Cut can rebuild. Audio waveform files are cleared automatically on exit and rebuilt when needed. Projects, original media, recovery copies, generated speech, and face analysis are protected.')
         note.setWordWrap(True)
         set_ui_style(note, 'color:@text_sub;')
         layout.addWidget(note)
@@ -173,7 +188,8 @@ class CacheManagerDialog(QDialog):
         window = self.window_
         from .component_ui import active_downloads
         from PySide6.QtCore import QProcess
-        if window._workers or getattr(window.delivery, 'running', False) or window.transport.playing or active_downloads or getattr(window,'_vision_busy',False) or getattr(window,'_vocal_busy',False):
+        writing=any(not getattr(job,'preview_decoder',False) for job in window._workers)
+        if writing or getattr(window.delivery, 'running', False) or window.transport.playing or active_downloads or getattr(window,'_vision_busy',False) or getattr(window,'_vocal_busy',False):
             QMessageBox.information(self, 'Cache busy', 'Stop playback, transfers and rendering, and wait for background jobs to finish before clearing caches.')
             return
         summary = scan()
@@ -190,7 +206,17 @@ class CacheManagerDialog(QDialog):
                 events().changed.emit()
             count, released = clear(selected) if selected else (0, 0)
             if 'proxies' in selected:
+                frames=dict(window.preview.frames)
+                for key in list(window.transport.decoders):
+                    if key[3]=='video':window.transport.retire_decoder(key)
+                window.preview.frames.update(frames)
                 window.proxies.clear()
+                quality=getattr(window,'preview_quality',None)
+                if quality:
+                    quality.seek_ready.clear(); quality.seek_signatures.clear()
+                    quality.ready.clear(); quality.ready_signatures.clear()
+                    quality.compat_ready.clear(); quality.compat_signatures.clear()
+                window.transport.sync()
             if 'vision-renders' in selected:
                 from .vision_effects import mask_image
                 mask_image.cache_clear()

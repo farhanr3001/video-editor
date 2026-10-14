@@ -85,7 +85,7 @@ class AV1PreviewTests(unittest.TestCase):
         self.assertEqual(self.window.proxies[self.media.id], str(compatible))
         self.assertEqual(self.media.path, str(self.source))
         self.assertFalse(self.quality.needs_compatible(self.media))
-        self.assertIn(('sync', True), self.calls)
+        self.assertIn(('sync', False), self.calls)  # Only reopened video needs positioning; audio continues.
 
     def test_cached_compatibility_preview_is_reapplied_after_project_switch(self):
         compatible = Path(self.folder.name) / 'compatible.mp4'

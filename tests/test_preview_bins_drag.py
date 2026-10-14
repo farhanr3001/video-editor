@@ -44,7 +44,9 @@ class PreviewBinsDragTests(unittest.TestCase):
                 for _ in range(10):t.sync()
                 set_interval.assert_not_called(); w.project.settings.fps=30
                 for _ in range(10):t.sync()
-                set_interval.assert_called_once_with(33)
+                # Poll twice per source frame to avoid a full-frame delivery
+                # delay; unchanged cadence must still never restart the timer.
+                set_interval.assert_called_once_with(17)
         finally:t.decoders.clear(); t.frame_timer.stop()
     def test_power_bin_background_accepts_timeline_drop_without_pool_mutation(self):
         self.saved(); w=self.w; panel=w.media_panel; panel.folder="Master"; panel.refresh(); before=copy.deepcopy(w.project.to_dict())

@@ -215,6 +215,8 @@ class MainWindow(QMainWindow):
         progress=startup_progress or (lambda *_:None)
         progress(45,"Loading preferences and project services")
         super().__init__(); self.settings=load_settings(); self.project=Project(); self.thread_pool=QThreadPool.globalInstance(); self.current_media_id=""; self.current_play_item:TimelineItem|None=None; self.loading=False; self.shortcut_actions={}; self.proxies={}; self._workers=set(); self._history=[]; self._history_index=-1; self._restoring=False
+        from .cache_manager import clear_waveforms_on_exit
+        self.shutdownFinished.connect(clear_waveforms_on_exit)
         self.setWindowTitle("Kinetic Cut"); self.resize(1480,900); self.setMinimumSize(1100,700); self.setAcceptDrops(True)
         from .icons import resource_path
         self.setWindowIcon(QIcon(str(resource_path("assets","kinetic-cut.svg"))))
@@ -452,7 +454,7 @@ class MainWindow(QMainWindow):
         self._workers.add(worker)
         self.update_job_status()
         worker.signals.finished.connect(self.worker_finished,Qt.QueuedConnection)
-        self.thread_pool.start(worker)
+        getattr(worker,'pool',self.thread_pool).start(worker)
 
     def update_job_status(self):
         if not hasattr(self,"job_status"):return
@@ -1165,19 +1167,26 @@ class MainWindow(QMainWindow):
     @edit_only
     def add_graphic_object(self,name="Circle",track="",start=None,duration=None,properties=None):
         from .graphics import default_graphic_data, GRAPHICS_CATALOG
-        if track=='__new_video':track=self.project.add_track('video')
-        track=track if track in self.project.video_tracks else self.timeline.selected_track if self.timeline.selected_track in self.project.video_tracks else self.project.video_tracks[-1]
-        if self.project.track_states.get(track,{}).get("locked"):self.statusBar().showMessage("Unlock the destination track before adding a graphic.",4000); return None
         start=self.project.playhead if start is None else max(0.,float(start))
         cat=GRAPHICS_CATALOG.get(name,{})
         dur=float(duration) if duration is not None else float(cat.get("default_duration",2.0))
-        graphic_data=default_graphic_data(name)
-        if name.lower() in ('motion','motion composition'):
+        from .motion_presets import PRESETS,build
+        if name in PRESETS:
+            graphic_data=build(name,[self.project.settings.width,self.project.settings.height],dur,properties)
+            name='Motion Composition'; properties=None
+        else:graphic_data=default_graphic_data(name)
+        if name.lower() in ('motion','motion composition') and not graphic_data.get('preset'):
             from .motion import default_scene
             graphic_data['scene']=default_scene([self.project.settings.width,self.project.settings.height])
         if properties and isinstance(properties,dict):
             import copy
             graphic_data.update(copy.deepcopy(properties))
+        if name.lower() in ('motion','motion composition'):
+            from .motion import validate
+            graphic_data['scene']=validate(graphic_data['scene'])
+        if track=='__new_video':track=self.project.add_track('video')
+        track=track if track in self.project.video_tracks else self.timeline.selected_track if self.timeline.selected_track in self.project.video_tracks else self.project.video_tracks[-1]
+        if self.project.track_states.get(track,{}).get("locked"):self.statusBar().showMessage("Unlock the destination track before adding a graphic.",4000); return None
         item=TimelineItem(uid(),"",track,start,dur,group_id=uid(),role="graphic",graphic_type=name,graphic_data=graphic_data)
         if name.lower() in ('motion','motion composition'):item.transform.y=.5
         self.project.timeline.append(item); self.timeline.select_ids({item.id},item.id); self.model_changed(); self.select_item(item.id); self.seek(start)
@@ -1298,10 +1307,13 @@ class MainWindow(QMainWindow):
             self.preview.select_item("")
             if not getattr(self.timeline, "selected_transition_id", "") and not getattr(self.timeline, "selected_caption", ""):
                 self.inspector.select("")
-        self.timeline.viewport().update()
+        # Box selection owns the exact clip/caption and rubber-band damage.
+        # Repainting the complete timeline here defeats that bounded redraw.
+        if self.timeline.drag_mode!='marquee':self.timeline.viewport().update()
         self.update_keyframe_button()
 
     def update_keyframe_button(self):
+        if hasattr(self,'retime_button'):self.retime_button.update_state()
         if not hasattr(self,'keyframe_button'):return
         item=self.project.item_by_id(self.timeline.selected_id); media=self.project.media_by_id(item.media_id) if item else None
         self.keyframe_button.setEnabled(bool(item and (item.role in ('title','graphic') or media and media.kind in {'video','image'}) and item.track in self.project.video_tracks and not self.project.track_states.get(item.track,{}).get('locked') and self.current_page==0))
@@ -1315,8 +1327,9 @@ class MainWindow(QMainWindow):
 
     @edit_only
     def open_motion_composition(self,item_id=None):
+        from .motion_presets import is_motion
         item=self.project.item_by_id(item_id or self.timeline.selected_id)
-        if not item or item.role!='graphic' or item.graphic_type.lower() not in ('motion','motion composition') or self.project.track_states.get(item.track,{}).get('locked'):return
+        if not item or item.role!='graphic' or not is_motion(item.graphic_type) or self.project.track_states.get(item.track,{}).get('locked'):return
         from .motion_editor import MotionEditor
         self.transport.pause(); dialog=MotionEditor(self,item); dialog.setAttribute(Qt.WA_DeleteOnClose); dialog.show(); self._motion_dialog=dialog
 
@@ -1324,12 +1337,13 @@ class MainWindow(QMainWindow):
         if hasattr(self,'keyframe_button'):self.keyframe_button.setEnabled(False)
         self.timeline.selected_transition_id=""
         if not caption_id:
-            self.timeline.selected_caption=""; self.timeline.selected_caption_ids=set(); self.timeline.selected_ids=set(); self.timeline.selected_id=""; self.preview.select_caption(""); self.inspector.select(""); return
+            self.timeline.selected_caption=""; self.timeline.selected_caption_ids=set(); self.timeline.selected_ids=set(); self.timeline.selected_id=""; self.preview.select_caption(""); self.inspector.select(""); self.retime_button.update_state(); return
         if caption_id not in self.timeline.selected_caption_ids:
             self.timeline.selected_caption_ids={caption_id}; self.timeline.selected_ids=set(); self.timeline.selected_id=""
         self.timeline.selected_caption=caption_id
         self.inspector_toggle.setChecked(True); self.inspector.select_caption(caption_id); self.preview.select_caption(caption_id)
         if hasattr(self,'caption_focus'):self.caption_focus.selected(caption_id)
+        self.retime_button.update_state()
 
     def select_transition(self,transition_id:str):
         if hasattr(self,'keyframe_button'):self.keyframe_button.setEnabled(False)
@@ -1343,6 +1357,7 @@ class MainWindow(QMainWindow):
                 self.inspector.select_transition(transition_id)
         else:
             self.inspector.select("")
+        self.retime_button.update_state()
         self.timeline.viewport().update()
 
     @edit_only
@@ -2173,6 +2188,7 @@ class MainWindow(QMainWindow):
         set_page(self,1)
 
     def refresh_inspector(self):
+        if hasattr(self,'retime_button'):self.retime_button.update_state()
         if getattr(self.timeline, "selected_transition_id", ""):
             if hasattr(self.inspector, "select_transition"):
                 self.inspector.select_transition(self.timeline.selected_transition_id)

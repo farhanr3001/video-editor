@@ -1,7 +1,7 @@
-"""Explicit decoder preferences; composition remains the CPU QWidget renderer."""
+"""Explicit native decoder preferences and source-compatible worker selection."""
 import os,sys
 
-MODES=('Auto (hardware preferred)','Direct3D 11 (hardware)','CPU compatibility')
+MODES=('Auto (best preview performance)','Direct3D 11 (hardware)','CPU compatibility')
 
 def configure(settings):
     if sys.platform!='win32':return

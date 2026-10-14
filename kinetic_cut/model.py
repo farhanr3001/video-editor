@@ -619,6 +619,10 @@ class Project:
                         if node.get('kind')=='image' and node.get('source'):
                             try:node['source']=os.path.relpath(node['source'],target.parent)
                             except ValueError:pass
+                    data=item.get('graphic_data',{}); parameters=data.get('parameters',{})
+                    if data.get('preset') and isinstance(parameters,dict) and isinstance(parameters.get('image'),str) and parameters['image']:
+                        try:parameters['image']=os.path.relpath(parameters['image'],target.parent)
+                        except ValueError:pass
                 for media in body.get("media", []):
                     if media.get("compound"):
                         relative_sources(media["compound"])
@@ -649,6 +653,8 @@ class Project:
                         if effect.get('name')=='Object Tracking' and effect.get('image') and not Path(effect['image']).is_absolute():effect['image']=str((base/effect['image']).resolve())
                     for node in item.get('graphic_data',{}).get('scene',{}).get('nodes',[]):
                         if node.get('kind')=='image' and node.get('source') and not Path(node['source']).is_absolute():node['source']=str((base/node['source']).resolve())
+                    data=item.get('graphic_data',{}); parameters=data.get('parameters',{})
+                    if data.get('preset') and isinstance(parameters,dict) and isinstance(parameters.get('image'),str) and parameters['image'] and not Path(parameters['image']).is_absolute():parameters['image']=str((base/parameters['image']).resolve())
                 for media in body.get("media", []):
                     if media.get("compound"):
                         absolute_sources(media["compound"])

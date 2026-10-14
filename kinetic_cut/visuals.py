@@ -219,7 +219,10 @@ def draw_caption_glyphs(painter,path,emojis,style,scale):
         bounds=path.boundingRect().adjusted(-margin,-margin,margin,margin)
         shape=QPainterPath(path); shape.translate(-bounds.topLeft())
         color=style.color if style.glow_follow_color else style.glow_color
-        key=(color,round(radius,3),style.glow_opacity,tuple((round(shape.elementAt(i).x,3),round(shape.elementAt(i).y,3),shape.elementAt(i).type.value) for i in range(shape.elementCount())))
+        from PySide6.QtCore import QByteArray,QDataStream,QIODevice
+        import hashlib
+        encoded=QByteArray(); stream=QDataStream(encoded,QIODevice.WriteOnly); stream << shape
+        key=(color,round(radius,3),style.glow_opacity,hashlib.sha256(bytes(encoded)).digest())
         layer=_glow_cache.get(key)
         if layer is None:
             layer=QImage(max(1,round(bounds.width())),max(1,round(bounds.height())),QImage.Format_RGBA8888); layer.fill(Qt.transparent)

@@ -98,6 +98,8 @@ class PreviewCanvas(QWidget):
         self.frames = {}; self.active_frames = {}
         self.view_zoom=1.; self.view_pan=QPointF(); self.pan_origin=None
         self.effect_cache={}; self.crop_cache={}
+        from .preview_compositor import CompositionCache
+        self.composition_cache=CompositionCache(self)
         self.still_cache=FileImageCache(128*1024*1024, max_entries=16)
         self.selected_layer = "main"
         self.selected_item_id = ""
@@ -122,6 +124,7 @@ class PreviewCanvas(QWidget):
 
     def set_project(self, project: Project):
         self.center_guide_active=False
+        self.composition_cache.clear()
         self.effect_cache.clear(); self.crop_cache.clear()
         self.still_cache.clear()
         self.project = project
@@ -602,6 +605,73 @@ class PreviewCanvas(QWidget):
             painter.drawText(QRectF(center.x()-width/2,center.y()+20,width,65),Qt.AlignCenter|Qt.TextWordWrap,"Import media, then drag it onto the timeline\nCtrl+I")
             painter.restore()
             return
+        from .video_worker import enabled as worker_preview
+        transport=getattr(self.window(),'transport',None)
+        if worker_preview() and transport and not transport.playing and not transport.scrubbing and not self.drag_origin and not self.composition_cache.closed:
+            # Warm the current complete composition while paused. Controls still
+            # use the synchronous exact geometry; Play can reuse this work.
+            self.composition_cache.request(frame_rect)
+        cached=(self.composition_cache.request(frame_rect) if worker_preview() and transport
+                and (transport.playing or transport.scrubbing) and not self.transform_controls_visible
+                and not self.composition_cache.closed else None)
+        if cached:
+            image,vision_notice=cached; painter.drawImage(QPointF(0,0),image); overlay=None
+            # Captions use the current timeline clock, independently of video
+            # composition completion. Word boundaries must not discard an
+            # otherwise valid expensive background/graphics composition.
+            from .visuals import draw_caption
+            self.text_rects={k:v for k,v in self.text_rects.items() if k[0]!='caption'}
+            for caption in sorted(self.project.captions,key=lambda c:c.start):
+                if self.project.track_states.get('subtitle_1',{}).get('visible',True) and caption.start<=self.project.playhead<caption.end:
+                    self.text_rects[('caption',caption.id)]=draw_caption(painter,self.project,caption,frame_rect)
+        else:
+            overlay,vision_notice=self._paint_scene(painter,frame_rect)
+        if self.transform_controls_visible:
+            if overlay:self._draw_transform_box(painter,*overlay)
+            ids=getattr(getattr(self.window(),"timeline",None),"selected_ids",set())
+            if len(ids)>1:
+                drawn={overlay[0].id} if overlay else set()
+                for item,_,target in self._visible_items():
+                    if (item.id in ids and item.id not in drawn
+                            and self.project.track_states.get(item.track,{}).get("visible",True)):
+                        self._draw_transform_box(painter,item,target); drawn.add(item.id)
+            selected=self.text_rects.get(("title",self.selected_item_id)) or self.text_rects.get(("caption",self.selected_caption_id))
+            if selected:self._draw_text_box(painter,selected)
+        if vision_notice:
+            painter.setPen(QColor('#ffdd88')); painter.setFont(QFont('Segoe UI',9)); painter.drawText(self.rect().adjusted(12,8,-12,-8),Qt.AlignBottom|Qt.AlignHCenter,vision_notice)
+        win = self.window()
+        transport = getattr(win, "transport", None)
+        is_paused = transport is None or not getattr(transport, "playing", False)
+        inspector = getattr(win, "inspector", None)
+        inspector_toggle = getattr(win, "inspector_toggle", None)
+        inspector_open = (inspector_toggle is None or inspector_toggle.isChecked())
+        tabs = getattr(inspector, "tabs", None)
+        effects_tab_active = (tabs is None) or (tabs.tabText(tabs.currentIndex()) == "Effects")
+        timeline = getattr(win, "timeline", None)
+        timeline_selected = (self.selected_item_id in getattr(timeline, "selected_ids", {self.selected_item_id})) if timeline else bool(self.selected_item_id)
+
+        if is_paused and inspector_open and effects_tab_active and timeline_selected and self.selected_item_id:
+            sel_item=self.project.item_by_id(self.selected_item_id)
+            if sel_item and getattr(sel_item,"effects",None):
+                vfx_fx=next((e for e in sel_item.effects if e.get("category")=="Visual FX" and e.get("enabled",True) and ("center_x" in e or "ken_burns_start_x" in e)),None)
+                if vfx_fx:
+                    fx=float(vfx_fx.get("center_x",vfx_fx.get("ken_burns_start_x",0.5)))
+                    fy=float(vfx_fx.get("center_y",vfx_fx.get("ken_burns_start_y",0.5)))
+                    cx=frame_rect.left()+fx*frame_rect.width(); cy=frame_rect.top()+fy*frame_rect.height()
+                    painter.save(); painter.setRenderHint(QPainter.Antialiasing)
+                    painter.setPen(QPen(QColor(61,140,255,180),1.5,Qt.DashLine)); painter.setBrush(QColor(61,140,255,25))
+                    painter.drawEllipse(QPointF(cx,cy),16,16)
+                    painter.setPen(QPen(QColor("#3d8cff"),1.5))
+                    painter.drawLine(QPointF(cx-8,cy),QPointF(cx+8,cy))
+                    painter.drawLine(QPointF(cx,cy-8),QPointF(cx,cy+8))
+                    painter.restore()
+        from pathlib import Path
+        pending=next((self.project.media_by_id(i.media_id) for i in self.project.timeline if i.start<=self.project.playhead<i.start+i.duration and self.project.media_by_id(i.media_id) and self.project.media_by_id(i.media_id).compound and not Path(self.project.media_by_id(i.media_id).path).is_file()),None)
+        if pending:
+            message='Compound preview unavailable — right-click clip to retry' if pending.path in getattr(self,'compound_failures',set()) else 'Compound preview is preparing · '+pending.name
+            painter.setPen(QColor('#ffdd88')); painter.setFont(QFont('Segoe UI',9)); painter.drawText(frame_rect.adjusted(8,8,-8,-8),Qt.AlignBottom|Qt.AlignHCenter|Qt.TextWordWrap,message)
+
+    def _paint_scene(self,painter,frame_rect):
         source = self.frame; self.text_rects={}; overlay=None; vision_notice=''
         for track in self.project.video_tracks:
             if not self.project.track_states.get(track, {}).get("visible", True):
@@ -669,46 +739,11 @@ class PreviewCanvas(QWidget):
             if bounds and item.id==self.selected_item_id and not item.keyframes:
                 overlay=(item,self._graphic_rect(item,frame_rect))
         for caption in sorted(self.project.captions, key=lambda c: c.start):
+            if not getattr(self,'draw_captions',True):break
             if not self.project.track_states.get("subtitle_1",{}).get("visible",True) or not (caption.start <= self.project.playhead < caption.end):
                 continue
             bounds=draw_caption(painter,self.project,caption,frame_rect); self.text_rects[("caption",caption.id)]=bounds
-        if self.transform_controls_visible:
-            if overlay:self._draw_transform_box(painter,*overlay)
-            selected=self.text_rects.get(("title",self.selected_item_id)) or self.text_rects.get(("caption",self.selected_caption_id))
-            if selected:self._draw_text_box(painter,selected)
-        if vision_notice:
-            painter.setPen(QColor('#ffdd88')); painter.setFont(QFont('Segoe UI',9)); painter.drawText(self.rect().adjusted(12,8,-12,-8),Qt.AlignBottom|Qt.AlignHCenter,vision_notice)
-        win = self.window()
-        transport = getattr(win, "transport", None)
-        is_paused = transport is None or not getattr(transport, "playing", False)
-        inspector = getattr(win, "inspector", None)
-        inspector_toggle = getattr(win, "inspector_toggle", None)
-        inspector_open = (inspector_toggle is None or inspector_toggle.isChecked())
-        tabs = getattr(inspector, "tabs", None)
-        effects_tab_active = (tabs is None) or (tabs.tabText(tabs.currentIndex()) == "Effects")
-        timeline = getattr(win, "timeline", None)
-        timeline_selected = (self.selected_item_id in getattr(timeline, "selected_ids", {self.selected_item_id})) if timeline else bool(self.selected_item_id)
-
-        if is_paused and inspector_open and effects_tab_active and timeline_selected and self.selected_item_id:
-            sel_item=self.project.item_by_id(self.selected_item_id)
-            if sel_item and getattr(sel_item,"effects",None):
-                vfx_fx=next((e for e in sel_item.effects if e.get("category")=="Visual FX" and e.get("enabled",True) and ("center_x" in e or "ken_burns_start_x" in e)),None)
-                if vfx_fx:
-                    fx=float(vfx_fx.get("center_x",vfx_fx.get("ken_burns_start_x",0.5)))
-                    fy=float(vfx_fx.get("center_y",vfx_fx.get("ken_burns_start_y",0.5)))
-                    cx=frame_rect.left()+fx*frame_rect.width(); cy=frame_rect.top()+fy*frame_rect.height()
-                    painter.save(); painter.setRenderHint(QPainter.Antialiasing)
-                    painter.setPen(QPen(QColor(61,140,255,180),1.5,Qt.DashLine)); painter.setBrush(QColor(61,140,255,25))
-                    painter.drawEllipse(QPointF(cx,cy),16,16)
-                    painter.setPen(QPen(QColor("#3d8cff"),1.5))
-                    painter.drawLine(QPointF(cx-8,cy),QPointF(cx+8,cy))
-                    painter.drawLine(QPointF(cx,cy-8),QPointF(cx,cy+8))
-                    painter.restore()
-        from pathlib import Path
-        pending=next((self.project.media_by_id(i.media_id) for i in self.project.timeline if i.start<=self.project.playhead<i.start+i.duration and self.project.media_by_id(i.media_id) and self.project.media_by_id(i.media_id).compound and not Path(self.project.media_by_id(i.media_id).path).is_file()),None)
-        if pending:
-            message='Compound preview unavailable — right-click clip to retry' if pending.path in getattr(self,'compound_failures',set()) else 'Compound preview is preparing · '+pending.name
-            painter.setPen(QColor('#ffdd88')); painter.setFont(QFont('Segoe UI',9)); painter.drawText(frame_rect.adjusted(8,8,-8,-8),Qt.AlignBottom|Qt.AlignHCenter|Qt.TextWordWrap,message)
+        return overlay,vision_notice
 
     def _draw_text_box(self,painter,rect):
         self._draw_center_guide(painter)

@@ -1,5 +1,6 @@
 """Content-anchored box selection with bounded, stationary-pointer edge scrolling."""
 from PySide6.QtCore import QObject,QTimer,QPointF,QRectF,Qt,QItemSelection,QItemSelectionModel
+from PySide6.QtGui import QRegion
 from PySide6.QtWidgets import QRubberBand,QApplication
 
 
@@ -86,13 +87,21 @@ class TimelineMarquee(QObject):
         captions={c.id for c in t.project.captions if 'subtitle' in metrics and intersects(t.caption_rect(c,lanes['subtitle_1'][1]),'subtitle_1')}
         ids=t.marquee_initial|t.expanded(ids); captions=t.marquee_caption_initial|captions
         changed=ids!=t.selected_ids or captions!=t.selected_caption_ids
+        changed_ids=ids^t.selected_ids; changed_captions=captions^t.selected_caption_ids
         t.selected_ids=ids; t.selected_id=t.selected_id if t.selected_id in ids else next(iter(ids),''); t.selected_caption_ids=captions; t.selected_caption=next(iter(captions),'')
         if changed:
             if t.selected_id:t.itemSelected.emit(t.selected_id)
             else:t.captionSelected.emit(t.selected_caption)
             t.selected_caption_ids=captions; t.selected_caption=next(iter(captions),'')
-        if changed:t.viewport().update()
-        else:t.update_selection_overlay()
+        if changed:
+            damage=QRegion()
+            for item in t.project.timeline:
+                if item.id in changed_ids:damage|=QRegion(t.item_rect(item).toAlignedRect().adjusted(-3,-3,3,3))
+            for caption in t.project.captions:
+                if caption.id in changed_captions:damage|=QRegion(t.caption_rect(caption).toAlignedRect().adjusted(-3,-3,3,3))
+            t._content_damage|=damage
+            t.viewport().update(damage)
+        t.update_selection_overlay()
     def rects(self):
         if self.anchor is None:return []
         t=self.view; metric=next((m for m in self.metrics() if m[0]==self.anchor_section),None)

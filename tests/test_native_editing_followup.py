@@ -89,7 +89,8 @@ class NativeEditingFollowupTests(unittest.TestCase):
                 item=TimelineItem('g','','video_1',0,5,role='graphic',graphic_type=name,graphic_data=default_graphic_data(name))
                 item.transform.scale=1.4; item.transform.scale_y=1.8; item.transform.rotation=37
                 events=graphic_to_ass_events(Project(timeline=[item]),item)
-                if name=='Motion Composition':
+                from kinetic_cut.motion_presets import is_motion
+                if is_motion(name):
                     # Compositions use lossless alpha frames rather than ASS.
                     # Keep the same independent-axis/clockwise-rotation contract.
                     import math,numpy as np,av

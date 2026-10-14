@@ -8,8 +8,8 @@ def run(output, project_path, with_waveforms=True):
     os.environ['KINETIC_CUT_HOME'] = str(out / 'home')
     from kinetic_cut.process import install_desktop_process_policy
     install_desktop_process_policy()
-    from PySide6.QtCore import Qt, QTimer, QEventLoop, QPointF, QEvent, QThreadPool
-    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtCore import Qt, QTimer, QEventLoop, QPointF, QEvent, QThreadPool, QRect
+    from PySide6.QtGui import QMouseEvent, QRegion
     from PySide6.QtWidgets import QApplication
     from kinetic_cut.model import Project
     from kinetic_cut.ui import MainWindow
@@ -84,13 +84,28 @@ def run(output, project_path, with_waveforms=True):
     report = {'project':source.name, 'project_sha256':before, 'frozen':bool(getattr(sys,'frozen',False)), 'window':[w.width(),w.height()],
               'source':[(m.name,m.width,m.height,m.fps) for m in p.media],
               'clips':len(p.timeline), 'waveform_generation_excluded':True,
-              'waveforms_present':bool(t.waveforms), 'runs':[]}
+              'waveforms_present':bool(t.waveforms), 'runs':[], 'partial_raster_checks':0}
     for name in ('paused','playing','playing_no_canvas','playing_no_readback','paused_again'):
         w.transport.pause(); no_readback[0]=False; w.preview.setUpdatesEnabled(True)
         w.seek(162.6); wait(500)
         if name.startswith('playing'): w.transport.play(); wait(500)
         if name=='playing_no_canvas': w.preview.setUpdatesEnabled(False)
         if name=='playing_no_readback': no_readback[0]=True; w.preview.setUpdatesEnabled(False)
+        # Do not grab the widget before checking: grab forces a full redraw,
+        # concealing corruption retained by partial playback/expose paints.
+        t.viewport().repaint()
+        expected=t._timeline_backing.toImage()
+        for offset in range(12):
+            x=t.LABEL_WIDTH+20+offset*35
+            damage=QRegion(QRect(x,0,13,t.viewport().height()))|QRegion(QRect(x+105,40,9,180))
+            t._content_damage|=damage
+            t.viewport().repaint(damage)
+            if t._timeline_backing.toImage()!=expected:
+                expected.save(str(out/'partial-expected.png'))
+                t._timeline_backing.save(str(out/'partial-actual.png'))
+                w.transport.shutdown(); w.close()
+                raise AssertionError(('partial timeline raster changed',name,offset))
+            report['partial_raster_checks']+=1
         section=t._sections()['video']
         anchor=QPointF(t.x_for_time(p.duration)+35,section.center().y())
         mouse(QEvent.MouseButtonPress,anchor,Qt.LeftButton)

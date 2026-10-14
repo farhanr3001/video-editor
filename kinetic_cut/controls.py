@@ -27,7 +27,7 @@ def scrub_delta(pixels, seconds, sensitivity, modifiers=Qt.NoModifier):
 
 class _ValueScrub:
     def _init_scrub(self):
-        self._drag_start=None; self.drag_sensitivity=None; self._typing=False; self._finishing_edit=False
+        self._drag_start=None; self.drag_sensitivity=None; self._typing=False; self._finishing_edit=False; self._committing_typed_value=False
         self.setFocusPolicy(Qt.NoFocus); self.installEventFilter(self); self.lineEdit().installEventFilter(self)
         self.lineEdit().setToolTip("Drag to adjust · Shift: fine · Ctrl: coarse · Double-click to type")
 
@@ -79,13 +79,13 @@ class _ValueScrub:
 
     def _finish_keyboard_edit(self):
         if self._finishing_edit:return
-        self._finishing_edit=True
+        self._finishing_edit=True; self._committing_typed_value=self._typing
         try:
             self.interpretText(); self._typing=False; self.setKeyboardTracking(True)
             self.lineEdit().deselect(); self.lineEdit().clearFocus(); self.clearFocus(); self.setFocusPolicy(Qt.NoFocus)
             self.editingFinished.emit()
             self.lineEdit().deselect(); self.lineEdit().clearFocus(); self.clearFocus()
-        finally:self._finishing_edit=False
+        finally:self._finishing_edit=False; self._committing_typed_value=False
 
 
 class SafeDoubleSpinBox(_ValueScrub, _NoAccidentalWheel, QDoubleSpinBox):

@@ -74,12 +74,13 @@ def validate(raw):
                 if [c[0] for c in node['mask'].get('path',[])]!=[c[0] for c in node['mask']['path_to']]:raise ValueError('Mask morph paths must have matching command structure')
             node['mask']['keyframes']=clean_curves(node['mask'].get('keyframes',{}))
         if node.get('kind')=='text' and (not isinstance(node.get('text',''),str) or len(node.get('text',''))>4096):raise ValueError('Text layer exceeds 4096 characters')
-        if node.get('text_mode','none') not in ('none','character','word','typewriter','counter'):raise ValueError('Unknown text animation mode')
+        if node.get('text_mode','none') not in ('none','character','word','typewriter','counter','rolling'):raise ValueError('Unknown text animation mode')
+        if node.get('image_fit','stretch') not in ('stretch','contain','cover'):raise ValueError('Image fit must be stretch, contain or cover')
         if node.get('text_align','center') not in ('left','center','right'):raise ValueError('Text alignment must be left, center or right')
         for key in ('caret_period',):
             if key in node:node[key]=finite(node[key])
         if not .1<=node.get('caret_period',.8)<=10:raise ValueError('Caret period must be .1–10 seconds')
-        for key in ('caret','number_grouping'):
+        for key in ('caret','number_grouping','number_trim_zeros'):
             if key in node and not isinstance(node[key],bool):raise ValueError(key+' must be boolean')
         if 'number_decimals' in node:
             v=finite(node['number_decimals'])
@@ -168,6 +169,9 @@ def text_parts(text,font_name,size,bold,mode,tracking,alignment='center'):
 def draw_text(painter,node,t):
     from .easing import ease
     mode=node.get('text_mode','none')
+    if mode=='rolling':
+        from .motion_text import draw_rolling
+        draw_rolling(painter,node,t); return
     if mode=='typewriter':
         from .motion_text import draw_typewriter
         draw_typewriter(painter,node,t); return
@@ -229,7 +233,13 @@ def draw_sample(scene,t,size):
             elif kind=='image':
                 pic=_images.load(node.get('source',''))
                 if not pic.isNull():
-                    w=max(.01,curve(node,'width',t)); h=max(.01,curve(node,'height',t)); painter.drawImage(QRectF(-w/2,-h/2,w,h),pic)
+                    w=max(.01,curve(node,'width',t)); h=max(.01,curve(node,'height',t)); rect=QRectF(-w/2,-h/2,w,h)
+                    fit=node.get('image_fit','stretch')
+                    if fit!='stretch':
+                        factor=(min if fit=='contain' else max)(w/pic.width(),h/pic.height())
+                        rect=QRectF(-pic.width()*factor/2,-pic.height()*factor/2,pic.width()*factor,pic.height()*factor)
+                        if fit=='cover':painter.setClipRect(QRectF(-w/2,-h/2,w,h),Qt.IntersectClip)
+                    painter.drawImage(rect,pic)
             elif kind!='group':
                 shape=geometry(node,t)
                 if node.get('shadow',{}).get('enabled',False):
@@ -245,4 +255,4 @@ def draw_sample(scene,t,size):
 
 def schema():
     return dict(version=1,kinds=KINDS,channels=CHANNELS,easing=MODES,path_commands=ARITY,
-                guidance='Nodes use project pixels; parent IDs form groups. Key times are composition seconds. Text: text_mode character/word/typewriter/counter, text_align left/center/right. Typewriter uses stagger seconds/grapheme or reveal 0–1 keys, optional caret/caret_period. Counters use number keys, number_decimals/grouping/prefix/suffix. radius/stroke_width animate. Shape shadow: enabled, color, opacity, blur, x, y. Mask uses local geometry. Path trim 0–1 and matching path_to/morph. motion_blur samples 1–12, shutter 0–360. Templates are scene JSON.')
+                guidance='Nodes use scene canvas pixels; parent IDs form groups. Key times are composition source seconds (clip in_point + local timeline time * speed). Text: text_mode character/word/typewriter/counter/rolling, text_align left/center/right. Rolling animates digits in text over entry_duration and settles to that exact text. Typewriter uses stagger seconds/grapheme or reveal 0–1 keys, optional caret/caret_period. Counters use number keys, number_decimals/grouping/prefix/suffix. Images: source path and image_fit contain/cover/stretch; existing images default stretch for compatibility. radius/stroke_width animate. Shape shadow: enabled, color, opacity, blur, x, y. Mask uses local geometry. Path trim 0–1 and matching path_to/morph. motion_blur samples 1–12, shutter 0–360. Templates are scene JSON. Presets are ordinary editable scenes with exposed parameters.')

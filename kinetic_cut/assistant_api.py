@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QApplication, QAbstractButton, QAbstractSlider,
     QDialog, QTabWidget, QWidget)
 from .model import Project, ProjectSettings, TimelineItem, MediaItem, Caption, CaptionStyle, Crop, Transform, uid
 from .tracking_effect import MODES as TRACKING_MODES
+from .motion_presets import PRESETS as MOTION_PRESETS,is_motion
 
 
 def tool(name, description, properties=None, required=(), readonly=False):
@@ -46,7 +47,11 @@ TOOLS=[
          ('revision','item_id','reference_source_time','region')),
     tool('tracking_job_control','Cancel one running Object Tracking job. No partial trajectory is applied. Poll get_jobs until Cancelled; source files are unchanged.',{'job_id':S,'operation':{'type':'string','enum':['cancel']}},('job_id','operation')),
     tool('apply_transition','Apply and configure a video transition (Cross Dissolve, Dip to Color / White Flash, Wipe Left/Right/Up/Down, Push Left/Right/Up/Down, Slide In/Out, Zoom In, Digital Glitch, etc.) between clips or on an edit cut in one call.',{'name':S,'track':S,'left_item_id':S,'right_item_id':S,'cut_time':N,'duration':N,'alignment':{'type':'string','enum':['center','start','end']},'properties':O},('name',)),
-    tool('add_graphic','Add a vector graphic or editable Motion Composition. For compositions use properties.scene; discover its schema with get_capabilities.',{'graphic_type':{'type':'string','enum':['Motion Composition','Circle','Pointing Arrow','Square','Rectangle','Timer / Countdown','Speech Bubble / Quote Card','Progress Bar','Callout Badge']},'track':S,'start':N,'duration':N,'properties':O},('graphic_type',)),
+    tool('add_graphic','Add a vector graphic, motion preset or editable Motion Composition. Preset properties use the fields in get_capabilities.motion_presets; compositions use properties.scene.',{'graphic_type':{'type':'string','enum':['Motion Composition',*MOTION_PRESETS,'Circle','Pointing Arrow','Square','Rectangle','Timer / Countdown','Speech Bubble / Quote Card','Progress Bar','Callout Badge']},'track':S,'start':N,'duration':N,'properties':O},('graphic_type',)),
+    tool('get_motion_composition','Read a composition scene, layer bounds and exact source-time state without seeking playback.',{'item_id':S,'seconds':N},('item_id',),readonly=True),
+    tool('get_motion_preview','Render one exact composition frame, including alpha, without seeking or modifying the timeline.',{'item_id':S,'seconds':N,'max_width':{'type':'integer','minimum':160,'maximum':1920}},('item_id',),readonly=True),
+    tool('edit_motion_composition','Atomic one-undo layer/keyframe edits. Requires current project revision. Operations: add_layer(node), update_layer(id,values), remove_layer(id, including descendants), move_layer(id,before), set_key(id,channel,time,value,interpolation,bezier), remove_key(id,channel,time), scene_settings(values). Times are composition SOURCE seconds.',{'revision':S,'item_id':S,'operations':{'type':'array','items':O,'minItems':1,'maxItems':256}},('revision','item_id','operations')),
+    tool('configure_motion_preset','Update an existing motion preset with one undo step. Preserves custom layers and unrelated scene edits. Discover fields using get_capabilities.motion_presets.',{'revision':S,'item_id':S,'properties':O},('revision','item_id','properties')),
     tool('set_caption_style','Apply curated viral subtitle style presets (crime_red, viral_yellow, cyber_cyan, mrbeast_gold, clean_card) or customize font, colors, animation, size, glow, and lower-third position across captions in one call.',{'preset':{'type':'string','enum':['crime_red','viral_yellow','cyber_cyan','mrbeast_gold','clean_card']},'properties':O,'caption_ids':{'type':'array','items':S}}),
     tool('apply_vertical_framing','Format and align clips for 9:16 vertical video shorts: vertically center foreground clips (y=0.5), configure ambient background fill layers (role="background"), and optionally adjust framing scale.',{'mode':{'type':'string','enum':['center_and_fill','fit_width','fill_916']},'foreground_track':S,'background_track':S,'scale':N}),
     tool('get_timeline_summary','Return a concise structured summary of timeline tracks, clips, in/out timings, audio levels, active effects, subtitle cards, and video transitions.',readonly=True),
@@ -124,7 +129,7 @@ def validate(project):
         if not .001<=item.transform.scale<=100 or not .001<=item.transform.effective_scale_y<=100:raise ValueError('Invalid transform scale')
         if item.role in {'title', 'graphic'}:
             if item.track not in project.video_tracks:raise ValueError('Titles and graphics require video tracks')
-            if item.role=='graphic' and item.graphic_type.lower() in ('motion','motion composition'):
+            if item.role=='graphic' and is_motion(item.graphic_type):
                 from .motion import validate
                 item.graphic_data['scene']=validate(item.graphic_data.get('scene',{}))
         else:
@@ -158,7 +163,7 @@ def edited(project, operations):
                 identifier=identifier or uid()
                 if collection=='timeline':
                     base=asdict(TimelineItem(identifier,'',stage.video_tracks[-1],0,5,role='title'))
-                    if values.get('graphic_type','').lower() in ('motion','motion composition'):base['transform']['y']=.5
+                    if is_motion(values.get('graphic_type','')):base['transform']['y']=.5
                 elif collection=='captions':
                     base=asdict(Caption(identifier,0,1,''))
                 else:
@@ -350,7 +355,7 @@ class EditorAPI:
         result=dict(name=w.project.name,revision=revision(w.project),playhead=w.project.playhead,duration=w.project.duration,
             selected_ids=sorted(w.timeline.selected_ids),caption_ids=sorted(w.timeline.selected_caption_ids),
             selected_transition_id=getattr(w.timeline,'selected_transition_id',''),
-            background_tasks=len(w._workers),page={0:'Edit',1:'Deliver'}.get(w.current_page,'Edit'),jobs=self.call_get_jobs())
+            background_tasks=sum(not getattr(job,'maintenance',False) for job in w._workers),page={0:'Edit',1:'Deliver'}.get(w.current_page,'Edit'),jobs=self.call_get_jobs())
         if section!='summary':result['project']=w.project.to_dict()
         return result
     def call_get_capabilities(self):
@@ -369,7 +374,7 @@ class EditorAPI:
                 'insert_transition':'name, track, duration, alignment (center/start/end), optional left_item_id, right_item_id, cut_time, properties',
                 'set_caption_style':'preset (crime_red, viral_yellow, cyber_cyan, mrbeast_gold, clean_card), properties (partial dict), optional caption_ids',
                 'apply_vertical_framing':'mode (center_and_fill, fit_width, fill_916), foreground_track, background_track, optional scale'},
-            motion_composition=schema(),
+            motion_composition=schema(),motion_presets=__import__('kinetic_cut.motion_presets',fromlist=['catalog']).catalog(),
             object_tracking=dict(tool='track_object',cancel_tool='tracking_job_control',
                 coordinates='Full-source normalized [x,y,width,height], before crop/transform; source seconds = in_point + (timeline time - start) * speed',
                 modes=list(MODES),loss_policies=list(LOSS_POLICIES),defaults=default_effect(),
@@ -456,6 +461,38 @@ class EditorAPI:
             duration=round(item.duration,3),
             properties=item.graphic_data
         )
+    def _motion_item(self,item_id):
+        item=self.w.project.item_by_id(item_id)
+        if not item or item.role!='graphic' or not is_motion(item.graphic_type):raise ValueError('Select a Motion Composition item')
+        return item
+    def call_get_motion_composition(self,item_id,seconds=None):
+        from .motion import validate
+        from .motion_geometry import layout
+        item=self._motion_item(item_id); seconds=item.in_point if seconds is None else float(seconds)
+        if not math.isfinite(seconds) or seconds<0:raise ValueError('Invalid composition time')
+        scene=validate(item.graphic_data['scene']); entries,_=layout(scene,seconds)
+        return dict(revision=revision(self.w.project),item_id=item.id,seconds=seconds,source_range=[item.in_point,item.in_point+item.source_duration],preset=item.graphic_data.get('preset'),parameters=copy.deepcopy(item.graphic_data.get('parameters',{})),scene=scene,
+                    layers=[dict(id=n['id'],visible=entries[n['id']]['visible'],bounds=[entries[n['id']]['hit'].boundingRect().x(),entries[n['id']]['hit'].boundingRect().y(),entries[n['id']]['hit'].boundingRect().width(),entries[n['id']]['hit'].boundingRect().height()]) for n in scene['nodes']])
+    def call_get_motion_preview(self,item_id,seconds=None,max_width=640):
+        from .motion import draw
+        state=self.call_get_motion_composition(item_id,seconds); scene=state['scene']; w,h=scene['canvas']; factor=min(max(160,min(1920,int(max_width)))/w,1920/max(w,h))
+        image=draw(scene,state['seconds'],(max(2,round(w*factor)),max(2,round(h*factor))),self.w.project.settings.fps)
+        buffer=QBuffer(); buffer.open(QIODevice.WriteOnly); image.save(buffer,'PNG')
+        return {'_mcp_content':[dict(type='text',text=json.dumps(dict(item_id=item_id,seconds=state['seconds'],coordinates='composition source seconds',alpha=True))),dict(type='image',data=bytes(buffer.data().toBase64()).decode(),mimeType='image/png')]}
+    def _motion_edit(self,current_revision,item_id,fn):
+        self.editing()
+        if current_revision!=revision(self.w.project):raise ValueError('Project changed. Refresh get_state before editing.')
+        item=self._motion_item(item_id)
+        if self.w.project.track_states.get(item.track,{}).get('locked'):raise ValueError('Destination track is locked')
+        stage=copy.deepcopy(self.w.project); target=stage.item_by_id(item_id); target.graphic_data=fn(copy.deepcopy(target.graphic_data)); validate(stage); self.install(stage)
+        return dict(revision=revision(self.w.project),item_id=item_id,undoable=True)
+    def call_edit_motion_composition(self,revision,item_id,operations):
+        from .motion_editing import apply
+        def change(data):data['scene']=apply(data['scene'],operations); return data
+        return self._motion_edit(revision,item_id,change)
+    def call_configure_motion_preset(self,revision,item_id,properties):
+        from .motion_presets import update
+        return self._motion_edit(revision,item_id,lambda data:update(data,properties))
     def call_get_timeline_summary(self):
         p=self.w.project
         summary={

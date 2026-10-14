@@ -18,12 +18,13 @@ class PreviewQuality(QComboBox):
         self.compat_ready={}       # Full-size H.264 previews for AV1 sources.
         self.ready_signatures={}
         self.compat_signatures={}
+        self.seek_ready={}; self.seek_signatures={}
         self.inspected_codecs={}
         self.token=None
         self.extra_ids=set()
         self.addItems(['Preview: Full','Preview: Optimized'])
         self.setCurrentIndex(int(w.settings.get('optimized_preview',False)))
-        self.setToolTip('Full uses original frames when the decoder supports them; AV1 uses an automatically prepared full-size H.264 preview.\nOptimized uses 960px, short-GOP previews. Audio and exports always use originals.')
+        self.setToolTip('Full keeps source resolution and all effects, with background short-GOP seek copies for faster playback.\nOptimized uses 960px previews. Audio and exports always use originals.')
         self.currentIndexChanged.connect(self.changed)
 
     @staticmethod
@@ -69,35 +70,49 @@ class PreviewQuality(QComboBox):
             codec=self._codec(media,signature)
             compatible=self._ready(media,signature,self.compat_ready,self.compat_signatures)
             optimized=self._ready(media,signature,self.ready,self.ready_signatures)
+            seek=self._ready(media,signature,self.seek_ready,self.seek_signatures)
             # A prepared optimized H.264 copy remains a temporary AV1 fallback
             # while the full-resolution compatibility copy is being built.
             if self.currentIndex():path=optimized or compatible
-            elif codec=='av1':path=compatible or optimized
-            else:path=''
+            elif codec=='av1':path=seek or compatible or optimized
+            else:path=seek
             if path:wanted[media.id]=path
         if wanted==w.proxies:return
         saved=dict(w.preview.frames)
+        changed={id for id in set(wanted)|set(w.proxies) if wanted.get(id)!=w.proxies.get(id)}
         for key in list(w.transport.decoders):
-            if key[3]=='video':w.transport.retire_decoder(key)
+            if key[3]=='video' and key[0] in changed:w.transport.retire_decoder(key)
         w.preview.frames.update(saved)
         w.proxies=wanted
-        w.transport.sync(True)
+        w.transport.sync(False)
 
     def request(self):
         if getattr(self.w.preview,'caption_focus',False) or getattr(getattr(self.w,'transport',None),'closed',False):return
         w=self.w
         used={i.media_id for i in w.project.timeline if i.track in w.project.video_tracks}|self.extra_ids
+        from .video_worker import enabled_for
+        from .media import proxy_path
+        restored=False
+        for media in w.project.media:
+            if media.id not in used or media.kind!='video' or not enabled_for(w,media.id):continue
+            signature=self._signature(media)
+            if not signature:continue
+            cached=proxy_path(media,seek_cache=True)
+            if cached.is_file() and self.seek_signatures.get(media.id)!=signature:
+                self.seek_ready[media.id]=str(cached); self.seek_signatures[media.id]=signature; restored=True
+        if restored:self.apply(force=True)
         # A project switch can retire a decoder just as a cached compatibility
         # worker reports success. Reconcile the path on every request so a
         # ready preview cannot remain black until the user toggles quality.
-        for media in w.project.media:
+        active={i.media_id for i in w.project.timeline if i.track in w.project.video_tracks and i.start<=w.project.playhead<i.start+i.duration}
+        for media in sorted(w.project.media,key=lambda m:m.id not in active):
             if media.id not in used or media.kind!='video' or media.id in w.proxies:continue
             signature=self._signature(media)
             if signature and self._codec(media,signature)=='av1' and self._ready(media,signature,self.compat_ready,self.compat_signatures):
                 self.apply(force=True)
                 break
         if self.busy:return
-        for media in w.project.media:
+        for media in sorted(w.project.media,key=lambda m:m.id not in active):
             if media.id not in used or media.kind!='video' or media.compound:continue
             signature=self._signature(media)
             if not signature:continue
@@ -106,8 +121,15 @@ class PreviewQuality(QComboBox):
             if not codec and not (inspected and inspected[0]==signature) and ('inspect',signature) not in self.failed:
                 self._start('inspect',media,signature)
                 return
-            if codec=='av1' and (not self.currentIndex() or media.width<=960) and not self._ready(media,signature,self.compat_ready,self.compat_signatures) and ('compat',signature) not in self.failed:
+            from .video_worker import enabled_for
+            needs_compat=not enabled_for(w,media.id)
+            if codec=='av1' and needs_compat and (not self.currentIndex() or media.width<=960) and not self._ready(media,signature,self.compat_ready,self.compat_signatures) and ('compat',signature) not in self.failed:
                 self._start('compat',media,signature)
+                return
+            if (enabled_for(w,media.id) and not self.currentIndex() and codec in ('h264','av1')
+                    and not media.has_alpha and not self._ready(media,signature,self.seek_ready,self.seek_signatures)
+                    and ('seek',signature) not in self.failed):
+                self._start('seek',media,signature)
                 return
             if self.currentIndex() and media.width>960 and not self._ready(media,signature,self.ready,self.ready_signatures) and ('optimized',signature) not in self.failed:
                 self._start('optimized',media,signature)
@@ -129,7 +151,9 @@ class PreviewQuality(QComboBox):
             def report_progress(fraction,message):
                 worker.signals.progress.emit((fraction,message))
             worker=Worker(generate_proxy,snapshot,self.w.settings.get('ffmpeg','ffmpeg'),
-                          cancel=token,compatibility=kind=='compat',progress=report_progress)
+                          cancel=token,compatibility=kind=='compat',progress=report_progress,seek_cache=kind=='seek',
+                          protected=set(self.seek_ready.values())|set(self.w.proxies.values())|{m.path for m in self.w.project.media})
+            if kind=='seek':worker.maintenance=True
 
         def current():
             live=self.w.project.media_by_id(snapshot.id)
@@ -152,6 +176,9 @@ class PreviewQuality(QComboBox):
                 # compatible copy is ready, even while the timeline is playing.
                 self.apply(force=True)
                 self.w.statusBar().showMessage('AV1 preview ready · '+snapshot.name,5000)
+            elif kind=='seek':
+                self.seek_ready[snapshot.id]=value; self.seek_signatures[snapshot.id]=signature
+                self.apply(force=True)
             else:
                 self.ready[snapshot.id]=value
                 self.ready_signatures[snapshot.id]=signature
