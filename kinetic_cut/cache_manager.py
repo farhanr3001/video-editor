@@ -17,6 +17,9 @@ from .theme_widgets import set_ui_style
 
 
 CATEGORIES = (
+    ('ai-enhance', 'AI enhanced video frames', 'ai-enhance', {'.png','.json','.mkv','.log'}),
+    ('transcripts', 'Source transcript indexes', 'transcripts', {'.json'}),
+    ('edit-reviews', 'Edit review frames and reports', 'edit-reviews', {'.png', '.json'}),
     ('motion-renders', 'Rendered motion graphics', 'motion-renders', {'.mkv'}),
     ('thumbs', 'Media thumbnails', 'thumbs', {'.jpg', '.jpeg', '.png'}),
     ('proxies', 'Playback proxies', 'proxies', {'.mp4'}),
@@ -157,10 +160,11 @@ class CacheManagerDialog(QDialog):
         from .component_ui import active_downloads
         metadata = manifest()
         for key in ROOTS:
-            ready = installed(key)
+            root=component_root(key)
+            ready = root.is_dir() and not root.is_symlink() and any(root.iterdir())
             if ready and key not in self.component_rows:
                 row = QHBoxLayout(); check = QCheckBox(metadata.get(key,{}).get('name',
-                    {'vision':'Face / background tools','vocals':'Vocal separation'}[key]))
+                    {'vision':'Face / background tools','vocals':'Vocal separation','enhance':'AI Enhance'}[key]))
                 amount = QLabel(); row.addWidget(check,1); row.addWidget(amount); self.component_layout.addLayout(row)
                 self.component_rows[key] = (check,amount,row)
             if key in self.component_rows:
@@ -168,7 +172,7 @@ class CacheManagerDialog(QDialog):
                 check.setVisible(ready); amount.setVisible(ready); check.setEnabled(ready and key not in active_downloads)
                 if not ready:check.setChecked(False)
                 else:amount.setText(size_text(sum(p.stat().st_size for p in component_root(key).rglob('*') if p.is_file())))
-        self.component_group.setVisible(any(installed(key) for key in ROOTS))
+        self.component_group.setVisible(any(not check.isHidden() for check,_,_ in self.component_rows.values()))
         sizes = scan()
         total = 0
         for category, (check, amount) in self.rows.items():
@@ -205,6 +209,11 @@ class CacheManagerDialog(QDialog):
                 from .component_ui import events
                 events().changed.emit()
             count, released = clear(selected) if selected else (0, 0)
+            if 'ai-enhance' in selected:
+                from . import enhance
+                from .enhance_preview import frames as enhanced_frames
+                enhance._images.clear();enhanced_frames.clear();enhance._range_indexes.clear()
+                window.preview.effect_cache.clear();window.preview.crop_cache.clear();window.preview.composition_cache.clear();window.preview.update()
             if 'proxies' in selected:
                 frames=dict(window.preview.frames)
                 for key in list(window.transport.decoders):

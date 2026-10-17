@@ -43,3 +43,21 @@ installer/sizes.iss
 /*.md
 !README.md
 docs/*.md
+
+# Private assets for the owner's MCP-authored short.
+assets_xqc_door_20261006/
+assets_xqc_nopixel_20261006/
+assets_xqc_wealth_20261006/
+assets_xqc_cooking_20261006/
+assets_xqc_rankdle_20261006/
+assets_xqc_grenades_20261006/
+assets_xqc_story_20261006/
+assets_xqc_freezer_20261006/
+assets_arabic_travel/
+assets_arabic_series_v2/
+assets_arabic_series/
+assets_xqc_wealth_followup_20261013/
+assets_xqc_wealth_series_20261014/
+
+# Private video research; keep it out of source backups.
+/wealth_search.jsonl

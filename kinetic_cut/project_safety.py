@@ -58,8 +58,22 @@ def collect_project(project: Project, destination: str | Path, progress=None) ->
     snapshot = copy.deepcopy(project)
     sources: dict[str, Path] = {}
     references: list[tuple[dict, str]] = []
+    artwork_references = []
 
     def visit(body: dict):
+        for item in body.get('timeline',body.get('items',[])):
+            scene=item.get('graphic_data',{}).get('scene',{})
+            extra=[(cue,'source') for cue in scene.get('sound_cues',[])]
+            extra += [(node,'source') for node in scene.get('nodes',[]) if node.get('kind')=='image']
+            extra += [(effect,'image') for effect in item.get('effects',[]) if effect.get('name')=='Object Tracking']
+            data=item.get('graphic_data',{})
+            if data.get('preset') and isinstance(data.get('parameters'),dict):extra.append((data['parameters'],'image'))
+            for target,attribute in extra:
+                raw=target.get(attribute)
+                if not raw:continue
+                source=Path(raw)
+                if not source.is_file():raise FileNotFoundError(f'Missing graphic/sound asset: {source}')
+                key=os.path.normcase(str(source.resolve())); sources[key]=source; artwork_references.append((target,attribute,key))
         for media in body.get("media", []):
             nested = media.get("compound") or media.get("timeline_preset")
             if nested:
@@ -112,6 +126,7 @@ def collect_project(project: Project, destination: str | Path, progress=None) ->
                     media["thumbnail"] = str(thumb.relative_to(destination))
             else:
                 media["thumbnail"] = ""
+        for target,attribute,key in artwork_references:target[attribute]=str(relocated[key].relative_to(destination))
         safe_name = re.sub(r'[<>:"/\\|?*]', "_", snapshot.name).strip() or "Project"
         output = destination / f"{safe_name}.kcut"
         body["path"] = str(output)

@@ -39,6 +39,9 @@ if __name__ == "__main__":
     if len(sys.argv)>1 and sys.argv[1].endswith('-selftest') and sys.argv[1]!='--close-guard-selftest':
         from kinetic_cut import close_guard
         close_guard.DIAGNOSTIC_CLEANUP=True  # Existing diagnostic fixture shutdown only.
+    if len(sys.argv)==4 and sys.argv[1]=='--enhance-selftest':
+        from kinetic_cut.enhance_diagnostics import run
+        sys.exit(run(sys.argv[2],sys.argv[3]))
     if len(sys.argv)==3 and sys.argv[1]=='--tts-stability-selftest':
         from kinetic_cut.tts_stability_diagnostics import run
         sys.exit(run(sys.argv[2]))
@@ -54,6 +57,12 @@ if __name__ == "__main__":
     if len(sys.argv)==3 and sys.argv[1]=='--motion-selftest':
         from kinetic_cut.motion_diagnostics import run
         sys.exit(run(sys.argv[2]))
+    if len(sys.argv)==3 and sys.argv[1]=='--headline-selftest':
+        from kinetic_cut.headline_diagnostics import run
+        sys.exit(run(sys.argv[2]))
+    if len(sys.argv)==4 and sys.argv[1]=='--edit-assistance-selftest':
+        from kinetic_cut.edit_assistance_diagnostics import run
+        sys.exit(run(sys.argv[2],sys.argv[3]))
     if len(sys.argv)==3 and sys.argv[1]=='--watch-folder-selftest':
         from kinetic_cut.watch_diagnostics import run
         sys.exit(run(sys.argv[2]))

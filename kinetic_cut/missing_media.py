@@ -139,6 +139,8 @@ def replace(project, old_path, replacement, media_ids=None):
     return restored,blocked
 
 def export_issues(project):
+    from .motion_audio import expanded
+    project=expanded(project)
     issues=[]
     for item in project.timeline:
         if item.role in {'title','graphic'} or item.muted:continue

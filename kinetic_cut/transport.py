@@ -128,6 +128,8 @@ class TimelineTransport(QObject):
         if self.closed:return
         from .missing_media import unavailable
         p=self.window.project; t=self.position; active=set(); preview=self.window.preview
+        from .motion_audio import playback_view
+        p,self._motion_audio_view=playback_view(p,getattr(self,'_motion_audio_view',None))
         interval=max(8,round(1000/max(1,p.settings.fps)))
         if self.timer.interval()!=interval:self.timer.setInterval(interval)
         sources={m.id:m.path for m in p.media}
@@ -661,6 +663,7 @@ class TimelineTransport(QObject):
         if (not self.playing or key in self.warm_keys) and key in self.decoders:self.decoders[key][0].pause()
 
     def shutdown(self):
+        self._motion_audio_view=None
         cache=getattr(self.window.preview,'composition_cache',None)
         if cache:cache.close()
         self._scrub_timer.stop()

@@ -19,6 +19,21 @@ from kinetic_cut.exporter import write_ass
 
 
 class GraphicsUnitTests(unittest.TestCase):
+    def test_static_arrows_export_through_identical_native_pixels(self):
+        import av,numpy as np
+        from unittest.mock import patch
+        from kinetic_cut.native_animation import required,frame,prepare
+        from kinetic_cut.model import Transform
+        for direction,style in [('Right','Straight'),('Up','Straight'),('Left','Double-Headed')]:
+            item=TimelineItem('arrow','','video_1',0,.2,role='graphic',graphic_type='Pointing Arrow',graphic_data={**default_graphic_data('Pointing Arrow'),'direction':direction,'style':style,'color':'#ff0000'},transform=Transform(.6,.55,.7,rotation=-23))
+            item.transform.scale_y=.45; item.transform.anchor_x=12; item.transform.anchor_y=-8
+            p=Project(timeline=[item]); p.settings.width=320; p.settings.height=240; p.settings.fps=5
+            self.assertTrue(required(item)); before=p.to_dict(); image=frame(p,item,0)
+            expected=np.frombuffer(image.constBits(),np.uint8).reshape(240,320,4).copy()
+            with tempfile.TemporaryDirectory() as directory,patch('kinetic_cut.config.CACHE_DIR',Path(directory)):
+                stage=prepare(p,None,None); self.assertEqual(stage.timeline[0].role,'normal')
+                with av.open(stage.media[-1].path) as movie:np.testing.assert_array_equal(next(movie.decode(video=0)).to_ndarray(format='rgba'),expected)
+            self.assertEqual(p.to_dict(),before)
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])

@@ -126,6 +126,8 @@ class MotionEditor(MotionInputRouter,QDialog):
             if label:label.setParent(page); self._property_labels[field]=label; page_form.addRow(label,field)
             else:page_form.addRow(field)
         self.property_tabs=tabs; right.deleteLater(); split.addWidget(tabs); split.setSizes([190,570,360])
+        from .motion_audio_ui import SoundCuePanel
+        self.sound_panel=SoundCuePanel(self); tabs.addTab(self.sound_panel,'Sound')
         from .motion_timeline import MotionTimeline
         bottom=QWidget(workspace); bottom_layout=QVBoxLayout(bottom); bottom_layout.setContentsMargins(0,0,0,0)
         tools=QHBoxLayout(); self.undo_button=QPushButton('Undo',bottom); self.redo_button=QPushButton('Redo',bottom)
@@ -172,6 +174,7 @@ class MotionEditor(MotionInputRouter,QDialog):
         self.updating=False; self.refresh()
     def label_for_field(self,field):return self._property_labels.get(field) if hasattr(self,'_property_labels') else self.form.labelForField(field)
     def rebuild(self):
+        if hasattr(self,'sound_panel'):self.sound_panel.refresh()
         self.updating=True; self.tree.clear(); items={}
         for node in self.scene['nodes']:
             item=QTreeWidgetItem([node.get('name',node['id'])+' · '+node['kind']]); item.setData(0,Qt.UserRole,node['id']); items[node['id']]=item
@@ -195,7 +198,10 @@ class MotionEditor(MotionInputRouter,QDialog):
             blocker=QSignalBlocker(self.time); self.time.setValue(self.position); del blocker
         if self.timer.isActive():self.preview.update(); self.timeline.viewport().update()
         else:self.refresh()
-    def pause(self):self.timer.stop(); self.play.setText('Play')
+        self.sound_panel.playback.sync(self.scene,self.position,self.timer.isActive(),self.original.speed)
+    def pause(self):
+        self.timer.stop(); self.play.setText('Play')
+        if hasattr(self,'sound_panel'):self.sound_panel.playback.sync(self.scene,self.position,False)
     def toggle(self):
         if self.timer.isActive():self.pause(); self.refresh(); return
         if self.position>=self.time.maximum():self.seek(self.time.minimum())
@@ -355,8 +361,12 @@ class MotionEditor(MotionInputRouter,QDialog):
             self.node_id=node['id']; self.put_key(channel,curve(node,channel,self.position))
         self.node_id=primary; self.refresh()
     def remove_key(self):
+        selected={node['id'] for node in self.selected_nodes()}; channel=self.channel.currentText()
         for node in self.selected_nodes():
             keys=node.get('keyframes',{}).get(self.channel.currentText(),[]); keys[:]=[k for k in keys if abs(k['time']-self.position)>.00001]
+        if 'sound_cues' in self.scene:
+            self.scene['sound_cues']=[c for c in self.scene['sound_cues'] if not(c.get('event')=='keyframe' and c.get('node_id') in selected and c.get('channel')==channel and abs(c.get('key_time',-1)-self.position)<.00001)]
+            self.sound_panel.refresh()
         self.refresh()
     def change_mode(self,mode):
         if not self.updating:
@@ -408,12 +418,19 @@ class MotionEditor(MotionInputRouter,QDialog):
         if not self.node():return
         from .model import uid
         ids=self.branch(); names={i:uid()[:8] for i in ids}; copies=[]
+        cues=[copy.deepcopy(c) for c in self.scene.get('sound_cues',[]) if c.get('event','time')!='time' and c.get('node_id') in ids]
+        if len(cues)+len(self.scene.get('sound_cues',[]))>32:
+            QMessageBox.warning(self,'Sound cue limit','Duplicating this branch would exceed 32 sound cues. Remove a cue first.'); return
+        for cue in cues:cue['id']=uid(); cue['node_id']=names[cue['node_id']]
+        if cues:self.scene['sound_cues'].extend(cues)
         for node in self.scene['nodes']:
             if node['id'] in ids:
                 n=copy.deepcopy(node); n['id']=names[n['id']]; n['parent']=names.get(n.get('parent'),n.get('parent','')); copies.append(n)
         self.scene['nodes'].extend(copies); self.selected_ids={names[i] for i in self.selected_ids if i in names}; self.node_id=names[self.node_id]; self.rebuild()
     def remove(self):
-        ids=self.branch(); self.scene['nodes']=[n for n in self.scene['nodes'] if n['id'] not in ids]; self.node_id=''; self.selected_ids=set(); self.rebuild()
+        ids=self.branch(); self.scene['nodes']=[n for n in self.scene['nodes'] if n['id'] not in ids]
+        if 'sound_cues' in self.scene:self.scene['sound_cues']=[c for c in self.scene['sound_cues'] if c.get('event','time')=='time' or c.get('node_id') not in ids]
+        self.node_id=''; self.selected_ids=set(); self.rebuild()
     def reorder(self,direction):
         roots=set(self.selection_roots()); nodes=self.scene['nodes']; parents={n.get('parent','') for n in nodes if n['id'] in roots}
         for parent in parents:
@@ -449,6 +466,8 @@ class MotionEditor(MotionInputRouter,QDialog):
         if path:
             try:
                 self.scene=validate(json.loads(Path(path).read_text(encoding='utf-8-sig')))
+                from .motion_audio import rebase
+                rebase(self.scene,Path(path).parent)
                 for node in self.scene['nodes']:
                     if node.get('kind')=='image' and node.get('source') and not Path(node['source']).is_absolute():node['source']=str((Path(path).parent/node['source']).resolve())
                 self.rebuild()
@@ -459,6 +478,8 @@ class MotionEditor(MotionInputRouter,QDialog):
             import os
             try:
                 scene=validate(self.scene)
+                from .motion_audio import rebase
+                rebase(scene,Path(path).parent,True)
                 for node in scene['nodes']:
                     if node.get('kind')=='image' and node.get('source'):
                         try:node['source']=os.path.relpath(node['source'],Path(path).parent)
@@ -466,6 +487,8 @@ class MotionEditor(MotionInputRouter,QDialog):
                 Path(path).write_text(json.dumps(scene,indent=2),encoding='utf-8')
             except (ValueError,OSError) as error:QMessageBox.warning(self,'Could not save template',str(error))
     def accept(self):
+        if self.sound_panel.pending is not None:
+            self.property_tabs.setCurrentWidget(self.sound_panel); self.sound_panel.status.setText('Wait for sound import to finish before saving the composition.'); return
         current=self.owner.project.item_by_id(self.original.id)
         if current!=self.original or self.owner.current_page!=0 or self.owner.project.track_states.get(self.original.track,{}).get('locked'):
             QMessageBox.warning(self,'Composition changed','The composition changed or its track is locked. Reopen the editor.'); return
@@ -474,7 +497,7 @@ class MotionEditor(MotionInputRouter,QDialog):
         current.graphic_data['scene']=scene; self.owner.model_changed(); super().accept()
     def done(self,result):
         from PySide6.QtWidgets import QApplication
-        QApplication.instance().removeEventFilter(self); self.timer.stop(); super().done(result)
+        QApplication.instance().removeEventFilter(self); self.timer.stop(); self.sound_panel.close_audio(); super().done(result)
 
 def _local_edit(method):
     def wrapped(self,*args,**kwargs):

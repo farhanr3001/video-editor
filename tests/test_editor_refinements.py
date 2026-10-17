@@ -168,7 +168,8 @@ class RefinementTests(unittest.TestCase):
     def test_headline_inspector_and_shadow_axis_layout(self):
         w=self.window(); w.add_title_object("Headline"); self.app.processEvents()
         self.assertTrue(w.inspector.headline_controls.isVisible()); self.assertFalse(w.inspector.title_style_host.isVisible())
-        w.inspector.headline_size.change(150); title=w.project.item_by_id(w.timeline.selected_id); self.assertEqual(title.title_style.zoom_x,1.5); self.assertEqual(title.title_style.zoom_y,1.5)
+        w.inspector.headline_size.change(150); title=w.project.item_by_id(w.timeline.selected_id); self.assertEqual(title.title_style.size,150); self.assertEqual(title.title_style.zoom_x,1)
+        w.inspector.headline_scale.change(150); self.assertEqual(title.title_style.zoom_x,1.5); self.assertEqual(title.title_style.zoom_y,1.5); self.assertEqual(title.title_style.size,150)
         w.add_title_object("Text"); self.app.processEvents(); self.assertTrue(w.inspector.title_style_host.isVisible()); self.assertFalse(w.inspector.headline_controls.isVisible())
         rows=dict(w.inspector.style_bindings); self.assertIs(rows["shadow_x"].parentWidget(),rows["shadow_y"].parentWidget())
         section=next(s for s in w.inspector.findChildren(InspectorSection) if s.toggle.text()=="Drop Shadow")

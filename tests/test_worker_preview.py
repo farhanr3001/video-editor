@@ -237,6 +237,88 @@ class WorkerCompositionTests(unittest.TestCase):
         self.assertIsNone(cache.request(rect))
         self.assertEqual(self.p.timeline[1].start,0); self.assertEqual(self.p.timeline[1].duration,4)
         self.assertLessEqual(cache.images.byte_count,128*1024**2)
+    def test_viewer_pan_reuses_complete_raster_and_translates_bounds(self):
+        self.p.timeline.append(TimelineItem('title','','video_3',0,4,role='title',title_text='Pinned title'))
+        cache=self.canvas.composition_cache;rect=QRectF(11,9,270,480)
+        cache.request(rect);cache.future.result(5);first=cache.request(rect)
+        bounds=copy.deepcopy(self.canvas.text_rects);self.assertIn(('title','title'),bounds)
+        for dx,dy in ((0,0),(31,19),(-80,-90)):
+            moved=rect.translated(dx,dy)
+            with patch.object(cache.executor,'submit',side_effect=AssertionError('pan restarted composition')):
+                actual=cache.request(moved)
+            self.assertEqual(first[0].cacheKey(),actual[0].cacheKey())
+            self.assertEqual(self.canvas.text_rects[('title','title')],bounds[('title','title')].translated(dx,dy))
+            context=SceneContext(copy.deepcopy(self.p),{'k':self.image},dict(self.canvas.active_frames),{},True,1.,False)
+            expected,_,_=render(context,moved,(320,500),1.)
+            placed=QImage(320,500,QImage.Format_ARGB32_Premultiplied);placed.fill(Qt.transparent)
+            painter=QPainter(placed);painter.setRenderHints(QPainter.Antialiasing|QPainter.SmoothPixmapTransform);painter.setClipRect(moved);painter.drawImage(moved.topLeft(),actual[0]);painter.end()
+            # A second premultiplied Qt paint can round antialiased edge
+            # channels by one level; interior geometry/colour must remain exact.
+            delta=np.abs(np.frombuffer(placed.constBits(),np.uint8).astype(np.int16)-np.frombuffer(expected.constBits(),np.uint8).astype(np.int16))
+            self.assertLessEqual(delta.max(),1);self.assertLess(np.count_nonzero(delta)/delta.size,.002)
+        self.assertEqual(cache.completed,1)
+    def test_viewer_zoom_rebuilds_but_extreme_raster_is_bounded(self):
+        cache=self.canvas.composition_cache;rect=QRectF(0,0,270,480)
+        cache.request(rect);cache.future.result(5);first=cache.request(rect)
+        self.assertIsNone(cache.request(QRectF(0,0,540,960)));cache.future.result(5)
+        zoomed=cache.request(QRectF(50,40,540,960));self.assertEqual(zoomed[0].width(),540)
+        self.assertNotEqual(first[0].size(),zoomed[0].size())
+        self.assertIsNone(cache.request(QRectF(0,0,20000,20000)));self.assertIsNone(cache.future)
+    def test_cache_hit_and_late_worker_cannot_rewind_presented_frames(self):
+        from concurrent.futures import Future
+        cache=self.canvas.composition_cache;rect=self.canvas.composition_rect()
+        cache.request(rect);cache.future.result(5);first=cache.request(rect);old_key=next(iter(cache.images._images))
+        self.p.playhead=.5;cache.request(rect);cache.future.result(5);second=cache.request(rect)
+        # Revisit exact frames already in the cache, then receive older work.
+        self.p.playhead=0;self.assertEqual(cache.request(rect)[0].cacheKey(),first[0].cacheKey())
+        self.p.playhead=.5;self.assertEqual(cache.request(rect)[0].cacheKey(),second[0].cacheKey())
+        self.assertEqual(cache.last_frame,round(.5*self.p.settings.fps))
+        late=Future();late.set_result((first[0],{},''));cache.future=late;cache.pending=(old_key,cache.last[0],late)
+        self.p.playhead=.55
+        actual=cache.request(rect);self.assertEqual(actual[0].cacheKey(),second[0].cacheKey())
+        self.assertEqual(cache.last_frame,round(.5*self.p.settings.fps))
+        # A genuine backwards user seek can still show its correct cached frame.
+        self.p.playhead=0;self.assertEqual(cache.request(rect)[0].cacheKey(),first[0].cacheKey())
+    def test_late_different_source_at_same_timeline_frame_cannot_replace_cache_hit(self):
+        from concurrent.futures import Future
+        cache=self.canvas.composition_cache;rect=self.canvas.composition_rect()
+        cache.request(rect);cache.future.result(5);exact=cache.request(rect)
+        key=next(iter(cache.images._images));old_key=(key[0],key[1],(('earlier-source','frame'),),key[3])
+        obsolete=QImage(exact[0].size(),QImage.Format_ARGB32_Premultiplied);obsolete.fill(Qt.red)
+        late=Future();late.set_result((obsolete,{},''));late._kinetic_request_serial=0
+        cache.future=late;cache.pending=(old_key,cache.last[0],late)
+        self.p.playhead=.05
+        actual=cache.request(rect);self.assertEqual(actual[0].cacheKey(),exact[0].cacheKey())
+    def test_reverse_playback_keeps_order_without_falling_back_every_tick(self):
+        from types import SimpleNamespace
+        self.canvas.transport=SimpleNamespace(playing=True,rate=-1)
+        cache=self.canvas.composition_cache;rect=self.canvas.composition_rect();self.p.playhead=1
+        cache.request(rect);cache.future.result(5);first=cache.request(rect)
+        self.p.playhead=.9;self.assertIsNotNone(cache.request(rect));cache.future.result(5)
+        self.p.playhead=.85;second=cache.request(rect)
+        self.assertIsNotNone(second);self.assertLess(cache.last_frame,round(self.p.settings.fps))
+        self.assertNotEqual(first[0].cacheKey(),second[0].cacheKey())
+    def test_late_worker_cannot_rewind_a_newer_synchronous_fallback(self):
+        from concurrent.futures import Future
+        cache=self.canvas.composition_cache;rect=self.canvas.composition_rect()
+        cache.request(rect);cache.future.result(5);exact=cache.request(rect)
+        key=next(iter(cache.images._images));late_key=(key[0],round(.4*self.p.settings.fps),key[2],key[3])
+        blocked=Future();blocked._kinetic_request_serial=cache.serial
+        cache.future=blocked;cache.pending=(late_key,cache.last[0],blocked);cache.last_completed=0
+        self.p.playhead=.5;self.assertIsNone(cache.request(rect))
+        self.assertEqual(cache.last_frame,round(.5*self.p.settings.fps))
+        blocked.set_result((exact[0],{},''));self.p.playhead=.55
+        self.assertIsNone(cache.request(rect),'Old output must not replace the GUI frame already shown')
+    def test_extreme_zoom_fallback_fences_pending_normal_zoom_output(self):
+        from concurrent.futures import Future
+        cache=self.canvas.composition_cache;rect=self.canvas.composition_rect()
+        cache.request(rect);cache.future.result(5);first=cache.request(rect)
+        key=next(iter(cache.images._images));compatible=cache.last[0]
+        pending=Future();pending._kinetic_request_serial=cache.serial
+        cache.future=pending;cache.pending=(key,compatible,pending)
+        self.p.playhead=.1;self.assertIsNone(cache.request(QRectF(0,0,20000,20000)))
+        pending.set_result((first[0],{},''));self.p.playhead=.15
+        self.assertIsNone(cache.request(rect),'Old normal-zoom frame must not rewind the newer exact GUI result')
     def test_slow_composition_cannot_hold_an_old_frame_indefinitely(self):
         from concurrent.futures import Future
         cache=self.canvas.composition_cache; rect=self.canvas.composition_rect()

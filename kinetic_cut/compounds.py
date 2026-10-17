@@ -21,6 +21,15 @@ def cache_path(data):
     validate(data)
     stamps=[]
     def sources(body):
+        for item in body.get('timeline',body.get('items',[])):
+            scene=item.get('graphic_data',{}).get('scene',{})
+            paths=[c.get('source','') for c in scene.get('sound_cues',[])]
+            paths += [n.get('source','') for n in scene.get('nodes',[]) if n.get('kind')=='image']
+            for path in paths:
+                if not path:continue
+                try:
+                    stat=Path(path).stat(); stamps.append((path,stat.st_size,stat.st_mtime_ns))
+                except OSError:stamps.append((path,'missing'))
         for m in body.get('media',[]):
             if m.get('compound'):sources(m['compound'])
             elif m.get('path'):
@@ -52,7 +61,8 @@ def update_asset(media,child):
         media.thumbnail=make_thumbnail(str(target),'video')
     if not media.thumbnail or not Path(media.thumbnail).exists():
         media.thumbnail=first_child_thumbnail(child)
-    media.has_alpha=True; media.has_audio=any(i.track in child.audio_tracks for i in child.timeline)
+    from .motion_audio import project_cues
+    media.has_alpha=True; media.has_audio=any(i.track in child.audio_tracks for i in child.timeline) or bool(project_cues(child)[0])
 
 def create(project,item_ids,caption_ids,name):
     item_ids=set(item_ids); caption_ids=set(caption_ids)
@@ -97,7 +107,8 @@ def create(project,item_ids,caption_ids,name):
     for i in child.timeline:i.start-=start
     for c in child.captions:c.start-=start; c.end-=start
     used={i.media_id for i in child.timeline}; child.media=[m for m in child.media if m.id in used]
-    asset=MediaItem(uid(),'','video',child.name,has_audio=any(i.track in child.audio_tracks for i in child.timeline))
+    from .motion_audio import project_cues
+    asset=MediaItem(uid(),'','video',child.name,has_audio=any(i.track in child.audio_tracks for i in child.timeline) or bool(project_cues(child)[0]))
     update_asset(asset,child)
     # Collapse into the highest selected video lane. Never overwrite an unselected
     # clip in an intervening gap; allocate a lane when the enclosing span conflicts.

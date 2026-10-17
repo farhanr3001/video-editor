@@ -30,6 +30,7 @@ class MotionTimeline(QAbstractScrollArea):
             if node['id']==self.editor.node_id:channels.add(self.editor.channel.currentText())
             for channel in sorted(channels):
                 if channel:self.rows.append((node['id'],channel))
+        self.rows.extend(('__sound__'+c['id'],'sound') for c in self.editor.scene.get('sound_cues',[]))
         lo,hi=self.bounds(); self.verticalScrollBar().setRange(0,max(0,len(self.rows)*self.ROW+self.RULER-self.viewport().height()))
         self.verticalScrollBar().setPageStep(max(1,self.viewport().height()-self.RULER)); self.verticalScrollBar().setSingleStep(self.ROW)
         self.horizontalScrollBar().setRange(0,max(0,round((hi-lo)*self.scale()-(self.viewport().width()-self.HEADER-24))))
@@ -45,6 +46,18 @@ class MotionTimeline(QAbstractScrollArea):
         for index,(node_id,channel) in enumerate(self.rows):
             r=self.row_rect(index)
             if r.bottom()<self.RULER or r.top()>self.viewport().height():continue
+            if channel=='sound':
+                from .motion_audio import at
+                from pathlib import Path
+                cue=next(c for c in self.editor.scene['sound_cues'] if '__sound__'+c['id']==node_id)
+                stamp=at(cue,self.editor.scene)
+                p.fillRect(r,ui_color('bg_panel')); p.setPen(ui_color('text_main'))
+                p.drawText(QRectF(8,r.top(),self.HEADER-16,r.height()),Qt.AlignVCenter,p.fontMetrics().elidedText('♪ '+Path(cue['source']).name,Qt.ElideRight,self.HEADER-16))
+                if stamp is not None:
+                    p.save(); p.setClipRect(QRectF(self.HEADER,r.top(),width-self.HEADER,r.height()),Qt.IntersectClip)
+                    p.setBrush(ui_color('accent')); p.setPen(Qt.NoPen)
+                    p.drawRoundedRect(QRectF(self.x(stamp),r.top()+6,max(2,cue['duration']*self.scale()),r.height()-12),3,3); p.restore()
+                continue
             node=self.node(node_id); chosen=node_id==self.editor.node_id
             p.fillRect(r,ui_color('bg_panel') if chosen else ui_color('bg_main'))
             p.setPen(ui_color('border')); p.drawLine(r.bottomLeft(),r.bottomRight())
@@ -83,14 +96,21 @@ class MotionTimeline(QAbstractScrollArea):
         if pos.y()<self.RULER:self.drag={'mode':'scrub'}; self.editor.seek(self.at(pos.x())); return
         index=int((pos.y()-self.RULER+self.verticalScrollBar().value())//self.ROW)
         if not 0<=index<len(self.rows):return
-        node_id,channel=self.rows[index]; self.editor.select_node(node_id)
+        node_id,channel=self.rows[index]
+        if channel=='sound':
+            panel=self.editor.sound_panel; self.editor.property_tabs.setCurrentWidget(panel)
+            for row in range(panel.rows.count()):
+                if '__sound__'+panel.rows.item(row).data(Qt.UserRole)==node_id:panel.rows.setCurrentRow(row); break
+            if pos.x()>=self.HEADER:self.editor.seek(self.at(pos.x()))
+            return
+        self.editor.select_node(node_id)
         if channel:self.editor.channel.setCurrentText(channel)
         if pos.x()<self.HEADER:return
         node=self.node(node_id); r=self.row_rect(index); lo,hi=self.bounds()
         key=next((k for k in node.get('keyframes',{}).get(channel,[]) if abs(self.x(k['time'])-pos.x())<8),None) if channel else None
         if key:
             self.editor.begin_edit(); self.editor.seek(key['time'])
-            self.drag=dict(mode='key',node_id=node_id,channel=channel,key=key,original=copy.deepcopy(key),press=pos.x())
+            self.drag=dict(mode='key',node_id=node_id,channel=channel,key=key,original=copy.deepcopy(key),press=pos.x(),cues=copy.deepcopy(self.editor.scene.get('sound_cues',[])))
         elif not channel and self.x(max(lo,node.get('start',0)))<=pos.x()<=self.x(min(hi,node.get('end',hi))):
             self.editor.begin_edit(); start=node.get('start',0); end=node.get('end',hi)
             mode='start' if abs(pos.x()-self.x(start))<7 else 'end' if abs(pos.x()-self.x(end))<7 else 'layer'
@@ -99,7 +119,7 @@ class MotionTimeline(QAbstractScrollArea):
                 more={n['id'] for n in self.editor.scene['nodes'] if n.get('parent') in ids}
                 if more<=ids:break
                 ids|=more
-            self.drag=dict(mode=mode,node_id=node_id,original=copy.deepcopy(node),branch={n['id']:copy.deepcopy(n) for n in self.editor.scene['nodes'] if n['id'] in ids},press=pos.x(),start=start,end=min(end,hi))
+            self.drag=dict(mode=mode,node_id=node_id,original=copy.deepcopy(node),branch={n['id']:copy.deepcopy(n) for n in self.editor.scene['nodes'] if n['id'] in ids},press=pos.x(),start=start,end=min(end,hi),cues=copy.deepcopy(self.editor.scene.get('sound_cues',[])))
         else:self.drag={'mode':'scrub'}; self.editor.seek(self.at(pos.x()))
     def mouseMoveEvent(self,event):
         if not self.drag:return super().mouseMoveEvent(event)
@@ -108,6 +128,9 @@ class MotionTimeline(QAbstractScrollArea):
         if abs(event.position().x()-d['press'])<3 and not d.get('moved'):return
         d['moved']=True; node=self.node(d['node_id']); value=self.at(event.position().x()); lo,hi=self.bounds()
         if d['mode']=='key':
+            for cue in self.editor.scene.get('sound_cues',[]):
+                original=next((c for c in d['cues'] if c['id']==cue['id']),{})
+                if original.get('event')=='keyframe' and original.get('node_id')==d['node_id'] and original.get('channel')==d['channel'] and abs(original.get('key_time',-1)-d['original']['time'])<1e-7:cue['key_time']=value
             d['key']['time']=value; keys=node['keyframes'][d['channel']]
             keys[:]=[k for k in keys if k is d['key'] or abs(k['time']-value)>1e-5]; keys.sort(key=lambda k:k['time']); self.editor.seek(value)
         else:
@@ -125,6 +148,9 @@ class MotionTimeline(QAbstractScrollArea):
                     changed['keyframes']=copy.deepcopy(before.get('keyframes',{}))
                     for keys in changed['keyframes'].values():
                         for k in keys:k['time']+=delta
+                for cue in self.editor.scene.get('sound_cues',[]):
+                    original=next((c for c in d['cues'] if c['id']==cue['id']),{})
+                    if original.get('event')=='keyframe' and original.get('node_id') in d['branch']:cue['key_time']=original['key_time']+delta
             self.editor.refresh()
         self.viewport().update(); self.editor.preview.update()
     def mouseReleaseEvent(self,event):

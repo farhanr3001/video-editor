@@ -47,6 +47,9 @@ def validate(raw):
     scene=copy.deepcopy(raw)
     if scene.get('version',1)!=1:raise ValueError('Unsupported motion composition version')
     scene['version']=1
+    if 'sound_cues' in scene:
+        from .motion_audio import validate as validate_cues
+        scene['sound_cues']=validate_cues(scene['sound_cues'])
     canvas=scene.get('canvas',[1080,1920])
     if not isinstance(canvas,list) or len(canvas)!=2 or any(not 1<=finite(v)<=8192 for v in canvas):raise ValueError('Canvas must contain two dimensions in 1–8192')
     scene['canvas']=list(map(float,canvas))
@@ -109,6 +112,9 @@ def validate(raw):
     if not isinstance(blur,dict):raise ValueError('Motion blur must be an object')
     blur['samples']=max(1,min(12,int(finite(blur.get('samples',1)))))
     blur['shutter']=max(0,min(360,finite(blur.get('shutter',180))))
+    if scene.get('sound_cues'):
+        from .motion_audio import at
+        if any(at(cue,scene) is None for cue in scene['sound_cues']):raise ValueError('A sound cue references a missing layer/keyframe. Remove or rebind the cue.')
     return scene
 
 def default_scene(canvas=(1080,1920)):
@@ -255,4 +261,5 @@ def draw_sample(scene,t,size):
 
 def schema():
     return dict(version=1,kinds=KINDS,channels=CHANNELS,easing=MODES,path_commands=ARITY,
+                sound_cues=dict(fields=['id','source','time','in_point','duration','source_duration','gain_db','enabled','event','node_id','channel','key_time'],events=['time','layer_start','layer_end','keyframe'],coordinates='Composition source seconds. Up to 32 cues; gain -60–0 dB. Local source files remain external, portable paths are rebased with the project.'),
                 guidance='Nodes use scene canvas pixels; parent IDs form groups. Key times are composition source seconds (clip in_point + local timeline time * speed). Text: text_mode character/word/typewriter/counter/rolling, text_align left/center/right. Rolling animates digits in text over entry_duration and settles to that exact text. Typewriter uses stagger seconds/grapheme or reveal 0–1 keys, optional caret/caret_period. Counters use number keys, number_decimals/grouping/prefix/suffix. Images: source path and image_fit contain/cover/stretch; existing images default stretch for compatibility. radius/stroke_width animate. Shape shadow: enabled, color, opacity, blur, x, y. Mask uses local geometry. Path trim 0–1 and matching path_to/morph. motion_blur samples 1–12, shutter 0–360. Templates are scene JSON. Presets are ordinary editable scenes with exposed parameters.')

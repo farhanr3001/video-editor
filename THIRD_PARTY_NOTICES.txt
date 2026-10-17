@@ -114,3 +114,17 @@ Owner font binaries are excluded from source history; existing available notices
 remain in the installer.
 yt-dlp (bundled media downloader): https://github.com/yt-dlp/yt-dlp
 License: Unlicense; license text: https://github.com/yt-dlp/yt-dlp/blob/master/LICENSE
+
+Legacy AI Enhance compatibility network: adapted from OpenMMLab MMagic RealBasicVSR / BasicVSR.
+Copyright (c) OpenMMLab. Apache-2.0; full text: assets/licenses/AI-Enhance-Apache-2.0.txt.
+Modifications: standalone inference dependencies, bounded tiled windows and equivalent
+DirectML bilinear feature warping. Official conservative non-adversarial checkpoint
+is downloaded only on explicit request; architecture: https://github.com/open-mmlab/mmagic
+
+AI Enhance compact network: adapted from Real-ESRGAN SRVGGNetCompact.
+Copyright (c) 2021 Xintao Wang. BSD-3-Clause; full text:
+assets/licenses/AI-Enhance-BSD-3-Clause.txt.
+Source: https://github.com/xinntao/Real-ESRGAN/blob/master/realesrgan/archs/srvgg_arch.py
+Modifications: standalone architecture without BasicSR registration; bounded inference,
+small-crop whole-frame execution, motion-checked finishing and GPU duty scheduling.
+Official compact general/weak-denoise weights are optional explicit downloads.

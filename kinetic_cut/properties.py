@@ -105,6 +105,9 @@ class PropertiesPanel(QWidget):
         self.audio_subtabs=QTabWidget(); self.audio_subtabs.setDocumentMode(True)
         self.audio=self.build_audio(); self.audio_subtabs.addTab(scroll(self.audio),"Controls")
         self.audio_subtabs.addTab(self.build_audio_levels(),"Levels")
+        from .transcript_ui import TranscriptPanel
+        self.transcript_panel=TranscriptPanel(self)
+        self.audio_subtabs.addTab(self.transcript_panel,"Search transcript")
         self.tabs.addTab(self.audio_subtabs,lucide_icon("music-2",'@tab_icon'),"Audio")
         self.effects=self.build_effects(); self.tabs.addTab(scroll(self.effects),lucide_icon("wand-sparkles",'@tab_icon'),"Effects")
         self.colors=self.build_colors(); self.tabs.addTab(scroll(self.colors),lucide_icon("palette",'@tab_icon'),"Colours")
@@ -368,6 +371,8 @@ class PropertiesPanel(QWidget):
         self.effect_note=QLabel(); self.effect_note.setWordWrap(True); self.effect_note.setObjectName("emptyState"); root.addWidget(self.effect_note)
         from .tracking_ui import TrackingPanel
         self.tracking_panel=TrackingPanel(self); root.addWidget(self.tracking_panel); self.tracking_panel.hide()
+        from .enhance_ui import EnhancePanel
+        self.enhance_panel=EnhancePanel(self);root.addWidget(self.enhance_panel);self.enhance_panel.hide()
         self.vision_reanalyse=QPushButton('Re-analyse current crop'); self.vision_reanalyse.clicked.connect(self.reanalyse_vision); root.addWidget(self.vision_reanalyse); self.vision_reanalyse.hide()
         self.vision_customize=QPushButton('Customize Face…'); self.vision_customize.clicked.connect(self.customize_vision); root.addWidget(self.vision_customize); self.vision_customize.hide()
         root.addStretch(); return panel
@@ -492,6 +497,7 @@ class PropertiesPanel(QWidget):
         self.transition_id=""
         if item_id!=self.item_id:self.window.flush_text_edit()
         previous_item=self.item_id; self.item_id=item_id; p=self.window.project; item=p.item_by_id(item_id)
+        self.transcript_panel.set_source(item)
         if item and item.role=="title":
             self.caption_id=""; self.updating=True; self.video_stack.setCurrentIndex(2); self.filename.setText("Title — "+(item.title_text or "Basic Title").replace("\n"," ")[:45])
             if self.title_text.toPlainText()!=item.title_text:self.title_text.blockSignals(True); self.title_text.setPlainText(item.title_text); self.title_text.moveCursor(QTextCursor.End); self.title_text.blockSignals(False)
@@ -507,7 +513,11 @@ class PropertiesPanel(QWidget):
         has_effects=bool(item and item.effects)
         self.video.setVisible(video); self.audio.setVisible(audio); self.effects.setVisible(has_effects); self.colors.setVisible(video)
         self.video.setEnabled(video); self.audio.setEnabled(audio); self.effects.setEnabled(has_effects); self.colors.setEnabled(video)
-        self.tabs.setTabEnabled(0,video); self.tabs.setTabEnabled(1,audio); self.tabs.setTabEnabled(2,has_effects); self.tabs.setTabEnabled(3,video)
+        source=p.media_by_id(item.media_id) if item else None
+        self.tabs.setTabEnabled(0,video); self.tabs.setTabEnabled(1,audio or any(m.has_audio for m in p.media)); self.tabs.setTabEnabled(2,has_effects); self.tabs.setTabEnabled(3,video)
+        # Keep tab selection stable across video/empty selections. Disabling a
+        # tab makes Qt silently choose another one and loses the user's choice.
+        self.audio_subtabs.widget(1).setEnabled(audio)
         if item and item_id!=previous_item:self.tabs.setCurrentIndex(1 if audio else 0)
         self.filename.setText(p.media_by_id(item.media_id).name if item and p.media_by_id(item.media_id) else "No clip selected")
         if item:
@@ -536,6 +546,7 @@ class PropertiesPanel(QWidget):
         from .effects import ADJUSTABLE, DESCRIPTIONS
         from .visual_fx import VISUAL_FX_SET, SUBSECTION_BY_EFFECT
         effect=self.effect()
+        self.enhance_panel.refresh(effect)
         self.voice_panel.refresh(effect)
         tracking=bool(effect and effect.get('name')=='Object Tracking')
         self.tracking_panel.setVisible(tracking)
@@ -543,6 +554,9 @@ class PropertiesPanel(QWidget):
         self.vision_customize.hide()
         if not effect:
             self.vfx_panel.hide(); return
+        if effect.get('name')=='AI Enhance':
+            self.vfx_panel.hide();self.effect_detail.hide();self.key_panel.hide();self.effect_amount_panel.hide();self.effect_note.hide()
+            self.updating=True;self.effect_enabled.setText('AI Enhance');self.effect_enabled.setChecked(effect.get('enabled',True));self.updating=False;return
         if tracking:
             self.vfx_panel.hide(); self.effect_detail.hide(); self.key_panel.hide(); self.effect_amount_panel.hide(); self.effect_note.hide()
             self.updating=True
@@ -898,7 +912,9 @@ class PropertiesPanel(QWidget):
         self.title_text=EmojiTextEdit(); self.title_text.setPlaceholderText("Title text"); self.title_text.setMaximumHeight(120); self.title_text.textChanged.connect(self.edit_title); root.addWidget(self.title_text)
         self.headline_controls=QWidget(); headline_layout=QFormLayout(self.headline_controls); headline_layout.setContentsMargins(0,4,0,0)
         self.headline_color=QPushButton(); self.headline_color.setFixedSize(40,22); self.headline_color.clicked.connect(lambda:self.pick_color("color")); headline_layout.addRow("Color",self.headline_color)
-        self.headline_size=ValueRow(20,250,100,1); self.headline_size.spin.setSuffix(" %"); self.headline_size.edited.connect(lambda v,d:self.edit_headline_size(v)); headline_layout.addRow("Size",self.headline_size)
+        self.headline_size=ValueRow(8,500,72,1); self.headline_size.spin.setSuffix(" px"); self.headline_size.setToolTip("Font size. Text reflows within 90% of the canvas width."); self.headline_size.edited.connect(lambda v,d:self.edit_headline_size(v)); headline_layout.addRow("Size",self.headline_size)
+        self.headline_scale=ValueRow(5,1000,100,1); self.headline_scale.spin.setSuffix(" %"); self.headline_scale.setToolTip("Uniformly scale the completed headline without changing its line wrapping."); self.headline_scale.edited.connect(lambda v,d:self.edit_headline_scale(v)); headline_layout.addRow("Scale",self.headline_scale)
+        self.headline_rotation=ValueRow(-360,360,0,.1); self.headline_rotation.spin.setSuffix(" °"); self.headline_rotation.edited.connect(lambda v,d:self.edit_headline_rotation(v)); headline_layout.addRow("Rotation",self.headline_rotation)
         self.headline_bold=QCheckBox("Bold"); self.headline_bold.toggled.connect(self.edit_headline_bold); headline_layout.addRow("Font",self.headline_bold)
         self.headline_duration=ValueRow(.05,60,5,.01); self.headline_duration.spin.setMaximum(3600); self.headline_duration.spin.setSuffix(" s"); self.headline_duration.edited.connect(lambda v,d:self.edit_headline_duration(v)); headline_layout.addRow("Duration",self.headline_duration)
         transform_body=QWidget(); positions=QFormLayout(transform_body); positions.setContentsMargins(0,4,0,4)
@@ -906,7 +922,7 @@ class PropertiesPanel(QWidget):
         for axis,dimension in (("X","width"),("Y","height")):
             row=ValueRow(-20000,20000,getattr(self.window.project.settings,dimension)/2,.001,False); row.spin.setDecimals(3); row.edited.connect(lambda v,d,a=axis:self.edit_style("position_"+a.lower(),v/getattr(self.window.project.settings,"width" if a=="X" else "height"))); positions.addRow("Position "+axis,row); self.headline_positions[axis]=row
         headline_layout.addRow(InspectorSection("Transform",transform_body,reset_callback=lambda:self.center_headline()))
-        hint=QLabel("Text wraps automatically. Press Enter for a new line.\nDrag the headline to position it; drag its corner handles to resize."); hint.setWordWrap(True); headline_layout.addRow(hint); root.addWidget(self.headline_controls); self.headline_controls.hide()
+        hint=QLabel("Size changes the font and reflows text. Scale preserves line wrapping.\nDrag to position, use handles to scale, or use the rotation control."); hint.setWordWrap(True); headline_layout.addRow(hint); root.addWidget(self.headline_controls); self.headline_controls.hide()
         self.title_style_host=QWidget(); self.title_style_layout=QVBoxLayout(self.title_style_host); self.title_style_layout.setContentsMargins(0,0,0,0); root.addWidget(self.title_style_host,1)
         self.title_bottom_space=QWidget(); root.addWidget(self.title_bottom_space,1); self.title_bottom_space.hide(); return panel
 
@@ -1014,7 +1030,10 @@ class PropertiesPanel(QWidget):
         item=self.window.project.item_by_id(self.item_id)
         if not item or item.role!="title":return
         self.updating=True; style=item.title_style; self.filename.setText("Title — "+(item.title_text or "Basic Title").replace("\n"," ")[:45])
-        self.headline_size.set_values([style.zoom_x*100])
+        self.headline_size.set_maximum(min(500,max(8,self.window.project.settings.width*.45)))
+        self.headline_size.set_values([style.size])
+        self.headline_scale.set_values([style.zoom_x*100])
+        self.headline_rotation.set_values([item.transform.rotation])
         self.headline_bold.setChecked('Bold' in style.font_face)
         self.headline_duration.set_values([item.duration]); self.headline_color.setStyleSheet(f"QPushButton {{background:{style.color};border:1px solid #7d8590;border-radius:2px;}} QPushButton:hover {{border:2px solid #d8e4f2;}}")
         for axis,row in self.headline_positions.items():row.set_values([getattr(style,"position_"+axis.lower())*getattr(self.window.project.settings,"width" if axis=="X" else "height")])
@@ -1058,7 +1077,22 @@ class PropertiesPanel(QWidget):
     def edit_headline_size(self,value):
         if self.updating:return
         self.window.flush_text_edit()
+        for style in self.style_targets(True):style.size=value
+        self.changed.emit()
+
+    @edit_only
+    def edit_headline_scale(self,value):
+        if self.updating:return
+        self.window.flush_text_edit()
         for style in self.style_targets(True):style.zoom_x=style.zoom_y=value/100
+        self.changed.emit()
+
+    @edit_only
+    def edit_headline_rotation(self,value):
+        if self.updating:return
+        self.window.flush_text_edit()
+        for item in self.targets(False):
+            if item.role=='title' and item.title_style.box_style=='headline':item.transform.rotation=value
         self.changed.emit()
 
     @edit_only

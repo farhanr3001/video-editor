@@ -11,6 +11,20 @@ from kinetic_cut.cache_manager import scan, clear, CacheManagerDialog
 
 
 class CacheManagerTests(unittest.TestCase):
+    def test_ai_download_is_visible_and_removable_even_when_incomplete(self):
+        from kinetic_cut.ui import MainWindow
+        from kinetic_cut import feature_packs
+        with tempfile.TemporaryDirectory() as directory:
+            data=Path(directory);root=data/'components/ai-enhance-v1';(root/'models').mkdir(parents=True)
+            (root/'models/realesr-general-x4v3.pth').write_bytes(b'partial download')
+            window=MainWindow();window.autosave_timer.stop()
+            try:
+                original=feature_packs.component_root
+                with patch.object(feature_packs,'component_root',side_effect=lambda key:root if key=='enhance' else data/'missing'/key),patch('kinetic_cut.config.DATA_DIR',data):
+                    dialog=CacheManagerDialog(window)
+                    self.assertIn('enhance',dialog.component_rows);self.assertEqual(dialog.component_rows['enhance'][0].text(),'AI Enhance')
+                    feature_packs.remove('enhance');self.assertFalse(root.exists());dialog.refresh();self.assertTrue(dialog.component_rows['enhance'][0].isHidden());dialog.close()
+            finally:window.close()
     def test_file_menu_placement_and_three_theme_palette(self):
         from kinetic_cut.ui import MainWindow
         window=MainWindow(); window.autosave_timer.stop()
@@ -23,7 +37,7 @@ class CacheManagerTests(unittest.TestCase):
                 dialog=CacheManagerDialog(window)
                 self.assertEqual(dialog.palette().color(QPalette.Window),
                                  QApplication.instance().palette().color(QPalette.Window))
-                self.assertEqual(set(dialog.rows),{'motion-renders','thumbs','proxies','waveforms','compounds','vision-renders','projects','audio-preview'})
+                self.assertEqual(set(dialog.rows),{'ai-enhance','transcripts','edit-reviews','motion-renders','thumbs','proxies','waveforms','compounds','vision-renders','projects','audio-preview'})
                 dialog.close()
         finally:
             window.close()

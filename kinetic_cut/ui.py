@@ -342,6 +342,8 @@ class MainWindow(QMainWindow):
         self.refresh_project_settings()
         self.refresh_inspector()
         if not self._restoring:self._history=[copy.deepcopy(project)]; self._history_index=0
+        from .enhance_storage import observe as observe_enhancement_cache
+        observe_enhancement_cache(self)
         for media in project.media:
             self.request_waveform(media)
         if hasattr(self,'compounds'):self.compounds.switched()
@@ -404,6 +406,8 @@ class MainWindow(QMainWindow):
         self._history=self._history[:self._history_index+1]; self._history.append(snapshot)
         if len(self._history)>100:self._history.pop(0)
         self._history_index=len(self._history)-1
+        from .enhance_storage import observe as observe_enhancement_cache
+        observe_enhancement_cache(self)
         if hasattr(self,"autosave_debounce_timer"):self.autosave_debounce_timer.start()
     def text_edited(self):
         self.project.touch(); self.preview.update(); self.timeline.viewport().update()
@@ -446,8 +450,8 @@ class MainWindow(QMainWindow):
         if self._restoring:return
         self._restore_history(self._history_index+1)
 
-    def start_worker(self,worker:Worker):
-        if getattr(self, '_closing', False):
+    def start_worker(self,worker:Worker,*,shutdown=False):
+        if getattr(self, '_closing', False) and not (shutdown and getattr(worker,'maintenance',False)):
             worker.cancel()
             worker.signals.deleteLater()
             return
@@ -1614,7 +1618,10 @@ class MainWindow(QMainWindow):
     def viewer_transform_changed(self,item_id:str):
         item=self.project.item_by_id(item_id)
         if item:
-            if item.role=='title':
+            if item.role=='title' and self.preview.drag_mode=='rotate':
+                for other in self.inspector.targets(False):
+                    if other.role=='title':other.transform.rotation=item.transform.rotation
+            elif item.role=='title':
                 attributes=('zoom_x','zoom_y') if self.preview.drag_mode=='headline_scale' else ('size',) if self.preview.drag_mode=='title_scale' else ('position_x','position_y')
                 for other in self.inspector.targets(False):
                     for attr in attributes:setattr(other.title_style,attr,getattr(item.title_style,attr))
@@ -1806,6 +1813,9 @@ class MainWindow(QMainWindow):
     @edit_only
     def apply_effect(self,name:str):
         from .effects import TITLES, GRAPHICS, ADJUSTABLE, compatible, preset_owner
+        if name=='AI Enhance':
+            from .enhance_ui import apply
+            apply(self);return
         if name in TITLES:self.add_title_object(name); return
         if name in GRAPHICS:self.add_graphic_object(name); return
         if name=='Object Tracking':
@@ -2079,7 +2089,9 @@ class MainWindow(QMainWindow):
             if captions:
                 self.select_caption(captions[0].id)
                 self.seek(captions[0].start)
-            self.statusBar().showMessage(f"Generated {len(captions)} captions locally with {backend}",5000)
+            from .caption_quality import review
+            generated_ids={c.id for c in captions}; concerns=sum(r['caption_id'] in generated_ids for r in review(self.project)['issues'])
+            self.statusBar().showMessage(f"Generated {len(captions)} captions locally with {backend}"+(f" · {concerns} timing/alignment checks worth reviewing" if concerns else ''),7000)
             if not headless and style.animation in ('fade every word','word highlight','word reveal') and any(not c.word_timings for c in captions):
                 QMessageBox.information(self,'Estimated word timing','This speech engine did not provide individual word timestamps. Word animation timing is estimated. Generate with local Whisper for speech-aligned word timings.')
         worker.signals.result.connect(ready)
@@ -2218,6 +2230,8 @@ class MainWindow(QMainWindow):
         if getattr(self,'_closing',False):
             from .dialog_jobs import active_dialog_threads
             if self._workers or active_dialog_threads():event.ignore(); return
+            from .enhance_storage import finish_work as finish_enhancement_work
+            if finish_enhancement_work(self):event.ignore();return
             self._shutdown_wait_timer.stop()
             try:SESSION_LOCK_PATH.unlink(missing_ok=True)
             except OSError:logging.exception('Could not remove active session marker')
@@ -2225,6 +2239,8 @@ class MainWindow(QMainWindow):
             event.accept(); return
         if not confirm_close(self):
             event.ignore(); return
+        from .enhance_storage import finish as finish_enhancement_cache
+        finish_enhancement_cache(self)
         self._closing=True
         self.setEnabled(False)
         self.autosave_timer.stop(); self.autosave_debounce_timer.stop()
@@ -2238,6 +2254,7 @@ class MainWindow(QMainWindow):
         if hasattr(self,'assistant_connection'):self.assistant_connection.stop()
         self.delivery.clock.stop()
         if getattr(self,'_vision_cancel',None):self._vision_cancel.set()
+        if getattr(self,'_enhance_cancel',None):self._enhance_cancel.set()
         if getattr(self,'_tracking_cancel',None):self._tracking_cancel.set()
         if getattr(self.delivery,'render_cancel',None):self.delivery.render_cancel.set()
         if getattr(self,"_vocal_cancel",None):self._vocal_cancel.set()
@@ -2265,6 +2282,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage('Closing · waiting for background tasks to finish…')
             self._shutdown_wait_timer.start(); event.ignore()
         else:
+            from .enhance_storage import finish_work as finish_enhancement_work
+            if finish_enhancement_work(self):
+                self._shutdown_wait_timer.start();event.ignore();return
             try:SESSION_LOCK_PATH.unlink(missing_ok=True)
             except OSError:logging.exception('Could not remove active session marker')
             self.shutdownFinished.emit(); event.accept()

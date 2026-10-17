@@ -114,6 +114,8 @@ def export(project: Project, output: str, preset: ExportPreset,
            burn_captions: bool = True, hardware: str = "Auto", ffmpeg: str = "ffmpeg",
            progress: Callable[[float, str], None] | None = None,
            cancel=None, export_audio=True, lossless=False) -> None:
+    from .motion_audio import expanded
+    project=expanded(project)
     from .missing_media import export_issues
     issues=export_issues(project)
     if issues:raise ValueError('Relink missing or mismatched media before exporting:\n'+'\n'.join(issues[:20]))

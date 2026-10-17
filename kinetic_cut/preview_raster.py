@@ -1,7 +1,7 @@
 """CPU-only layer preparation; no widgets or decoder-owned frames on workers."""
 from dataclasses import dataclass, field
 import math
-from PySide6.QtCore import Qt, QRect
+from PySide6.QtCore import Qt, QRect, QSize
 from PySide6.QtGui import QImage, QPainter, QColor
 from .model import Crop
 
@@ -26,13 +26,50 @@ class RasterContext:
         from .chroma import NAMES
         from .vision_effects import active
         from .tracking_effect import active as tracking_active
+        from .enhance import active as enhance_active
         return (item.crop_softness > 0 or item.grayscale or abs(item.brightness) > .001
                 or abs(item.contrast-1) > .001 or abs(item.saturation-1) > .001
-                or item.sharpen > .001 or active(item) or tracking_active(item)
+                or item.sharpen > .001 or active(item) or tracking_active(item) or enhance_active(item)
                 or any(e.get('enabled',True) and (e.get('name')=='Gaussian Blur'
                        or e.get('name') in MATRICES or e.get('name') in NAMES) for e in item.effects))
 
 def prepare_layer_image(self, item, layer_source, target, frame_rect):
+    from .enhance import active as enhance_active
+    if enhance_active(item):
+        import copy
+        from pathlib import Path
+        from .enhance import render_frame, range_at
+        at=item.source_time(self.project.playhead)
+        media=self.project.media_by_id(item.media_id)
+        stamps=[]
+        for index,_ in enhance_active(item):
+            record=range_at(self.project,media,item,index,at)
+            try:stamp=(record['key'],(Path(record['root'])/'info.json').stat().st_mtime_ns) if record else None
+            except OSError:stamp=None
+            stamps.append(stamp)
+        tag=('enhance',item.id)
+        key=(layer_source.cacheKey(),repr(item),at,repr(self.project.settings),tuple(stamps),
+             round(target.x()-frame_rect.x(),6),round(target.y()-frame_rect.y(),6),
+             target.width(),target.height(),frame_rect.width(),frame_rect.height(),self.interactive,self.raster_scale)
+        cached=self.effect_cache.get(tag)
+        if cached and cached[0]==key:return cached[1]
+        # Read/blend at the physical display size only when the enhancement is
+        # the final pixel operation. Full-resolution export uses render_frame.
+        last=enhance_active(item)[-1][0]
+        eligible=(item.role!='background' and not item.crop_softness
+                  and not any(e.get('enabled',True) for e in item.effects[last+1:]))
+        image=QImage()
+        if eligible:
+            from .enhance_preview import frame
+            size=QSize(max(1,math.ceil(abs(target.width())*self.raster_scale)),
+                       max(1,math.ceil(abs(target.height())*self.raster_scale)))
+            image=frame(self.project,media,item,last,at,size)
+        if image.isNull():image=render_frame(self.project,item,layer_source,at)
+        baked=copy.copy(item);baked.effects=[];baked.crop=Crop();baked.grayscale=False;baked.brightness=0.;baked.contrast=baked.saturation=1.;baked.sharpen=0.
+        result=prepare_layer_image(self,baked,image,target,frame_rect)
+        if len(self.effect_cache)>=16:self.effect_cache.pop(next(iter(self.effect_cache)))
+        self.effect_cache[tag]=(key,result)
+        return result
     interactive = self.interactive
     # Filter at the actual on-screen layer resolution during motion, not at
     # export resolution. Include viewer zoom and HiDPI; never upscale a source
@@ -100,7 +137,12 @@ def prepare_layer_image(self, item, layer_source, target, frame_rect):
             if len(self.crop_cache) >= 16:self.crop_cache.pop(next(iter(self.crop_cache)))
             self.crop_cache[item.id] = (key, result)
             return result
-        cache_key = (layer_source.cacheKey(), repr(item.crop), effect_key, item.crop_softness, item.grayscale, item.brightness, item.contrast, item.saturation, item.sharpen, item.transform.rotation, item.transform.pitch, item.transform.yaw, item.transform.flip_horizontal, item.transform.flip_vertical, target.x(), target.y(), target.width(), target.height(), frame_rect.x(), frame_rect.y(), frame_rect.width(), frame_rect.height(), interactive, raster_scale)
+        # Viewer translation changes presentation, not filtered source pixels.
+        # Interactive ROI blur additionally depends on the layer's position
+        # relative to the canvas, never the canvas's absolute widget position.
+        # Quantize sub-pixel cancellation noise from translating both rectangles.
+        relative_position = (round(target.x()-frame_rect.x(),6),round(target.y()-frame_rect.y(),6)) if interactive else None
+        cache_key = (layer_source.cacheKey(), repr(item.crop), effect_key, item.crop_softness, item.grayscale, item.brightness, item.contrast, item.saturation, item.sharpen, item.transform.rotation, item.transform.pitch, item.transform.yaw, item.transform.flip_horizontal, item.transform.flip_vertical, relative_position, target.width(), target.height(), frame_rect.width(), frame_rect.height(), interactive, raster_scale)
         cached = self.effect_cache.get(item.id)
         if cached and cached[0] == cache_key:
             return cached[1]

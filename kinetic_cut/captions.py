@@ -4,6 +4,7 @@ import json
 import copy
 import shutil
 import tempfile
+import math
 from pathlib import Path
 
 from .model import Caption, CaptionStyle, uid
@@ -43,13 +44,26 @@ def _from_segments(segments: list[dict], offset: float = 0.0,
         if not text:
             continue
         start, end = float(segment.get("start", 0)), float(segment.get("end", 0))
+        if not math.isfinite(start+end) or start<0 or end<=start:
+            raise CaptionBackendError('The recognizer returned invalid segment timestamps.')
         timed=segment.get("words") or []
         if timed:
             words=[{"text":str(word.get("text",word.get("word",""))).strip(),"start":float(word.get("start",start)),"end":float(word.get("end",end))} for word in timed]
+            for word,original in zip(words,timed):
+                if isinstance(original.get('confidence'),(int,float)):word['confidence']=float(original['confidence'])
             words=[word for word in words if word["text"]]
+            if any(not math.isfinite(w['start']+w['end']) or w['start']<0 or w['end']<=w['start'] for w in words):
+                raise CaptionBackendError('The recognizer returned invalid word timestamps.')
+            # Tiny recognizer boundary overlaps must not create negative caption
+            # durations. Keep speech onsets; bound the preceding word's end.
+            for a,b in zip(words,words[1:]):
+                if b['start']<=a['start']:raise CaptionBackendError('The recognizer returned unordered word timestamps.')
+                a['end']=min(a['end'],b['start'])
         else:
             raw=text.split(); span=max(.01,end-start)
             words=[{"text":word,"start":start+span*n/max(1,len(raw)),"end":start+span*(n+1)/max(1,len(raw))} for n,word in enumerate(raw)]
+        from .caption_quality import normalize_words
+        words=normalize_words(words)
         chunks=[]; chunk=[]
         for word in words:
             if chunk and (len(chunk)>=words_per_caption or word["start"]-chunk[-1]["end"]>.65):chunks.append(chunk); chunk=[]
@@ -59,7 +73,7 @@ def _from_segments(segments: list[dict], offset: float = 0.0,
             if not chunk:continue
             captions.append(Caption(uid(),offset+chunk[0]["start"],offset+chunk[-1]["end"],
                                     " ".join(word["text"] for word in chunk),CaptionStyle(**style.__dict__)))
-            if timed:captions[-1].word_timings=[dict(text=word['text'],start=word['start']-chunk[0]['start'],end=word['end']-chunk[0]['start']) for word in chunk]
+            if timed:captions[-1].word_timings=[{**({'confidence':word['confidence']} if 'confidence' in word else {}),**dict(text=word['text'],start=word['start']-chunk[0]['start'],end=word['end']-chunk[0]['start'])} for word in chunk]
     captions.sort(key=lambda caption:(caption.start,caption.end))
     for index,caption in enumerate(captions):
         next_start=captions[index+1].start if index+1<len(captions) else None
@@ -108,7 +122,7 @@ def transcribe(path: str, settings: dict, offset: float = 0.0,
                 if not words and require_word_timestamps:
                     raise CaptionBackendError("The recognizer returned no word-level timestamps; audio was not changed.")
                 data.append({"start":origin+segment.start,"end":origin+segment.end,"text":segment.text,
-                    "words":[{"start":origin+word.start,"end":origin+word.end,"text":word.word} for word in words]})
+                    "words":[{"start":origin+word.start,"end":origin+word.end,"text":word.word,"confidence":getattr(word,'probability',1.)} for word in words]})
         _check_cancel(cancel_check)
         return _from_segments(data,offset,words_per_caption=words_per_caption,hold_seconds=hold_seconds), "faster-whisper"
     except CaptionCancelled:raise

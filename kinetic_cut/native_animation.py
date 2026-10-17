@@ -48,14 +48,18 @@ def draw_title(painter,project,item,rect,at):
     transform=QTransform(); transform.translate(pivot.x(),pivot.y()); transform.rotate(item.transform.rotation); transform.translate(-pivot.x(),-pivot.y())
     painter.save()
     try:
+        if style.box_style=='headline':painter.setClipRect(rect,Qt.IntersectClip)
         painter.setTransform(transform,True); painter.setOpacity(painter.opacity()*opacity(item,at))
+        if style.box_style=='headline':
+            from .headline import draw
+            return transform.mapRect(draw(painter,project,caption,rect,clip_frame=False))
         return transform.mapRect(draw_caption(painter,project,caption,rect))
     finally:painter.restore()
 
 def required(item):
     from .model import Transform
     from .motion_presets import is_motion
-    return item.role in ('title','graphic') and (bool(item.keyframes) or is_motion(item.graphic_type) or item.role=='title' and item.transform!=Transform())
+    return item.role in ('title','graphic') and (bool(item.keyframes) or is_motion(item.graphic_type) or item.role=='graphic' and 'arrow' in item.graphic_type.lower() or item.role=='title' and item.transform!=Transform())
 
 def frame(project,item,t,size=None):
     from .graphics import draw_graphic

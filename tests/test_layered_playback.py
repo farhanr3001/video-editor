@@ -62,6 +62,38 @@ class LayeredPlaybackTests(unittest.TestCase):
         self.p.settings.background_brightness=.4
         self.assertNotEqual(a.cacheKey(),self.prepare().cacheKey())
         self.canvas.set_project(Project()); self.assertFalse(self.canvas.effect_cache)
+
+    def test_paused_pan_reuses_blur_pixels_for_both_entry_points(self):
+        self.owner.transport.playing=False
+        for inspector in (False,True):
+            self.item.effects=[dict(name='Gaussian Blur',horizontal=12,vertical=8,
+                                    inspector_background_blur=inspector)]
+            self.canvas.effect_cache.clear()
+            original=self.prepare()
+            with patch('kinetic_cut.visuals.blur_image',side_effect=AssertionError('pan reran blur')):
+                for n in range(12):
+                    dx,dy=n*3.125+.1,n*1.75+.3
+                    actual=self.canvas._prepare_layer_image(self.item,self.image,self.target.translated(dx,dy),self.frame.translated(dx,dy))
+                    self.assertEqual(actual.cacheKey(),original.cacheKey())
+            self.canvas.effect_cache.clear()
+            fresh=self.canvas._prepare_layer_image(self.item,self.image,self.target.translated(37.6,22.3),self.frame.translated(37.6,22.3))
+            self.assertEqual(original,fresh)
+
+    def test_interactive_pan_reuses_roi_but_layer_moves_and_zoom_invalidate(self):
+        self.item.effects=[dict(name='Gaussian Blur',horizontal=30,vertical=30)]
+        target=QRectF(-700,-300,3200,1800)
+        original=self.canvas._prepare_layer_image(self.item,self.image,target,self.frame)
+        with patch('kinetic_cut.visuals.blur_image',side_effect=AssertionError('viewer pan reran blur')):
+            for n in range(12):
+                dx,dy=n*3.125+.1,n*1.75+.3
+                actual=self.canvas._prepare_layer_image(self.item,self.image,target.translated(dx,dy),self.frame.translated(dx,dy))
+                self.assertEqual(actual.cacheKey(),original.cacheKey())
+        with patch('kinetic_cut.visuals.blur_image',wraps=blur_image) as blur:
+            self.canvas._prepare_layer_image(self.item,self.image,target.translated(30,0),self.frame)
+            self.assertTrue(blur.called)
+        with patch('kinetic_cut.visuals.blur_image',wraps=blur_image) as blur:
+            self.canvas._prepare_layer_image(self.item,self.image,QRectF(-700,-300,3300,1856.25),self.frame)
+            self.assertTrue(blur.called)
     def test_fast_blur_retains_blend_border_and_anisotropic_appearance(self):
         image=QImage(320,180,QImage.Format_RGBA8888); image.fill(QColor('#275a98'))
         painter=QPainter(image); painter.fillRect(0,0,110,120,QColor('#efc47a')); painter.fillRect(150,70,70,60,Qt.white); painter.end()

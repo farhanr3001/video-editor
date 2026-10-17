@@ -6,6 +6,7 @@ The renderer is shared with the synchronous viewer; edit controls stay on the GU
 import copy
 import hashlib
 import time
+import math
 from concurrent.futures import ThreadPoolExecutor, Future
 from types import MethodType
 from PySide6.QtCore import QRectF, Qt
@@ -52,9 +53,9 @@ class CompositionCache:
         self.template=None; self.template_signature=None
         self.renderer=None
         self.last_completed=0.
-        self.completed=0
+        self.completed=0;self.last_frame=None;self.requested_frame=None;self.serial=0;self.presented_serial=0;self.direction=1;self.presented_key=None
     def clear(self):
-        self.images.clear(); self.bounds.clear(); self.last=None; self.pending=None
+        self.images.clear(); self.bounds.clear(); self.last=None; self.pending=None;self.last_frame=None;self.requested_frame=None;self.presented_serial=0;self.presented_key=None
         self.template=None; self.template_signature=None
         self.last_completed=0.
         if self.future:self.future.cancel()
@@ -64,6 +65,14 @@ class CompositionCache:
         if self.renderer:self.renderer.close()
         if self.executor:self.executor.shutdown(wait=False,cancel_futures=True)
         self.executor=None
+    def synchronous(self,key=None):
+        # Record exact GUI fallback too, including missing input/extreme zoom.
+        # Later work may match this scene, but must never replace it with an
+        # earlier request or an older source at the same timeline timestamp.
+        p=self.canvas.project;transport=getattr(self.canvas.window(),'transport',None)
+        self.direction=-1 if transport and getattr(transport,'playing',False) and getattr(transport,'rate',1)<0 else 1
+        self.serial+=1;self.last=None;self.last_frame=round(p.playhead*max(1,p.settings.fps));self.requested_frame=self.last_frame
+        self.presented_serial=self.serial;self.presented_key=key
     def request(self, frame_rect):
         c=self.canvas; p=c.project
         at=p.playhead
@@ -73,8 +82,14 @@ class CompositionCache:
         transition_ids={i for t in transitions for i in (t.left_item_id,t.right_item_id) if i}
         items=[i for i in p.timeline if i.track in p.video_tracks and
                (i.start<=at<i.start+i.duration or i.id in transition_ids)]
-        rect=QRectF(frame_rect)
-        size=(max(1,round(c.width()*c.devicePixelRatioF())),max(1,round(c.height()*c.devicePixelRatioF())))
+        # The raster belongs to the composition, not the widget's pan offset.
+        # View translation must never invalidate expensive pixel preparation.
+        # Render the complete canvas locally, then place it in the GUI painter.
+        origin=frame_rect.topLeft()
+        rect=QRectF(0,0,frame_rect.width(),frame_rect.height())
+        size=(max(1,math.ceil(rect.width()*c.devicePixelRatioF())),max(1,math.ceil(rect.height()*c.devicePixelRatioF())))
+        if size[0]*size[1]*4>64*1024**2:self.synchronous();return None
+        def publish_bounds(bounds):c.text_rects={k:r.translated(origin) for k,r in bounds.items()}
         active={i.id:c.active_frames[i.id] for i in items if i.id in c.active_frames}
         frames={k:QImage(c.frames[k]) for k in set(active.values()) if k in c.frames}
         fallback={i.id:QImage(c.fallback_frames[i.id]) for i in items if i.id in getattr(c,'fallback_frames',{})}
@@ -87,7 +102,7 @@ class CompositionCache:
                and (i.id not in fallback or fallback[i.id].isNull()) for i in required):
             # Never cache a black/incomplete composition while source decoders
             # are loading. The ordinary source hold remains authoritative.
-            return None
+            self.synchronous();return None
         assets=[m.path for m in media if m.kind=='image']
         assets += [n.get('source','') for i in items for n in i.graphic_data.get('scene',{}).get('nodes',[]) if n.get('kind')=='image']
         from pathlib import Path
@@ -103,14 +118,24 @@ class CompositionCache:
         def frame_identity(image):return image.text('_kinetic_source_frame') or image.cacheKey()
         key=(signature,round(at*max(1,p.settings.fps)),tuple((repr(k),frame_identity(v)) for k,v in frames.items()),
              tuple((k,frame_identity(v)) for k,v in fallback.items()))
+        self.serial+=1
         compatible=(signature,tuple((i.id,i.role) for i in items))
+        transport=getattr(c.window(),'transport',None)
+        direction=-1 if transport and getattr(transport,'playing',False) and getattr(transport,'rate',1)<0 else 1
+        if self.requested_frame is not None and (direction!=self.direction or direction*(key[1]-self.requested_frame)<0):
+            # Explicit seeks/direction changes start a new presentation order.
+            self.last=None;self.last_frame=None;self.presented_serial=0;self.presented_key=None
+        self.requested_frame=key[1];self.direction=direction
         # Full time-dependent scenes cannot share old frames after an edit or cut.
         # For continuous playback, only identical content signatures may hold while
         # the latest image is being completed; gaps/caption boundaries are exact.
         cached=self.images.get(key)
         if cached is not None:
-            self.hits+=1; c.text_rects=self.bounds.get(key,({},''))[0]
-            return cached,self.bounds.get(key,({},''))[1]
+            self.hits+=1;bounds,notice=self.bounds.get(key,({},''));publish_bounds(bounds)
+            # Exact-cache hits are presentations too. A subsequent cache miss
+            # must never fall back behind the frame we just displayed.
+            self.last=(compatible,cached,bounds,notice);self.last_frame=key[1];self.last_completed=time.monotonic();self.presented_serial=self.serial;self.presented_key=key
+            return cached,notice
         self.misses+=1
         if self.future and self.future.done():
             old_key,old_compatible,future=self.pending
@@ -119,8 +144,9 @@ class CompositionCache:
                 self.completed+=1
                 self.images.put(old_key,image); self.bounds[old_key]=(bounds,notice)
                 while len(self.bounds)>96:self.bounds.pop(next(iter(self.bounds)))
-                if old_compatible==compatible:
-                    self.last=(compatible,image,bounds,notice); self.last_completed=time.monotonic()
+                if (old_compatible==compatible and direction*(key[1]-old_key[1])>=0 and (self.last_frame is None or direction*(old_key[1]-self.last_frame)>=0)
+                        and (getattr(future,"_kinetic_request_serial",0)>=self.presented_serial or old_key==self.presented_key)):
+                    self.last=(compatible,image,bounds,notice); self.last_completed=time.monotonic();self.last_frame=old_key[1];self.presented_serial=self.serial;self.presented_key=old_key
                 else:self.discarded+=1
             except Exception:
                 import logging
@@ -128,7 +154,8 @@ class CompositionCache:
                 self.close(); return None
             self.future=None; self.pending=None
             if old_key==key:
-                c.text_rects=bounds
+                self.last=(compatible,image,bounds,notice);self.last_frame=key[1];self.last_completed=time.monotonic();self.presented_serial=self.serial;self.presented_key=key
+                publish_bounds(bounds)
                 return image,notice
         if not self.closed and self.future is None:
             from .caption_fonts import load_fonts
@@ -167,10 +194,16 @@ class CompositionCache:
             else:
                 if self.executor is None:self.executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix='preview-composition')
                 self.future=self.executor.submit(render,context,rect,size,c.devicePixelRatioF())
+            self.future._kinetic_request_serial=self.serial
             self.pending=(key,compatible,self.future)
         # A stalled helper must not turn into indefinitely frozen footage.
         # Preserve the recent complete composition briefly; after that use the
         # existing synchronous renderer while the bounded helper recovers/fails.
-        if self.last and self.last[0]==compatible and time.monotonic()-self.last_completed<.2:
-            _,image,bounds,notice=self.last; c.text_rects=bounds; return image,notice
+        if (self.last and self.last[0]==compatible and self.last_frame is not None
+                and 0<=direction*(key[1]-self.last_frame)<=max(1,p.settings.fps*.2)
+                and time.monotonic()-self.last_completed<.2):
+            _,image,bounds,notice=self.last; publish_bounds(bounds); return image,notice
+        # The caller will paint this exact scene synchronously. Fence it too:
+        # late background output must not rewind behind that GUI presentation.
+        self.synchronous(key)
         return None

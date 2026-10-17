@@ -1,6 +1,7 @@
 """Real-project Full Preview coverage and responsiveness; no owner data writes."""
 def run(output, project_path):
     import os,sys,time,json,hashlib,copy
+    if os.environ.get('KINETIC_BLUR_PAN_SELFTEST')=='1':return run_blur_pan(output,project_path)
     from pathlib import Path
     out=Path(output).resolve(); out.mkdir(parents=True,exist_ok=True)
     import faulthandler
@@ -119,4 +120,49 @@ def run(output, project_path):
     report['passed'] &= report['workers_closed']
     (out/'report.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
     faulthandler.cancel_dump_traceback_later(); trace.close()
+    return 0 if report['passed'] else 1
+
+
+def run_blur_pan(output,project_path):
+    import os,sys,time,json,copy
+    from pathlib import Path
+    r=Path.cwd();sys.path.insert(0,str(r));out=Path(output).resolve();out.mkdir(parents=True,exist_ok=True);os.environ['KINETIC_CUT_HOME']=str(out/'home');os.environ['QT_QPA_PLATFORM']='windows'
+    import av
+    from PySide6.QtCore import Qt,QEvent,QPointF
+    from PySide6.QtGui import QImage,QMouseEvent
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtTest import QTest
+    from unittest.mock import patch
+    from types import SimpleNamespace
+    from kinetic_cut.model import Project,MediaItem,TimelineItem
+    from kinetic_cut.widgets import PreviewCanvas
+    from kinetic_cut.visuals import blur_image
+    app=QApplication([]);app.setQuitOnLastWindowClosed(False)
+    project=Project.load(project_path);media_path=next(m.path for m in project.media if m.kind=='video')
+    with av.open(media_path) as movie:
+     movie.seek(5300000);frame=next(movie.decode(video=0));pixels=frame.to_ndarray(format='rgb24')
+    image=QImage(pixels.data,frame.width,frame.height,pixels.strides[0],QImage.Format_RGB888).copy()
+    rows=[]
+    for count,inspector,enhanced in ((1,False,False),(1,True,False),(6,False,False),(1,False,True)):
+     c=PreviewCanvas();c.resize(1000,650);c.transport=SimpleNamespace(playing=False,scrubbing=False)
+     p=Project(media=[MediaItem('m',media_path,'video','actual webcam source',17,frame.width,frame.height)]);p.video_tracks=[f'video_{n+1}' for n in range(count)]
+     p.timeline=[TimelineItem(str(n),'m',track,0,10) for n,track in enumerate(p.video_tracks)]
+     from .enhance import default_effect
+     for item in p.timeline:item.effects=([default_effect()] if enhanced else [])+[dict(name='Gaussian Blur',enabled=True,horizontal=12,vertical=12,inspector_background_blur=inspector)]
+     c.set_project(p);c.active_frames={i.id:'source' for i in p.timeline};c.frames={'source':image};c.transform_controls_visible=False
+     with patch.object(c.composition_cache,'request',return_value=None) as warm:
+      c.show();QTest.qWait(50);c.repaint();warm.reset_mock();samples=[]
+      QTest.mousePress(c,Qt.MiddleButton,pos=__import__('PySide6.QtCore',fromlist=['QPoint']).QPoint(400,300))
+      with patch('kinetic_cut.visuals.blur_image',wraps=blur_image) as blur:
+       for n in range(10):
+        pos=QPointF(401.25+n*3.125,301.375+n*1.75);event=QMouseEvent(QEvent.MouseMove,pos,pos,Qt.NoButton,Qt.MiddleButton,Qt.NoModifier)
+        start=time.perf_counter();QApplication.sendEvent(c,event);c.repaint();samples.append((time.perf_counter()-start)*1000)
+       calls=blur.call_count
+      QTest.mouseRelease(c,Qt.MiddleButton,pos=__import__('PySide6.QtCore',fromlist=['QPoint']).QPoint(440,320))
+      rows.append(dict(layers=count,inspector_blur=inspector,enhance_stack=enhanced,median_ms=sorted(samples)[len(samples)//2],max_ms=max(samples),blur_calls_during_pan=calls,composition_warm_requests=warm.call_count,pan=[c.view_pan.x(),c.view_pan.y()]))
+      c.grab().save(str(out/f'pan-{count}-{inspector}.png'))
+     c.composition_cache.close();c.close();c.deleteLater();app.processEvents()
+    report=dict(passed=all(row['blur_calls_during_pan']==0 and row['composition_warm_requests']==0 for row in rows),frozen=bool(getattr(sys,'frozen',False)),source=media_path,decoded_dimensions=[frame.width,frame.height],cases=rows)
+    (out/'report.json').write_text(json.dumps(report,indent=2),encoding='utf-8');print(json.dumps(report,indent=2))
+    
     return 0 if report['passed'] else 1

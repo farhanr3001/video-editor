@@ -67,6 +67,8 @@ class PlaybackSchedulingTests(unittest.TestCase):
         self.assertIsNone(self.canvas.frame_work('decoder',self.image))
         self.item.keyframes={}; self.item.effects=[dict(name='Remove Person Background')]
         self.assertIsNone(self.canvas.frame_work('decoder',self.image))
+        self.item.effects=[dict(name='AI Enhance')]
+        self.assertIsNone(self.canvas.frame_work('decoder',self.image))
         self.canvas.caption_focus=True
         self.assertIsNone(self.canvas.frame_work('decoder',self.image))
     def test_static_filter_snapshots_match_paused_scrub_and_playback_quality(self):

@@ -39,6 +39,8 @@ def audio_filters(item):
 
 
 def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffmpeg",ass_path=None,export_audio=True,prepared=None,window=None,transparent=False):
+    from .motion_audio import expanded
+    project=expanded(project)
     from .exporter import _crop_filter,_target_size,_flip_filter,_encoder,_escape_ass_path
     project.ensure_track_model(); width=project.settings.width; height=project.settings.height; fps=project.settings.fps; duration=project.duration
     origin=0.
@@ -94,6 +96,9 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
         from .vision_effects import active as vision_active
         from .tracking_effect import active as tracking_active
         processed=(prepared or {}).get(item.id)
+        from .enhance import active as enhance_active
+        enhanced=bool(enhance_active(item))
+        if enhanced and not processed:raise ValueError('AI Enhance must be prepared before building the render command.')
         if vision_active(item) and not processed:raise ValueError('Face/background effects must be prepared before building the render command.')
         if tracking_active(item) and not processed:raise ValueError('Object tracking effects must be analysed and prepared before building the render command.')
         from .chroma import NAMES
@@ -163,11 +168,11 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
                     rx,ry,rw,rh,lw,lh,ox,oy=region
                     chain=f"null{_flip_filter(item)},crop={rw}:{rh}:{rx}:{ry},scale={lw}:{lh},format={pixel_format}"
         from .chroma import NAMES,filter_string
-        keys=[filter_string(effect) for effect in item.effects if effect.get("enabled",True) and effect.get("name") in NAMES]
+        keys=[filter_string(effect) for effect in item.effects if not enhanced and effect.get("enabled",True) and effect.get("name") in NAMES]
         if keys:chain=",".join(keys)+","+chain
-        if item.grayscale:chain+=",hue=s=0"
-        if abs(item.brightness)>.0001 or abs(item.contrast-1)>.0001 or abs(item.saturation-1)>.0001:chain+=f",eq=brightness={item.brightness:.5f}:contrast={item.contrast:.5f}:saturation={item.saturation:.5f}"
-        if item.sharpen>.0001:
+        if item.grayscale and not enhanced:chain+=",hue=s=0"
+        if not enhanced and (abs(item.brightness)>.0001 or abs(item.contrast-1)>.0001 or abs(item.saturation-1)>.0001):chain+=f",eq=brightness={item.brightness:.5f}:contrast={item.contrast:.5f}:saturation={item.saturation:.5f}"
+        if item.sharpen>.0001 and not enhanced:
             amount=min(5,max(0,item.sharpen*2)); chain+=f",unsharp=5:5:{amount:.4f}:5:5:0"
         if not animated:
             chain+=f",setpts=(PTS-STARTPTS)/{item.speed:.8f}"
@@ -190,6 +195,7 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
         chain+=f",setpts=PTS+{item.start-origin:.6f}/TB"
         label=f"layer{n}"; filters.append(f"[{source}]{chain}[{label}]")
         for en,effect in enumerate(item.effects):
+            if enhanced:continue
             if not effect.get("enabled",True):continue
             from .effects import MATRICES, color_filter
             if effect.get("name") in MATRICES:

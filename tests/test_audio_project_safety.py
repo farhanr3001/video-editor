@@ -81,7 +81,7 @@ class AudioProjectSafetyTests(unittest.TestCase):
                               timeline=[TimelineItem('clip', 'sound', 'audio_1', 0, 2)])
             window.set_project(project)
             window.inspector.select('clip')
-            self.assertEqual(window.inspector.audio_subtabs.count(), 2)
+            self.assertEqual([window.inspector.audio_subtabs.tabText(n) for n in range(window.inspector.audio_subtabs.count())], ['Controls','Levels','Search transcript'])
             window.transport.levelsChanged.emit({'audio_1': (.5, .25, True)})
             app.processEvents()
             self.assertGreater(window.inspector.level_bars[0].value(), 0)

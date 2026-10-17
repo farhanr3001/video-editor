@@ -25,19 +25,20 @@ class HeadlineControlsTests(unittest.TestCase):
                 (QEvent.MouseButtonRelease,end,Qt.LeftButton,Qt.NoButton)):
             self.app.sendEvent(view,QMouseEvent(kind,pos,view.mapToGlobal(pos.toPoint()),button,buttons,Qt.NoModifier))
         self.app.processEvents()
-    def test_corner_drag_changes_size_and_one_undo_restores_it(self):
+    def test_corner_drag_changes_scale_and_one_undo_restores_it(self):
         before=copy.deepcopy(self.item().title_style);index=self.w._history_index
         self.drag()
         self.assertAlmostEqual(self.item().title_style.zoom_x,1.4,delta=.005)
         self.assertEqual(self.item().title_style.zoom_x,self.item().title_style.zoom_y)
-        self.assertAlmostEqual(self.w.inspector.headline_size.spin.value(),140,delta=.5)
+        self.assertAlmostEqual(self.w.inspector.headline_scale.spin.value(),140,delta=.5)
+        self.assertEqual(self.item().title_style.size,before.size)
         self.assertEqual((self.item().title_style.position_x,self.item().title_style.position_y),(before.position_x,before.position_y))
         self.assertEqual(self.w._history_index,index+1)
         self.w.undo();self.assertEqual(self.item().title_style.zoom_x,before.zoom_x)
         self.w.redo();self.assertAlmostEqual(self.item().title_style.zoom_x,1.4,delta=.005)
-    def test_size_field_changes_visible_bounds_then_drag_uses_current_size(self):
+    def test_scale_field_changes_visible_bounds_then_drag_uses_current_scale(self):
         view=self.w.preview;view.grab();original=view.text_rects['title',self.id].width()
-        self.w.inspector.headline_size.change(150);view.grab()
+        self.w.inspector.headline_scale.change(150);view.grab()
         self.assertAlmostEqual(view.text_rects['title',self.id].width(),original*1.5,delta=2)
         self.drag(1.2);self.assertAlmostEqual(self.item().title_style.zoom_x,1.8,delta=.01)
     def test_locked_and_hidden_controls_do_not_resize(self):
@@ -66,5 +67,5 @@ class HeadlineControlsTests(unittest.TestCase):
         self.w.undo();self.assertEqual(self.item().title_style.font_face,'Bold')
         self.assertTrue(self.w.inspector.headline_bold.isChecked())
     def test_drag_clamps_to_inspector_range(self):
-        self.drag(5);self.assertEqual(self.item().title_style.zoom_x,2.5)
-        self.drag(.01);self.assertEqual(self.item().title_style.zoom_x,.2)
+        self.drag(50);self.assertEqual(self.item().title_style.zoom_x,10)
+        self.drag(.001);self.assertEqual(self.item().title_style.zoom_x,.05)

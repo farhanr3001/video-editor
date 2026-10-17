@@ -3,6 +3,9 @@ def run(output):
     import os,sys,json,time,traceback,copy
     from pathlib import Path
     output=Path(output).resolve(); output.mkdir(parents=True,exist_ok=True)
+    if os.environ.get('KINETIC_MOTION_DROP_ONLY'):
+        from .motion_qol_diagnostics import drop_workflow
+        return drop_workflow(output)
     os.environ['KINETIC_CUT_HOME']=str(output/'home'); os.environ['QT_QPA_PLATFORM']='windows' if os.name=='nt' else 'offscreen'
     import numpy as np,av
     from PySide6.QtWidgets import QApplication

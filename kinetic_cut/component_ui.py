@@ -1,7 +1,7 @@
 """Optional downloads accessible without changing any editing project."""
 import threading
 from PySide6.QtCore import QThreadPool, QObject, Signal, Slot, Qt
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QProgressBar, QMessageBox
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QProgressBar, QMessageBox,QCheckBox
 from . import feature_packs
 
 class ComponentEvents(QObject):
@@ -24,12 +24,15 @@ class _ComponentJob(QObject):
     result=Signal(object)
     error=Signal(str)
 
-    def __init__(self,key,cancel):
-        super().__init__(); self.key=key; self.cancel=cancel; self.worker=None
+    def __init__(self,key,cancel,acceleration=None):
+        super().__init__(); self.key=key; self.cancel=cancel; self.worker=None;self.acceleration=acceleration
 
     def start(self,owner):
         from .ui import Worker
-        worker=Worker(feature_packs.install,self.key,self.progress.emit,self.cancel)
+        if self.key=='enhance':
+            from .enhance_component import install
+            worker=Worker(install,self.progress.emit,self.cancel,acceleration=self.acceleration)
+        else:worker=Worker(feature_packs.install,self.key,self.progress.emit,self.cancel)
         self.worker=worker; _jobs[self.key]=self; active_downloads.add(self.key)
         worker.signals.result.connect(self.complete,Qt.QueuedConnection)
         worker.signals.error.connect(self.failed,Qt.QueuedConnection)
@@ -61,14 +64,25 @@ class InstallComponentDialog(QDialog):
         super().__init__(parent); self.key = key; self.cancel = threading.Event(); self.running = False; self._closed=False; self._job=None
         item = feature_packs.manifest().get(key, {})
         name = item.get('name', {
-                                 'vision':'Face / background tools','vocals':'Vocal separation'}[key])
+                                 'vision':'Face / background tools','vocals':'Vocal separation','enhance':'AI Enhance'}[key])
         self.setWindowTitle('Download ' + name); self.resize(510,260)
         layout = QVBoxLayout(self)
         self.status = QLabel(name + ' is an optional download.'); self.status.setWordWrap(True); layout.addWidget(self.status)
         if item:
             info = f"Download: {item['download_bytes']/1e6:.1f} MB\nInstalled size: {item['installed_bytes']/1e6:.1f} MB"
-        else:info = 'Installed size: approximately ' + ('350 MB' if key == 'vision' else '1.2 GB')
+        else:info = 'Installed size: approximately ' + ('350 MB' if key == 'vision' else '1.6 GB' if key=='enhance' else '1.2 GB')
+        if key=='enhance':info='Download: approximately 350-450 MB\n'+info+'\nLocal GPU restoration with motion-aware stabilization; playback uses cached frames.'
         details = QLabel(info + '\nYour projects, sources and Power Bin are preserved.'); details.setWordWrap(True); layout.addWidget(details)
+        self.cuda=None
+        if key=='enhance':
+            from .enhance_component import default_acceleration,runtime_ready,component_root
+            reuse=runtime_ready(component_root())
+            self.cuda=QCheckBox('NVIDIA CUDA acceleration (larger download)');self.cuda.setChecked(default_acceleration()=='CUDA');layout.addWidget(self.cuda)
+            self.cuda.setVisible(not reuse)
+            def update_estimate():
+                estimate='Download: approximately 10 MB of lightweight models.\nYour existing GPU runtime will be reused.' if reuse else 'Download: approximately 2.5 GB\nInstalled: approximately 5 GB; allow 12 GB free for setup.' if self.cuda.isChecked() else 'Download: approximately 350-450 MB\nInstalled: approximately 1.6 GB; allow 4 GB free for setup.'
+                details.setText(estimate+'\nAll processing is local. Preparation can take time; playback uses cached frames. No download starts until you confirm.')
+            self.cuda.toggled.connect(update_estimate);update_estimate()
         self.progress = QProgressBar(); self.progress.setRange(0,100); self.progress.setValue(0); self.progress.setFormat('%p%'); layout.addWidget(self.progress)
         row = QHBoxLayout(); layout.addLayout(row); row.addStretch()
         self.cancel_button = QPushButton('Cancel'); self.cancel_button.clicked.connect(self.reject); row.addWidget(self.cancel_button)
@@ -79,7 +93,8 @@ class InstallComponentDialog(QDialog):
         if self.key in active_downloads:
             self.status.setText('This component is already downloading. Wait for it to finish.'); return
         self.running = True; self.confirm.setEnabled(False)
-        self._job=_ComponentJob(self.key,self.cancel)
+        acceleration=('CUDA' if self.cuda.isChecked() else 'DirectML') if self.cuda else None
+        self._job=_ComponentJob(self.key,self.cancel,acceleration)
         self._job.progress.connect(self.update_progress,Qt.QueuedConnection)
         self._job.result.connect(self.complete,Qt.QueuedConnection)
         self._job.error.connect(self.failed,Qt.QueuedConnection)
@@ -237,7 +252,10 @@ class ComponentsDialog(QDialog):
         title = QLabel("Editing and caption generation are included. Add optional tools when you need them.")
         title.setWordWrap(True); layout.addWidget(title)
         metadata = feature_packs.manifest()
-        for key, name, estimate in (("vision", "Face / background tools", 350000000), ("vocals", "Vocal separation", 1200000000)):
+        for key, name, estimate in (("vision", "Face / background tools", 350000000), ("vocals", "Vocal separation", 1200000000), ('enhance','AI Enhance',1600000000)):
+            if key=='enhance':
+                from .enhance_component import default_acceleration
+                if default_acceleration()=='CUDA':estimate=5000000000
             row = QHBoxLayout(); layout.addLayout(row)
             size = metadata.get(key, {}).get("installed_bytes", estimate)
             label = QLabel(f"{name} · +{size / 1e6:.1f} MB" + (" estimated" if key not in metadata else ""))

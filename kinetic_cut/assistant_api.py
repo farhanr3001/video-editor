@@ -30,6 +30,17 @@ COMMANDS=('add_title_object','apply_effect_to','viewer_command','timeline_comman
     'frame_source','download_media','apply_transition','remove_transition',
     'add_graphic_object','remove_media','open_keyframes','open_motion_composition')
 TOOLS=[
+    tool('add_motion_sound_cue','Read a short local sound (up to 60s), trim silent edges, and attach it to a motion composition asynchronously as ONE undo step. No audio timeline lane is added. Source time follows graphic moves/trims/re-time. Event may bind to a layer start/end or selected key time. Poll get_jobs; edit_motion_composition scene_settings.sound_cues edits/removes existing cues.',{'revision':S,'item_id':S,'path':S,'time':N,'gain_db':{'type':'number','minimum':-60,'maximum':0},'event':{'type':'string','enum':['time','layer_start','layer_end','keyframe']},'node_id':S,'channel':S,'key_time':N},('revision','item_id','path','time')),
+    tool('motion_sound_job_control','Cancel a sound cue import before it commits. No partial scene edit is applied.',{'job_id':S},('job_id',)),
+    tool('create_edit_contact_sheet','Create timestamped production-compositor review frames and short audio peak/silence checks asynchronously WITHOUT seeking the editor. Snapshot/revision reported. 1–12 timestamps, 160–640px wide. Poll get_jobs, then get_edit_contact_sheet. Does not prove continuous playback or caption speech sync.',{'timestamps':{'type':'array','items':N,'minItems':1,'maxItems':12},'width':{'type':'integer','minimum':160,'maximum':640}},('timestamps',)),
+    tool('get_edit_contact_sheet','Read a completed review report and its image.',{'job_id':S},('job_id',),readonly=True),
+    tool('edit_review_job_control','Cancel a running contact-sheet job. The editor/project remains unchanged.',{'job_id':S},('job_id',)),
+    tool('anchor_captions_to_video','Place specified captions just INSIDE the bottom of the active webcam clip on a video track. Samples its evaluated crop/transform at each caption midpoint. Atomic/one undo; rejects rotated or undersized regions. Review animated framing separately.',{'revision':S,'track':S,'caption_ids':{'type':'array','items':S,'minItems':1},'margin':N},('revision','track','caption_ids')),
+    tool('review_edit','Read missing media, visual coverage gaps, caption bounds/platform margins and timing concerns without seeking or changing edits.',readonly=True),
+    tool('review_caption_timing','Read caption timing/text anomalies without changing the project. Flags estimated word timings, overlaps, malformed alignment and unusually long words for audio review.',readonly=True),
+    tool('generate_source_transcripts','Generate a reusable local SOURCE transcript index asynchronously without adding captions or changing edits. Poll get_jobs. Sources must already be imported; repeated/trimmed clips share their source index.',{'media_ids':{'type':'array','items':S,'minItems':1,'maxItems':100},'force':B},('media_ids',)),
+    tool('search_transcripts','Search spoken words across indexed imported sources; returns source timestamps, word timings and every matching timeline cut. Missing sources must be generated first. Pagination uses offset/limit.',{'query':S,'media_ids':{'type':'array','items':S},'limit':{'type':'integer','minimum':1,'maximum':500},'offset':{'type':'integer','minimum':0}},readonly=True),
+    tool('transcript_job_control','Cancel source transcription. Completed source indexes remain reusable; no timeline edits are made.',{'job_id':S},('job_id',)),
     tool('get_state','Read current project, revision, selection, playback and task status. section=summary omits the full project.',{'section':{'type':'string','enum':['all','summary']}},readonly=True),
     tool('get_capabilities','Discover every editable data field, edit operation, available effect and tool workflow.',readonly=True),
     tool('apply_edits','Apply an atomic batch as ONE undo step. Requires the revision from get_state. See get_capabilities for operations. All times in seconds.',{'revision':S,'operations':{'type':'array','items':O,'minItems':1,'maxItems':500}},('revision','operations')),
@@ -340,6 +351,106 @@ class EditorAPI:
         method=getattr(self,'call_'+name,None)
         if method is None:raise ValueError('Unknown editor tool')
         return method(**args)
+    def call_generate_source_transcripts(self,media_ids,force=False):
+        from .transcript_ui import service
+        return service(self.w).start(media_ids,force)
+    def call_search_transcripts(self,query='',media_ids=None,limit=200,offset=0):
+        from .transcripts import search
+        return search(self.w.project,self.w.settings,query,media_ids,limit,offset)
+    def call_transcript_job_control(self,job_id):
+        from .transcript_ui import service
+        return service(self.w).cancel(job_id)
+    def call_review_caption_timing(self):
+        from .caption_quality import review
+        return review(self.w.project)
+    def call_anchor_captions_to_video(self,revision,track,caption_ids,margin=16):
+        self.editing()
+        if revision!=globals()['revision'](self.w.project):raise ValueError('Project changed. Refresh get_state.')
+        from .edit_review import anchor_captions
+        stage=copy.deepcopy(self.w.project); placements=anchor_captions(self.w,stage,track,caption_ids,margin)
+        validate(stage); self.install(stage)
+        return dict(revision=globals()['revision'](stage),placements=placements,undoable=True)
+    def call_review_edit(self):
+        from .edit_review import structural
+        return structural(self.w.project)
+    def call_create_edit_contact_sheet(self,timestamps,width=360):
+        import threading
+        from .config import CACHE_DIR
+        from .review_frames import create
+        from .caption_fonts import load_fonts
+        from .ui import Worker
+        if getattr(self.w,'_closing',False):raise ValueError('The editor is closing.')
+        if not isinstance(timestamps,list) or not 1<=len(timestamps)<=12 or any(isinstance(t,bool) or not isinstance(t,(int,float)) or not math.isfinite(t) or not 0<=t<self.w.project.duration for t in timestamps):raise ValueError('Choose 1–12 timestamps inside the project.')
+        if not isinstance(width,int) or not 160<=width<=640:raise ValueError('Review width must be 160–640.')
+        if any(j.get('review') and j['state'] in ('Running','Cancelling') for j in self.jobs.values()):raise ValueError('A contact sheet is already running.')
+        load_fonts(); snapshot=copy.deepcopy(self.w.project); settings=copy.deepcopy(self.w.settings); cancel=threading.Event()
+        job=self.new_job('Edit contact sheet'); job.update(review=True,revision=revision(snapshot),cancellable=True,progress=0)
+        if not hasattr(self,'_review_cancels'):self._review_cancels={}
+        self._review_cancels[job['id']]=cancel
+        directory=CACHE_DIR/'edit-reviews'/job['id']
+        worker=Worker(lambda:create(snapshot,settings,timestamps,width,cancel,lambda p,m:worker.signals.progress.emit((p,m)),directory)); worker.cancel_callback=cancel.set
+        def progress(value):job.update(progress=value[0],message=value[1])
+        def ready(result):job.update(state='Cancelled' if cancel.is_set() else 'Complete',result=result,progress=100)
+        def failed(error):job.update(state='Cancelled' if cancel.is_set() else 'Failed',error='' if cancel.is_set() else str(error)[-1800:])
+        def finished():
+            if job['state'] in ('Running','Cancelling'):failed('Contact-sheet generation did not complete.')
+            job.update(cancellable=False,finished=time.time()); self._review_cancels.pop(job['id'],None)
+        worker.signals.progress.connect(progress); worker.signals.result.connect(ready); worker.signals.error.connect(failed); worker.signals.finished.connect(finished)
+        try:self.w.start_worker(worker)
+        except Exception:cancel.set(); failed('Could not start review.'); finished(); raise
+        return dict(job)
+    def call_get_edit_contact_sheet(self,job_id):
+        job=self.jobs.get(job_id)
+        if not job or not job.get('review'):raise ValueError('Unknown contact-sheet job.')
+        if job['state']!='Complete':return dict(job)
+        import base64
+        image=Path(job['result']['contact_sheet'])
+        if not image.is_file():raise ValueError('Review cache was cleared. Generate the contact sheet again.')
+        return {'_mcp_content':[dict(type='text',text=json.dumps(job)),dict(type='image',data=base64.b64encode(image.read_bytes()).decode(),mimeType='image/png')]}
+    def call_edit_review_job_control(self,job_id):
+        job=self.jobs.get(job_id); token=getattr(self,'_review_cancels',{}).get(job_id)
+        if not job or not token or job['state'] not in ('Running','Cancelling'):raise ValueError('This contact-sheet job is not running.')
+        token.set(); job['state']='Cancelling'; return dict(job)
+    def call_add_motion_sound_cue(self,revision,item_id,path,time,gain_db=0,event='time',node_id='',channel='',key_time=0):
+        import threading
+        from .motion_audio_ui import inspect_sound
+        from .motion_audio import validate as validate_cues,at
+        from .ui import Worker
+        self.editing()
+        if getattr(self.w,'_closing',False) or getattr(self.w.transport,'closed',False):raise ValueError('The editor is closing.')
+        project=self.w.project
+        if revision!=globals()['revision'](project):raise ValueError('Project changed. Refresh get_state.')
+        item=project.item_by_id(item_id)
+        if not item or item.role!='graphic' or not is_motion(item.graphic_type) or project.track_states.get(item.track,{}).get('locked'):raise ValueError('Choose an unlocked motion composition.')
+        snapshot=copy.deepcopy(item); scene=snapshot.graphic_data.get('scene',{})
+        probe_cue=dict(id=uid(),source=str(Path(path).resolve()),time=time,gain_db=gain_db,event=event,node_id=node_id,channel=channel,key_time=key_time)
+        validate_cues([probe_cue])
+        if at(probe_cue,scene) is None:raise ValueError('The sound cue event does not exist in this composition.')
+        if len(scene.get('sound_cues',[]))>=32:raise ValueError('Maximum 32 sound cues per composition.')
+        cancel=threading.Event(); settings=copy.deepcopy(self.w.settings); job=self.new_job('Motion sound cue'); job.update(cancellable=True,item_id=item_id)
+        if not hasattr(self,'_sound_cancels'):self._sound_cancels={}
+        self._sound_cancels[job['id']]=cancel
+        worker=Worker(lambda:inspect_sound(probe_cue['source'],settings,cancel)); worker.cancel_callback=cancel.set
+        def done(result):
+            try:
+                if cancel.is_set():job['state']='Cancelled'; return
+                if self.w.project is not project or globals()['revision'](project)!=revision or project.item_by_id(item_id)!=snapshot or getattr(self.w,'_closing',False) or self.w.delivery.running or QApplication.activeModalWidget():raise ValueError('The project/editor changed during sound import; no cue was applied.')
+                result.pop('peaks',None); cue={**probe_cue,**result}; stage=copy.deepcopy(project)
+                stage.item_by_id(item_id).graphic_data['scene'].setdefault('sound_cues',[]).append(cue)
+                validate(stage); self.install(stage); job.update(state='Complete',cue_id=cue['id'],cue=cue,revision=globals()['revision'](stage),undoable=True)
+            except Exception as error:job.update(state='Failed',error=str(error)[-1500:])
+        def failed(error):job.update(state='Cancelled' if cancel.is_set() else 'Failed',error='' if cancel.is_set() else str(error)[-1500:])
+        def finished():
+            if job['state'] in ('Running','Cancelling'):failed('Sound cue import did not complete.')
+            job.update(cancellable=False,finished=__import__('time').time()); self._sound_cancels.pop(job['id'],None)
+        worker.signals.result.connect(done); worker.signals.error.connect(failed); worker.signals.finished.connect(finished)
+        try:self.w.start_worker(worker)
+        except Exception:cancel.set(); failed('Could not start sound import.'); finished(); raise
+        return dict(job)
+    def call_motion_sound_job_control(self,job_id):
+        token=getattr(self,'_sound_cancels',{}).get(job_id)
+        if not token or self.jobs[job_id]['state'] not in ('Running','Cancelling'):raise ValueError('This sound import is not running.')
+        token.set(); self.jobs[job_id]['state']='Cancelling'; return dict(self.jobs[job_id])
     def editing(self):
         if QApplication.activeModalWidget():raise ValueError('A dialog is open. Use inspect_ui/ui_control to finish or dismiss it first.')
         if self.w.delivery.running:raise ValueError('Wait for the active render or cancel it before editing')
@@ -374,6 +485,9 @@ class EditorAPI:
                 'insert_transition':'name, track, duration, alignment (center/start/end), optional left_item_id, right_item_id, cut_time, properties',
                 'set_caption_style':'preset (crime_red, viral_yellow, cyber_cyan, mrbeast_gold, clean_card), properties (partial dict), optional caption_ids',
                 'apply_vertical_framing':'mode (center_and_fill, fit_width, fill_916), foreground_track, background_track, optional scale'},
+            source_transcripts=dict(generate='generate_source_transcripts',search='search_transcripts',cancel='transcript_job_control',ui='Audio > Search transcript',coordinates='Source seconds with timeline cut occurrences; regenerable local index, not project captions.'),
+            edit_review=dict(structural='review_edit',frames='create_edit_contact_sheet',result='get_edit_contact_sheet',captions='review_caption_timing',placement='anchor_captions_to_video'),
+            motion_sound=dict(add='add_motion_sound_cue',cancel='motion_sound_job_control',storage='scene.sound_cues',events=['time','layer_start','layer_end','keyframe'],gain_db=[-60,0],time='Composition source seconds; up to 32 cues, 60-second sound inputs. Layer/key event must exist. Key dragging follows the bound key; removing the event requires removing/rebinding its cue.'),
             motion_composition=schema(),motion_presets=__import__('kinetic_cut.motion_presets',fromlist=['catalog']).catalog(),
             object_tracking=dict(tool='track_object',cancel_tool='tracking_job_control',
                 coordinates='Full-source normalized [x,y,width,height], before crop/transform; source seconds = in_point + (timeline time - start) * speed',
@@ -772,7 +886,8 @@ class EditorAPI:
         return dict(job)
     def call_get_jobs(self):
         from .render_queue import elapsed
-        return dict(tasks=list(self.jobs.values()),renders=[dict(id=j.setdefault('assistant_id',uid()),state=j['state'],path=j['output'],elapsed=elapsed(j),error=j.get('error','')) for j in self.w.delivery.jobs],
+        transcripts=getattr(self.w,'transcript_service',None)
+        return dict(tasks=list(self.jobs.values())+(list(transcripts.jobs.values()) if transcripts else []),renders=[dict(id=j.setdefault('assistant_id',uid()),state=j['state'],path=j['output'],elapsed=elapsed(j),error=j.get('error','')) for j in self.w.delivery.jobs],
                     rendering=self.w.delivery.running,progress=self.w.delivery.progress.value())
     def call_seek(self,seconds):
         if not isinstance(seconds,(int,float)) or not math.isfinite(seconds) or seconds<0:raise ValueError('Invalid seek time')

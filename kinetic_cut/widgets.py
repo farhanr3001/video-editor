@@ -283,16 +283,46 @@ class PreviewCanvas(QWidget):
         try:return draw_graphic(painter,self.project,unrotated,frame_rect,self.project.playhead)
         finally:painter.end()
 
+    @staticmethod
+    def _is_headline(item):
+        return bool(item and item.role=='title' and item.title_style.box_style=='headline')
+
+    def _headline_rect(self,item,frame_rect=None):
+        from PySide6.QtGui import QPicture
+        from .native_animation import draw_title
+        from .keyframes import evaluated
+        unrotated=evaluated(item,self.project.playhead-item.start); unrotated=copy.copy(unrotated)
+        unrotated.keyframes={}; unrotated.transform=copy.copy(unrotated.transform); unrotated.transform.rotation=0
+        picture=QPicture(); painter=QPainter(picture)
+        try:return draw_title(painter,self.project,unrotated,frame_rect or self.composition_rect(),self.project.playhead)
+        finally:painter.end()
+
+    @staticmethod
+    def _rotation_angle(point,anchor):
+        angle=math.degrees(math.atan2(point.y()-anchor.y(),point.x()-anchor.x()))+90
+        return ((angle+180)%360)-180
+
+    def _text_contains(self,kind,item_id,rect,point):
+        item=self.project.item_by_id(item_id) if kind=='title' else None
+        if self._is_headline(item):return QPolygonF(self._transform_geometry(item,self._headline_rect(item))[1]).containsPoint(point,Qt.OddEvenFill)
+        return rect.adjusted(-5,-5,5,5).contains(point)
+
     def _transform_geometry(self, item: TimelineItem, target: QRectF):
         factor = self.composition_rect().width() / max(1, self.project.settings.width)
         anchor = target.center() + QPointF(item.transform.anchor_x * factor, item.transform.anchor_y * factor)
+        rotation=item.transform.rotation
+        if self._is_headline(item):
+            anchor=target.center()
+            if item.keyframes:
+                from .keyframes import evaluated
+                rotation=evaluated(item,self.project.playhead-item.start).transform.rotation
         if item.role=='graphic':
             frame=self.composition_rect()
             anchor=QPointF(frame.left()+item.transform.x*frame.width()+item.transform.anchor_x*factor,
                            frame.top()+item.transform.y*frame.height()+item.transform.anchor_y*factor)
         transform = QTransform()
         transform.translate(anchor.x(), anchor.y())
-        transform.rotate(item.transform.rotation)
+        transform.rotate(rotation)
         transform.translate(-anchor.x(), -anchor.y())
         corners = [transform.map(point) for point in
                    (target.topLeft(), target.topRight(), target.bottomRight(), target.bottomLeft())]
@@ -300,6 +330,7 @@ class PreviewCanvas(QWidget):
                  (QPointF(target.center().x(), target.top()), QPointF(target.right(), target.center().y()),
                   QPointF(target.center().x(), target.bottom()), QPointF(target.left(), target.center().y()))]
         handle_distance = max(36.0, min(96.0, target.height() * .34))
+        if self._is_headline(item):handle_distance=max(handle_distance,target.height()/2+24)
         rotation_handle = transform.map(anchor + QPointF(0, -handle_distance))
         return anchor, corners, sides, rotation_handle, handle_distance
 
@@ -309,18 +340,24 @@ class PreviewCanvas(QWidget):
         painter.setPen(QPen(QColor("#dadde4"), 1))
         painter.setBrush(Qt.NoBrush); painter.drawPolygon(QPolygonF(corners))
         for index,corner in enumerate(corners):
-            active=self.drag_item is item and self.drag_mode=="scale" and self.drag_handle==index
+            active=(self.drag_item is item and self.drag_mode=="scale" or self.drag_text and self.drag_text[1]==item.id and self.drag_mode=='headline_scale') and self.drag_handle==index
             painter.setPen(QPen(QColor("#3d8cff"), 1)); painter.setBrush(QColor("#3d8cff") if active else QColor("#f5f6fa"))
             painter.drawRect(QRectF(corner.x()-5, corner.y()-5, 10, 10))
         for index,side in enumerate(sides):
-            active=self.drag_item is item and self.drag_mode in {"scale_x","scale_y"} and self.drag_handle==f"side-{index}"
+            active=(self.drag_item is item and self.drag_mode in {"scale_x","scale_y"} or self.drag_text and self.drag_text[1]==item.id and self.drag_mode=='headline_scale') and self.drag_handle==f"side-{index}"
             painter.setPen(QPen(QColor("#3d8cff"),1)); painter.setBrush(QColor("#3d8cff") if active else QColor("#f4f6f8")); painter.drawEllipse(side,4,4)
         if self.drag_item is item and self.drag_mode=="rotate":
+            if self._is_headline(item):
+                painter.setPen(QPen(QColor('#17191c'),3)); painter.setBrush(Qt.NoBrush); painter.drawEllipse(anchor,rotation_radius,rotation_radius)
             painter.setPen(QPen(QColor(221,225,232,175),1)); painter.setBrush(Qt.NoBrush)
             painter.drawEllipse(anchor,rotation_radius,rotation_radius)
+        if self._is_headline(item):
+            painter.setPen(QPen(QColor('#17191c'),3)); painter.setBrush(QColor('#17191c'))
+            painter.drawLine(anchor,rotation_handle); painter.drawEllipse(rotation_handle,7,7)
         painter.setPen(QPen(QColor("#d9dde5"),1)); painter.drawLine(anchor,rotation_handle)
         active_anchor=self.drag_item is item and self.drag_mode=="anchor"
-        painter.setPen(QPen(QColor("#3d8cff"),2)); painter.setBrush(QColor("#3d8cff") if active_anchor else QColor("#f5f6fa")); painter.drawEllipse(anchor,6,6)
+        painter.setPen(QPen(QColor("#3d8cff"),2)); painter.setBrush(QColor("#3d8cff") if active_anchor else QColor("#f5f6fa"))
+        if not self._is_headline(item):painter.drawEllipse(anchor,6,6)
         active_rotation=self.drag_item is item and self.drag_mode=="rotate"
         painter.setBrush(QColor("#3d8cff") if active_rotation else QColor("#f5f6fa")); painter.drawEllipse(rotation_handle,5,5)
         # Thin shapes can overlap grips; keep the pressed corner visibly active.
@@ -347,6 +384,7 @@ class PreviewCanvas(QWidget):
         from .preview_raster import RasterContext
         from .vision_effects import active
         from .tracking_effect import active as tracking_active
+        from .enhance import active as enhance_active
         from .visual_fx import evaluate_visual_fx
         project=self.project
         if not project or getattr(self,'caption_focus',False):return None
@@ -354,7 +392,7 @@ class PreviewCanvas(QWidget):
         for track in project.video_tracks:
             item=self._active(track)
             if not item or self.active_frames.get(item.id)!=key:continue
-            if item.keyframes or active(item) or tracking_active(item):continue
+            if item.keyframes or active(item) or tracking_active(item) or enhance_active(item):continue
             if project.transition_at_time(track,project.playhead):continue
             if evaluate_visual_fx(item,project.playhead-item.start,project.settings.width,project.settings.height).is_active:continue
             if item.role!='background' and not self._has_pixel_effects(item):continue
@@ -607,7 +645,7 @@ class PreviewCanvas(QWidget):
             return
         from .video_worker import enabled as worker_preview
         transport=getattr(self.window(),'transport',None)
-        if worker_preview() and transport and not transport.playing and not transport.scrubbing and not self.drag_origin and not self.composition_cache.closed:
+        if worker_preview() and transport and not transport.playing and not transport.scrubbing and not self.drag_origin and self.pan_origin is None and not self.composition_cache.closed:
             # Warm the current complete composition while paused. Controls still
             # use the synchronous exact geometry; Play can reuse this work.
             self.composition_cache.request(frame_rect)
@@ -615,7 +653,9 @@ class PreviewCanvas(QWidget):
                 and (transport.playing or transport.scrubbing) and not self.transform_controls_visible
                 and not self.composition_cache.closed else None)
         if cached:
-            image,vision_notice=cached; painter.drawImage(QPointF(0,0),image); overlay=None
+            image,vision_notice=cached
+            painter.save();painter.setClipRect(frame_rect,Qt.IntersectClip)
+            painter.drawImage(frame_rect.topLeft(),image);painter.restore();overlay=None
             # Captions use the current timeline clock, independently of video
             # composition completion. Word boundaries must not discard an
             # otherwise valid expensive background/graphics composition.
@@ -636,7 +676,9 @@ class PreviewCanvas(QWidget):
                             and self.project.track_states.get(item.track,{}).get("visible",True)):
                         self._draw_transform_box(painter,item,target); drawn.add(item.id)
             selected=self.text_rects.get(("title",self.selected_item_id)) or self.text_rects.get(("caption",self.selected_caption_id))
-            if selected:self._draw_text_box(painter,selected)
+            title=self.project.item_by_id(self.selected_item_id)
+            if selected and self._is_headline(title):self._draw_transform_box(painter,title,self._headline_rect(title,frame_rect))
+            elif selected:self._draw_text_box(painter,selected)
         if vision_notice:
             painter.setPen(QColor('#ffdd88')); painter.setFont(QFont('Segoe UI',9)); painter.drawText(self.rect().adjusted(12,8,-12,-8),Qt.AlignBottom|Qt.AlignHCenter,vision_notice)
         win = self.window()
@@ -784,19 +826,30 @@ class PreviewCanvas(QWidget):
         if (self.transform_controls_visible and selected_title and selected_title.role=='title'
                 and title_rect
                 and not self.project.track_states.get(selected_title.track,{}).get('locked')):
-            nearby=[((point-QPointF(handle)).manhattanLength(),index) for index,handle in enumerate(self._handles(title_rect))]
-            closest=min((entry for entry in nearby if entry[0]<=12),default=None)
+            headline=self._is_headline(selected_title)
+            if headline:
+                title_rect=self._headline_rect(selected_title)
+                anchor,corners,sides,rotation_handle,_=self._transform_geometry(selected_title,title_rect)
+                rotation_distance=(point-rotation_handle).manhattanLength()
+                if not selected_title.keyframes and rotation_distance<=16 and rotation_distance<min((point-h).manhattanLength() for h in corners+sides):
+                    self.drag_item=selected_title; self.drag_mode='rotate'; self.drag_origin=point.toPoint(); self.drag_handle='rotation'; self.update(); return
+                handles=[*enumerate(corners),*((f'side-{n}',side) for n,side in enumerate(sides))]
+                # On a short one-line heading the top/bottom grips can overlap
+                # the center. Keep its visible center available for moving.
+                if (point-anchor).manhattanLength()<=8:handles=[]
+            else:handles=list(enumerate(self._handles(title_rect)))
+            nearby=[((point-QPointF(handle)).manhattanLength(),index) for index,handle in handles]
+            closest=min((entry for entry in nearby if entry[0]<=12),key=lambda entry:entry[0],default=None)
             handle_index=closest[1] if closest else None
             if handle_index is not None:
                 self.drag_handle=handle_index; self.setCursor(Qt.ArrowCursor)
                 self.drag_text=('title',selected_title.id,selected_title.title_style)
-                headline=selected_title.title_style.box_style=='headline'
                 self.drag_mode='headline_scale' if headline else 'title_scale'; self.drag_origin=point.toPoint()
                 self.drag_position=title_rect.center(); self.drag_scale=selected_title.title_style.zoom_x if headline else selected_title.title_style.size
                 self.drag_distance=max(1.,math.hypot(point.x()-self.drag_position.x(),point.y()-self.drag_position.y()))
                 self.update()
                 return
-        text_hit=next(((kind,item_id,rect) for (kind,item_id),rect in reversed(list(self.text_rects.items())) if kind!='graphic' and rect.adjusted(-5,-5,5,5).contains(point)),None)
+        text_hit=next(((kind,item_id,rect) for (kind,item_id),rect in reversed(list(self.text_rects.items())) if kind!='graphic' and self._text_contains(kind,item_id,rect,point)),None)
         if text_hit:
             kind,item_id,_=text_hit
             if kind=="title":
@@ -883,6 +936,11 @@ class PreviewCanvas(QWidget):
             point = event.position()
             title=self.project.item_by_id(self.selected_item_id) if self.project else None
             title_rect=self.text_rects.get(('title',self.selected_item_id))
+            if self._is_headline(title) and title_rect and not self.project.track_states.get(title.track,{}).get('locked'):
+                anchor,corners,sides,handle,_=self._transform_geometry(title,self._headline_rect(title))
+                if (point-anchor).manhattanLength()<=8:self.setCursor(Qt.SizeAllCursor); return
+                if not title.keyframes and (point-handle).manhattanLength()<=16:self.setCursor(Qt.CrossCursor); return
+                if any((point-h).manhattanLength()<=12 for h in corners+sides):self.setCursor(Qt.ArrowCursor); return
             if (title and title.role=='title' and title_rect
                     and not self.project.track_states.get(title.track,{}).get('locked')
                     and any((point-QPointF(handle)).manhattanLength()<=12 for handle in self._handles(title_rect))):
@@ -910,7 +968,7 @@ class PreviewCanvas(QWidget):
         if self.drag_mode=='headline_scale' and self.drag_text:
             kind,item_id,style=self.drag_text
             distance=math.hypot(point.x()-self.drag_position.x(),point.y()-self.drag_position.y())
-            style.zoom_x=style.zoom_y=min(2.5,max(.2,self.drag_scale*distance/self.drag_distance))
+            style.zoom_x=style.zoom_y=min(10,max(.05,self.drag_scale*distance/self.drag_distance))
             self.transformChanged.emit(item_id); self.update(); return
         if self.drag_mode=='title_scale' and self.drag_text:
             kind,item_id,style=self.drag_text
@@ -930,11 +988,10 @@ class PreviewCanvas(QWidget):
             factor=max(.0001,frame_rect.width()/self.project.settings.width)
             item.transform.anchor_x=self.drag_anchor[0]+(point.x()-self.drag_origin.x())/factor; item.transform.anchor_y=self.drag_anchor[1]+(point.y()-self.drag_origin.y())/factor
         elif self.drag_mode=="rotate":
-            visible_rect=next((rect for candidate,_,rect in self._visible_items() if candidate.id==item.id),None)
+            visible_rect=self._headline_rect(item,frame_rect) if self._is_headline(item) else next((rect for candidate,_,rect in self._visible_items() if candidate.id==item.id),None)
             if visible_rect:
                 anchor=self._transform_geometry(item,visible_rect)[0]
-                angle=math.degrees(math.atan2(point.y()-anchor.y(),point.x()-anchor.x()))+90
-                item.transform.rotation=((angle+180)%360)-180
+                item.transform.rotation=self._rotation_angle(point,anchor)
         elif self.drag_mode == "scale":
             visible_rect = next((rect for candidate, _, rect in self._visible_items() if candidate.id == item.id), None)
             if visible_rect:

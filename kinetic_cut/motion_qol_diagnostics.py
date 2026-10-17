@@ -65,7 +65,7 @@ def fades(window,out,settle):
     from .model import Project,TimelineItem
     project=Project(timeline=[TimelineItem('graphic','','video_1',0,3,role='graphic',graphic_type='Rectangle',fade_in=.5,fade_out=.5),TimelineItem('media','','video_2',0,3,fade_in=.5,fade_out=.5),TimelineItem('audio','','audio_1',0,3,role='audio',fade_in=.5,fade_out=.5)])
     project.video_tracks=['video_1','video_2']; window.set_project(project); t=window.timeline; t.pixels_per_second=100
-    t.select_ids(set()); assert not window.retime_button.isEnabled() and window.retime_button.toolTip()=='select a media to re-time first'
+    t.select_ids(set()); assert not window.retime_button.isEnabled() and window.retime_button.toolTip()=='Select a media clip to re-time first.'
     t.select_ids({'graphic'},'graphic'); assert window.retime_button.isEnabled()
     QTest.mouseClick(window.retime_button,Qt.LeftButton); assert t.retime_ids=={'graphic'}
     window.shortcut_actions['retime_controls'].trigger(); assert not t.retime_ids
@@ -109,3 +109,51 @@ def fades(window,out,settle):
             assert drawn=={'first','second'},drawn
     finally:del preview._draw_transform_box
     return dict(relative_multi_inspector=True,typed_exact_multi_inspector=True,all_selected_transform_boxes=True,round_handles=True,curved_guides=True,grab_offset_preserved=True,retime_button_matches_shortcut=True,disabled_retime_tooltip=True,theme_captures=captures)
+
+
+def drop_workflow(out):
+    """Small isolated native visual/placement check; never saves owner projects."""
+    import os,json,copy,sys
+    os.environ['KINETIC_CUT_HOME']=str(out/'home'); os.environ['QT_QPA_PLATFORM']='windows' if os.name=='nt' else 'offscreen'
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import Qt,QPoint,QPointF,QEventLoop,QTimer,QThreadPool
+    from .ui import MainWindow
+    from .model import Project,TimelineItem
+    from .motion_editor import MotionEditor
+    app=QApplication([]); app.setQuitOnLastWindowClosed(False); app.setProperty('kineticTestDiscardUnsaved',True)
+    w=MainWindow(); w.autosave_timer.stop(); w.resize(1400,900); w.show()
+    scene=dict(canvas=[1080,1920],nodes=[dict(id='g',name='Product card',kind='group'),dict(id='c',name='Card background',kind='rectangle',parent='g'),dict(id='h',name='Heading',kind='group'),dict(id='d',name='Title',kind='text',parent='h'),dict(id='x',name='Watch image',kind='rectangle')])
+    item=TimelineItem('fixture','','video_1',0,4,role='graphic',graphic_type='Motion Composition',graphic_data={'scene':scene}); w.set_project(Project(timeline=[item])); original=copy.deepcopy(w.project.to_dict())
+    def settle():
+        loop=QEventLoop();QTimer.singleShot(100,loop.quit);loop.exec()
+    report=dict(passed=False,frozen=bool(getattr(sys,'frozen',False)),themes=[])
+    try:
+        for theme in ('default','final_cut_obsidian','ableton_gray'):
+            w.apply_theme(theme,save=False); d=MotionEditor(w,item);d.resize(1180,820);d.show();d.select_node('x');settle();tree=d.tree
+            for mode in ('inside','after','outdent','root'):
+                row=d._tree_items['g' if mode in ('inside','after') else 'c'];rect=tree.visualItemRect(row)
+                point=rect.center() if mode=='inside' else QPoint(rect.center().x(),rect.bottom()-1) if mode=='after' else QPoint(1,rect.bottom()-1) if mode=='outdent' else QPoint(10,tree.viewport().height()-5)
+                plan=tree.drop_plan(point);assert plan is not None;tree.drop_preview=plan;tree.viewport().update();settle()
+                assert tree.grab().save(str(out/f'{theme}-{mode}.png'))
+            tree.clear_drop_preview();rect=tree.visualItemRect(d._tree_items['g']);point=rect.center();before=copy.deepcopy(d.scene)
+            class Drop:
+                accepted=False
+                def source(s):return tree
+                def position(s):return QPointF(point)
+                def ignore(s):s.accepted=False
+                def acceptProposedAction(s):s.accepted=True
+            event=Drop();tree.dropEvent(event);assert event.accepted and d.node()['parent']=='g'
+            point=QPoint(1,tree.visualItemRect(d._tree_items['c']).bottom()-1);tree.dropEvent(event)
+            assert event.accepted and not d.node().get('parent')
+            assert [n['id'] for n in d.scene['nodes']]==['g','c','x','h','d']
+            d.local_history(-1);assert d.node()['parent']=='g';d.local_history(-1);assert d.scene==before
+            current=w.project.to_dict(); expected=copy.deepcopy(original)
+            current.pop('modified_at',None); expected.pop('modified_at',None)  # Existing autosave timestamp, not a document edit.
+            assert current==expected;d.reject();report['themes'].append(theme)
+        report.update(passed=True,visual_targets=True,group_and_root=True,whole_branch_order=True,local_undo=True,owner_project_unchanged=True)
+    except Exception:
+        import traceback
+        report['error']=traceback.format_exc()
+    finally:
+        w.close();QThreadPool.globalInstance().waitForDone(10000);app.processEvents();(out/'report.json').write_text(json.dumps(report,indent=2))
+    return 0 if report['passed'] else 1

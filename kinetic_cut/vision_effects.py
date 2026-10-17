@@ -209,8 +209,9 @@ def decoded_frames(stream,size,cancel,timeout=90):
     finally:finished.set()
 
 def prepare_export(project,ffmpeg,progress,cancel):
+    from .enhance import active as enhance_active,prepare_export as enhance_export
     from .tracking_effect import render_effects as tracking_active, apply as apply_tracking, export_error as tracking_export_error, prune as prune_tracking, follow_effect, effective_crop, crop_source, VISION_CONFLICT_ERROR
-    if not any(active(item) or tracking_active(item) for item in project.timeline):return {}
+    if not any(active(item) or tracking_active(item) or enhance_active(item) for item in project.timeline):return {}
     import threading
     cancel=cancel or threading.Event()
     from .config import CACHE_DIR
@@ -220,8 +221,9 @@ def prepare_export(project,ffmpeg,progress,cancel):
     from .exporter import _crop_filter
     import av
     from fractions import Fraction
-    result={}
+    result=enhance_export(project,ffmpeg,progress,cancel)
     for item in project.timeline:
+        if item.id in result:continue
         effects=active(item)
         tracking=tracking_active(item)
         if not (effects or tracking) or item.muted or not project.track_states.get(item.track,{}).get('visible',True):continue

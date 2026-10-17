@@ -69,12 +69,14 @@ def paths(text,style,width,height):
     return transform.map(letters),transform.map(backing)
 
 
-def draw(painter,project,caption,frame):
+def draw(painter,project,caption,frame,clip_frame=True):
     style=project.caption_style(caption); w=project.settings.width; h=project.settings.height
     letters,backing=paths(caption.text,style,w,h)
     transform=QTransform(); transform.translate(frame.left(),frame.top()); transform.scale(frame.width()/w,frame.height()/h)
     letters=transform.map(letters); backing=transform.map(backing)
-    inherited_opacity=painter.opacity(); painter.save(); painter.setClipRect(frame,Qt.IntersectClip); painter.setOpacity(inherited_opacity*style.opacity/100)
+    inherited_opacity=painter.opacity(); painter.save()
+    if clip_frame:painter.setClipRect(frame,Qt.IntersectClip)
+    painter.setOpacity(inherited_opacity*style.opacity/100)
     painter.fillPath(backing,QColor("#FFFFFF")); painter.fillPath(letters,QColor(style.color))
     from .emoji import draw as draw_emoji
     draw_emoji(painter,[(sequence,transform.mapRect(rect)) for sequence,rect in emoji_positions(caption.text,style,w,h)]); painter.restore()

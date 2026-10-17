@@ -27,6 +27,7 @@ def apply(scene,operations):
                 if more<=ids:break
                 ids|=more
             result['nodes']=[n for n in result['nodes'] if n['id'] not in ids]
+            if 'sound_cues' in result:result['sound_cues']=[c for c in result['sound_cues'] if c.get('event','time')=='time' or c.get('node_id') not in ids]
         elif kind=='move_layer':
             target=node(op.get('id')); before=node(op['before']) if op.get('before') else None
             if before is target:continue
@@ -36,13 +37,15 @@ def apply(scene,operations):
             if channel not in CHANNELS or t<0:raise ValueError('Invalid key channel/time')
             keys=target.setdefault('keyframes',{}).setdefault(channel,[])
             keys[:]=[k for k in keys if abs(k['time']-t)>1e-5]
+            if kind=='remove_key' and 'sound_cues' in result:
+                result['sound_cues']=[c for c in result['sound_cues'] if not(c.get('event')=='keyframe' and c.get('node_id')==target['id'] and c.get('channel')==channel and abs(c.get('key_time',-1)-t)<1e-5)]
             if kind=='set_key':
                 key=dict(time=t,value=op.get('value'),interpolation=op.get('interpolation','Linear'))
                 if 'bezier' in op:key['bezier']=op['bezier']
                 keys.extend(clean_curves({channel:[key]})[channel]); keys.sort(key=lambda k:k['time'])
         elif kind=='scene_settings':
             values=op.get('values')
-            if not isinstance(values,dict) or set(values)-{'canvas','motion_blur'}:raise ValueError('Use canvas/motion_blur scene settings')
+            if not isinstance(values,dict) or set(values)-{'canvas','motion_blur','sound_cues'}:raise ValueError('Use canvas/motion_blur/sound_cues scene settings')
             result.update(copy.deepcopy(values))
         else:raise ValueError('Unknown motion edit operation')
     return validate(result)

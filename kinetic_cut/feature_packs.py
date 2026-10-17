@@ -6,9 +6,10 @@ import zipfile
 from pathlib import Path
 from .updates import trusted_download
 
-ROOTS = {"vision": "vision-v1", "vocals": "vocal-only-v1"}
+ROOTS = {"vision": "vision-v1", "vocals": "vocal-only-v1", "enhance": "ai-enhance-v1"}
 
 def effect_component(name):
+    if name=='AI Enhance':return 'enhance'
     from .vision_effects import NAMES
     return 'vision' if name in NAMES else 'vocals' if name == 'Vocal Only' else None
 
@@ -44,6 +45,9 @@ def component_root(key):
 
 def installed(key):
     root = component_root(key)
+    if key == 'enhance':
+        from .enhance_component import ready
+        return ready(root)
     if key == "vision":
         from .vision_component import ready
         return ready(root)
@@ -74,6 +78,9 @@ def extract(archive, destination, cancel):
 def install(key, progress, cancel, local_source=None):
     if installed(key):
         progress((100, "Already installed")); return component_root(key)
+    if key=='enhance':
+        from .enhance_component import install as install_enhance
+        return install_enhance(progress,cancel,component_root(key))
     metadata = manifest().get(key)
     if metadata:
         from .updates import Release, download

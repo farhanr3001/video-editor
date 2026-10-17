@@ -68,7 +68,7 @@ class MotionEditorQualityTests(unittest.TestCase):
         center=self.d.preview.from_scene(QPointF(960,540)); self.assertEqual(center,rect.center())
     def test_retime_button_matches_shortcut_and_disables_on_selection_clear(self):
         self.d.reject(); self.w.timeline.select_ids(set()); button=self.w.retime_button
-        self.assertFalse(button.isEnabled()); self.assertEqual(button.toolTip(),'select a media to re-time first')
+        self.assertFalse(button.isEnabled()); self.assertEqual(button.toolTip(),'Select a media clip to re-time first.')
         self.assertFalse(hasattr(self.w,'keyframe_button'))
         self.w.timeline.select_ids({'motion'},'motion'); self.assertTrue(button.isEnabled()); self.assertIn('Ctrl+R',button.toolTip())
         before=copy.deepcopy(self.w.project); QTest.mouseClick(button,Qt.LeftButton); self.assertEqual(self.w.timeline.retime_ids,{'motion'})
@@ -148,6 +148,47 @@ class MotionEditorQualityTests(unittest.TestCase):
         with patch.object(tree,'dropIndicatorPosition',return_value=QAbstractItemView.OnItem):tree.dropEvent(event)
         self.assertFalse(event.accepted); self.assertEqual(self.d.node().get('parent',''),'')
         self.d.local_history(-1); self.assertEqual(self.d.scene,before)
+    def test_precise_drop_targets_group_siblings_outdent_and_root(self):
+        self.d.scene['nodes']=[dict(id='g',kind='group'),dict(id='c',kind='rectangle',parent='g'),dict(id='h',kind='group'),dict(id='d',kind='rectangle',parent='h'),dict(id='x',kind='rectangle')]
+        self.d.selected_ids={'x'}; self.d.node_id='x'; self.d.rebuild(); tree=self.d.tree; self.app.processEvents()
+        g,c,h=(self.d._tree_items[n] for n in ('g','c','h'))
+        rect=tree.visualItemRect(g)
+        self.assertEqual(tree.branch_bottom(g),tree.visualItemRect(c).bottom())
+        self.assertEqual(tree.drop_plan(rect.center()),dict(mode='inside',anchor='g',parent='g'))
+        self.assertEqual(tree.drop_plan(QPoint(rect.center().x(),rect.top()+1)),dict(mode='before',anchor='g',parent=''))
+        rect=tree.visualItemRect(c)
+        self.assertEqual(tree.drop_plan(QPoint(rect.center().x(),rect.bottom()-1)),dict(mode='after',anchor='c',parent='g'))
+        self.assertEqual(tree.drop_plan(QPoint(1,rect.bottom()-1)),dict(mode='after',anchor='g',parent=''))
+        point=QPoint(15,tree.viewport().height()-5); self.assertEqual(tree.drop_plan(point)['mode'],'root')
+        class Drop:
+            accepted=False
+            def source(s):return tree
+            def position(s):return QPointF(point)
+            def ignore(s):s.accepted=False
+            def acceptProposedAction(s):s.accepted=True
+        # After a group means after its complete branch, not between its children.
+        rect=tree.visualItemRect(g); point=QPoint(rect.center().x(),rect.bottom()-1); before=copy.deepcopy(self.d.scene); event=Drop(); tree.dropEvent(event)
+        self.assertTrue(event.accepted); self.assertEqual([n['id'] for n in self.d.scene['nodes']],['g','c','x','h','d'])
+        self.assertEqual(self.d.node().get('parent',''),''); self.assertEqual(self.d.selected_ids,{'x'})
+        self.d.local_history(-1); self.assertEqual(self.d.scene,before)
+        # A leaf's middle never silently becomes a parent.
+        rect=tree.visualItemRect(self.d._tree_items['c']); self.assertNotEqual(tree.drop_plan(rect.center())['mode'],'inside')
+
+    def test_custom_drag_does_not_remove_rebuilt_rows_and_rejects_stale_scene(self):
+        self.shapes(); tree=self.d.tree; self.d.select_node('a')
+        def finish(drag,actions):return Qt.MoveAction
+        with patch('kinetic_cut.motion_controls.QDrag.exec',finish):tree.startDrag(Qt.MoveAction)
+        self.assertEqual(tree.topLevelItemCount(),2); self.assertEqual(len(self.d.scene['nodes']),2); self.assertIsNone(tree.drop_preview)
+        tree._drag_scene_before=copy.deepcopy(self.d.scene); tree._drag_roots=['a']; self.d.scene['nodes'][1]['x']=250
+        class Drop:
+            accepted=False
+            def source(s):return tree
+            def position(s):return QPointF(10,tree.viewport().height()-5)
+            def ignore(s):s.accepted=False
+            def acceptProposedAction(s):s.accepted=True
+        before=copy.deepcopy(self.d.scene); event=Drop(); tree.dropEvent(event); self.assertFalse(event.accepted); self.assertEqual(self.d.scene,before)
+        tree._drag_scene_before=None
+
     def test_reorder_multiple_branches_keeps_descendants_and_selection(self):
         self.d.scene['nodes']=[dict(id='a',kind='group'),dict(id='child',parent='a',kind='rectangle'),dict(id='b',kind='rectangle'),dict(id='c',kind='rectangle')]
         self.d.selected_ids={'a','b'}; self.d.node_id='a'; self.d.rebuild(); before=copy.deepcopy(self.d.scene)

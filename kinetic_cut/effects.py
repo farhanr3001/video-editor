@@ -16,6 +16,7 @@ CATALOG = {
     "Open FX / Blur": ["Gaussian Blur"],
     "Transform": ["Circle Facecam"],
     "Tracking": ["Object Tracking"],
+    "Quality Enhancer": ["AI Enhance"],
     "Keying": ["Chroma Key", "Green Screen"],
     "Person / Background": ["Remove Person Background"],
     "Face Filters": ["Big Eyes", "Big Nose", "Big Lips", "Face Twist", "Custom Face", "Puppy Ears & Nose", "Cat Ears & Whiskers", "AR Plague Mask", "AR Pixel Glasses"],
@@ -36,6 +37,7 @@ TITLES = set(CATALOG["Titles"])
 GRAPHICS = set(CATALOG["Graphics"])
 
 EFFECT_ICONS = {
+    "AI Enhance": "sparkles",
     **{name:'layers' for name in PRESETS},
     "Object Tracking": "crosshair",
     "Puppy Ears & Nose": "smile",
@@ -104,6 +106,7 @@ MATRICES = {
 }
 ADJUSTABLE = set(MATRICES) | {"Voice Clarity", "Low Cut"} | set(VOICE_NAMES)
 DESCRIPTIONS = {
+    "AI Enhance": "Optional local temporal video restoration. Prepare enhanced frames in the background; preserve crop, placement and audio. Model downloads always require confirmation.",
     **{name:info['description'] for name,info in PRESETS.items()},
     **VOICE_DESCRIPTIONS,
     "Object Tracking": "Follow a selected region with censor blur, pixelation, a censor bar, arrows, outlines, labels, an image or a following crop. Analyse locally and refine with correction points.",
@@ -196,6 +199,7 @@ DESCRIPTIONS = {
     "Fade In / Out": "Add a quarter-second fade to the selected video or audio clip.",
 }
 CATEGORY_STYLE = {
+    "Quality Enhancer": ("sparkles", "#7eafdc"),
     "Visual FX": ("camera", "#8ba2bd"),
     "Video Transitions": ("sparkles", "#5ec2f8"),
     "Graphics": ("shapes", "#62d0ff"),
@@ -214,6 +218,9 @@ CATEGORY_STYLE = {
 def compatible(name, item, project):
     if not item or name in TITLES or name in GRAPHICS or name in TRANSITION_SET or project.track_states.get(item.track, {}).get("locked", False):
         return False
+    if name=='AI Enhance':
+        media=project.media_by_id(item.media_id)
+        return bool(media and media.kind=='video' and item.track in project.video_tracks and item.role not in {'title','graphic'})
     if name in VISUAL_FX_SET:
         return item.track in project.video_tracks and item.role not in {"title", "graphic"}
     if name in CATALOG['Person / Background']+CATALOG['Face Filters'] and item.role=='background':return False
