@@ -1,14 +1,19 @@
 """Interactive NLE timeline: selection and links are independent of layout roles."""
 import copy
 import math
+from collections import OrderedDict
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal, QTimer
-from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetrics, QKeySequence, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRegion
+from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetrics, QImage, QKeySequence, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRegion
 from PySide6.QtWidgets import QApplication, QMenu, QScrollBar, QToolTip
 from .widgets import TimelineWidget as BaseTimeline
 from .model import uid
 from .icons import lucide_icon
 from .editing import edit_only
 from .transitions import Transition, TRANSITION_SET, TRANSITION_ICONS, SUBSECTION_BY_TRANSITION, default_transition_properties
+
+
+def _pixel(value, digits=None):
+    return round(value,digits) if digits is not None else math.floor(value+.5)
 
 
 class TimelineWidget(BaseTimeline):
@@ -34,9 +39,16 @@ class TimelineWidget(BaseTimeline):
         self.drag_destination=""; self.thumbnails={}; self.caption_original=None
         self.caption_snapshots={}; self.caption_copy_ids={}; self.caption_preview=[]; self.caption_painted=None
         self.retime_ids=set(); self.hover_id=""; self.snap_guide=None; self.blade_hover_id=""; self.blade_hover_caption=""; self.blade_hover_time=None; self.divider_original=None
+        from .image_cache import ImageCache
+        self._clip_surfaces=ImageCache(128*1024**2,2048)
         self._waveform_pixmaps={}; self._scaled_thumbnails={}; self._frame_track_rects=None; self._frame_sec_rects=None; self.alt_drag=False
         self._vfx_flash_item_id = None
         self._timeline_backing=None; self._playhead_damage=QRegion(); self._painted_marquee=QRegion()
+        self._backing_view=None; self._paint_generation=0
+        self._view_rasters=OrderedDict(); self._navigation_pending=False
+        self.manual_playback_navigation=False
+        self._timeline_renderer=None; self._timeline_raster_busy=False; self._timeline_raster_latest=None
+        self._timeline_raster_source=None; self._timeline_raster_failed=False
         self._content_damage=QRegion()
         self._audio_levels={}; self._meter_damage=QRegion()
         super().__init__()
@@ -58,6 +70,7 @@ class TimelineWidget(BaseTimeline):
     def flash_vfx_overlay(self, item_id: str):
         """Temporarily illuminate the effect duration clamper overlay on the clip."""
         self._vfx_flash_item_id = item_id
+        self._view_rasters.clear()
         if hasattr(self, "_vfx_flash_timer"):
             self._vfx_flash_timer.stop()
             self._vfx_flash_timer.start(1500)
@@ -65,6 +78,7 @@ class TimelineWidget(BaseTimeline):
 
     def _clear_vfx_flash(self):
         self._vfx_flash_item_id = None
+        self._view_rasters.clear()
         self.viewport().update()
 
     def set_read_only(self,value):
@@ -79,6 +93,7 @@ class TimelineWidget(BaseTimeline):
 
     def ensure_playhead_visible(self,value):
         """Follow seeks/playback, without undoing deliberate manual scrolling."""
+        if self.drag_mode=='pan':return
         left=self.LABEL_WIDTH+18; right=self.viewport().width()-24
         if right<=left:return
         navigation_end=max(20,getattr(self,"_navigation_end",20),self.project.duration+5)
@@ -244,7 +259,11 @@ class TimelineWidget(BaseTimeline):
         super().keyPressEvent(event)
 
     def set_project(self,project):
-        self._waveform_pixmaps.clear(); self._scaled_thumbnails.clear()
+        self._paint_generation+=1
+        self._view_rasters.clear()
+        if project is not self.project:
+            self._clip_surfaces.clear()
+            self._waveform_pixmaps.clear(); self._scaled_thumbnails.clear()
         if hasattr(self,'marquee_controller') and project is not self.project:self.marquee_controller.stop(); self.marquee=None; self.drag_mode=''
         self.selected_ids.intersection_update(i.id for i in project.timeline)
         if self.selected_id not in self.selected_ids:self.selected_id=next(iter(self.selected_ids),"")
@@ -256,12 +275,79 @@ class TimelineWidget(BaseTimeline):
         super().set_project(project)
 
     def set_zoom(self,value:float,anchor_x:float|None=None):
-        self._waveform_pixmaps.clear()
+        self._navigation_pending=True
         super().set_zoom(value,anchor_x)
 
     def set_waveform(self,media_id:str,values:list[float]):
+        self._paint_generation+=1
+        self._view_rasters.clear()
+        self._clip_surfaces.clear()
         self._waveform_pixmaps.clear()
         super().set_waveform(media_id,values)
+
+    def scrollContentsBy(self,dx,dy):
+        # QAbstractScrollArea's default scrolls the widget backing store and can
+        # flush a paint synchronously between zoom/anchor scrollbar updates.
+        # Headers and lane offsets do not share that translation. Our retained
+        # raster handles scrolling; coalesce these inputs into one paint instead.
+        self._navigation_pending=True; self.viewport().update()
+
+    def close_renderer(self):
+        self._timeline_raster_latest=None
+        if self._timeline_renderer:self._timeline_renderer.close()
+
+    def _queue_navigation_raster(self,view,bucket,palette):
+        owner=self.window()
+        if not hasattr(owner,'start_worker') or self._timeline_raster_failed:return False
+        from .timeline_renderer import TimelineRenderer,snapshot
+        if self._timeline_renderer is None:self._timeline_renderer=TimelineRenderer()
+        if self._timeline_renderer.closed:return False
+        if self._timeline_raster_source is None or self._timeline_raster_source['version']!=self._paint_generation:
+            self._timeline_raster_source=snapshot(self)
+        state=dict(version=self._paint_generation,palette=palette,size=(self.width(),self.height()),
+                   viewport=(self.viewport().width(),self.viewport().height()),scale=self.devicePixelRatioF(),
+                   section_track_heights=dict(self.section_track_heights),selected_ids=list(self.selected_ids),
+                   selected_id=self.selected_id,selected_caption_ids=list(self.selected_caption_ids),
+                   selected_caption=self.selected_caption,selected_transition_id=self.selected_transition_id,
+                   retime_ids=list(self.retime_ids),read_only=self.read_only,hover_id=self.hover_id,tool=self.tool,
+                   waveform_pending=list(self.waveform_pending),waveform_failures=list(self.waveform_failures),
+                   zoom=self.pixels_per_second,offset=self.horizontalScrollBar().value(),
+                   navigation_end=getattr(self,'_navigation_end',20))
+        for name in ('track_height','video_track_height','audio_track_height','subtitle_height','audio_extent','subtitle_extent'):
+            state[name]=getattr(self,name)
+        for name in ('video','audio','subtitle'):state[name+'_scroll']=getattr(self,name+'_scroll').value()
+        self._timeline_raster_latest=(view,bucket,self._timeline_raster_source,state)
+        if not self._timeline_raster_busy:self._start_navigation_raster()
+        return True
+
+    def _start_navigation_raster(self):
+        latest=self._timeline_raster_latest
+        if latest is None or self._timeline_raster_failed:return
+        view,bucket,source,state=latest
+        from .ui import Worker
+        self._timeline_raster_busy=True
+        worker=Worker(self._timeline_renderer.render_timeline,source,state);worker.maintenance=True
+        worker.cancel_callback=self.close_renderer
+        def ready(image):
+            if self._paint_generation==state['version'] and not self._timeline_renderer.closed:
+                self._view_rasters[(view,bucket)]=QPixmap.fromImage(image)
+                self._bound_navigation_rasters();self.viewport().update()
+        def failed(detail):
+            if not self._timeline_renderer.closed:
+                import logging
+                logging.warning('Timeline raster fallback: %s',detail)
+                self._timeline_raster_failed=True;self._timeline_renderer.close();self.viewport().update()
+        def finished():
+            self._timeline_raster_busy=False
+            current=self._timeline_raster_latest
+            if current and current[:2]!=(view,bucket) and not self._timeline_renderer.closed:self._start_navigation_raster()
+        worker.signals.result.connect(ready);worker.signals.error.connect(failed);worker.signals.finished.connect(finished)
+        self.window().start_worker(worker)
+
+    def _bound_navigation_rasters(self):
+        while (len(self._view_rasters)>32 or
+               sum(image.width()*image.height()*4 for image in self._view_rasters.values())>64*1024**2):
+            self._view_rasters.popitem(last=False)
 
     def _range(self):
         if not hasattr(self,"track_height"):return
@@ -429,11 +515,11 @@ class TimelineWidget(BaseTimeline):
 
     def _subtitle_divider_rect(self):
         if not self.project.captions:return QRectF()
-        bottom=self._sections()["subtitle"].bottom(); return QRectF(0,bottom,self.viewport().width(),self.AV_SEPARATOR)
+        section=self._sections()["subtitle"]; return QRectF(0,section.bottom(),section.width(),self.AV_SEPARATOR)
 
     def _av_divider_rect(self):
         if not self.project.video_tracks or not self.project.audio_tracks:return QRectF()
-        top=self._sections()["audio"].top()-self.AV_SEPARATOR; return QRectF(0,top,self.viewport().width(),self.AV_SEPARATOR)
+        section=self._sections()["audio"]; return QRectF(0,section.top()-self.AV_SEPARATOR,section.width(),self.AV_SEPARATOR)
 
     def _divider_at(self,pos):
         if self._subtitle_divider_rect().contains(pos):return "subtitle"
@@ -548,6 +634,8 @@ class TimelineWidget(BaseTimeline):
         return QRectF(52,y,22,18),QRectF(82,y,22,18)
 
     def set_theme(self, palette: dict):
+        if getattr(self,'_theme_palette',None)!=palette:
+            self._paint_generation+=1; self._view_rasters.clear()
         self._theme_palette = palette
         self.viewport().update()
 
@@ -617,7 +705,12 @@ class TimelineWidget(BaseTimeline):
         return f"{hour:02d}:{minute:02d}:{second:02d}:{frame:02d}"
 
     def paintEvent(self,event):
+        if self.project is None:
+            painter=QPainter(self.viewport())
+            painter.fillRect(self.viewport().rect(),QColor(self._palette().get('timeline_track_bg','#202126')))
+            return
         pal = self._palette()
+        palette_key=repr(pal)
         viewport=self.viewport(); scale=viewport.devicePixelRatioF()
         size=viewport.size()*scale
         cursor_only=(self._timeline_backing is not None and self._timeline_backing.size()==size
@@ -625,23 +718,78 @@ class TimelineWidget(BaseTimeline):
                      and not (self._playhead_damage|self._meter_damage).isEmpty()
                      and event.region().subtracted(self._playhead_damage|self._meter_damage).isEmpty()
                      and event.region().intersected(self._content_damage).isEmpty()
-                     and self.drag_mode in {'','marquee','playhead'} and self.snap_guide is None)
+                     and self.drag_mode in {'','marquee','playhead','pan'} and self.snap_guide is None)
         self._playhead_damage=self._playhead_damage.subtracted(event.region())
         self._meter_damage=self._meter_damage.subtracted(event.region())
         self._content_damage=self._content_damage.subtracted(event.region())
         if cursor_only:
             p=QPainter(viewport); p.drawPixmap(0,0,self._timeline_backing)
             self._paint_clock(p,pal); self._paint_selection_overlay(p); self._paint_audio_levels(p); return
+        view=(round(self.pixels_per_second,6),size.width(),size.height(),scale,palette_key,self._paint_generation,
+              self.video_scroll.value(),self.audio_scroll.value(),self.subtitle_scroll.value(),
+              self.video_extent if hasattr(self,'video_extent') else 0,self.audio_extent,self.subtitle_extent,
+              tuple(sorted(self.section_track_heights.items())),frozenset(self.selected_ids),self.selected_id,
+              self.hover_id,self.read_only,frozenset(self.retime_ids),repr(self.effect_hover))
+        view+=(frozenset(self.selected_caption_ids),self.selected_caption,self.selected_transition_id,self.tool,
+               self.blade_hover_id,self.blade_hover_caption,self.blade_hover_time,repr(self.roll_hover),
+               repr(self.transition_hover),self.provisional_track)
+        # Ordinary expose/layout damage can arrive after a navigation paint.
+        # Validate actual content, rather than rebuilding the same scene a
+        # second time or assuming that every full update means an edit.
+        scene=(tuple((i.id,i.media_id,i.track,i.start,i.duration,i.role,i.graphic_type,i.title_text,
+                      i.in_point,i.speed,i.gain_db,i.fade_in,i.fade_out,i.group_id,i.link_id,
+                      i.source_mismatch,repr(i.effects)) for i in self.project.timeline),
+               tuple((c.id,c.start,c.end,c.text) for c in self.project.captions),
+               tuple((m.id,m.path,m.kind,m.name,m.thumbnail) for m in self.project.media),
+               repr(self.project.track_states),repr(self.project.track_names),
+               tuple(self.project.video_tracks),tuple(self.project.audio_tracks),repr(self.project.transitions),
+               self.track_height,self.video_track_height,self.audio_track_height,self.subtitle_height,
+               frozenset(self.waveform_pending),frozenset(self.waveform_failures))
+        from .missing_media import unavailable
+        scene+=(tuple(unavailable(m) for m in self.project.media),)
+        view+=(scene,)
+        offset=self.horizontalScrollBar().value()
+        # Fractional device scales require a fresh text raster: Qt's hinted
+        # glyph positions can differ when a larger surface is cropped. Clip
+        # caching remains active there; never substitute misaligned text.
+        navigation=(self._navigation_pending and self.drag_mode in {'','pan'}
+                    and not self._vfx_flash_item_id and scale==round(scale))
+        self._navigation_pending=False
+        bucket=math.floor(offset/256)*256
+        retained=(self._view_rasters.get((view,bucket)) if self.drag_mode in {'','pan'}
+                  and not self._vfx_flash_item_id and scale==round(scale) else None)
+        if retained is not None:
+            self._view_rasters.move_to_end((view,bucket))
+            self._timeline_backing=self._navigation_raster(retained,offset-bucket,viewport.size(),scale)
+            screen=QPainter(viewport); screen.drawPixmap(0,0,self._timeline_backing)
+            self._paint_clock(screen,pal); self._paint_selection_overlay(screen); self._paint_audio_levels(screen); return
+        # Render one extra navigation tile. Repeated pan/zoom can then crop the
+        # exact static pixels without invoking hundreds of Python painter calls.
+        overscan=navigation and not self.move_preview and not self.incoming_preview and self.snap_guide is None
+        if overscan:
+            from .missing_media import unavailable
+            overscan=not any(unavailable(m) or m.compound or m.timeline_preset for m in self.project.media)
+        skeleton=False
+        pending=self._timeline_raster_latest
+        if (len(self.project.timeline)>=100 and scale==round(scale) and self.drag_mode in {'','pan'}
+                and not self.effect_hover and not self.transition_hover and not self.roll_hover
+                and not self.provisional_track and self.tool=='select'
+                and (overscan or (pending and pending[:2]==(view,bucket)))):
+            skeleton=self._queue_navigation_raster(view,bucket,pal)
+            if skeleton:overscan=False
+        render_width=viewport.width()+256 if overscan else viewport.width()
+        self._paint_x_offset=offset-bucket if overscan else 0
+        self._overscanning=overscan
         # Keep the static content separate from the clock/cursor. Any ordinary
         # update rebuilds its damaged content; explicit cursor/meter damage above
         # may reuse the raster without redrawing any clips.
         partial=(self._timeline_backing is not None and self._timeline_backing.size()==size
                  and self._timeline_backing.devicePixelRatioF()==scale
-                 and event.region()!=QRegion(viewport.rect()))
-        backing=QPixmap(size)
+                 and event.region()!=QRegion(viewport.rect()) and not overscan)
+        backing=QPixmap(round(render_width*scale),size.height())
         backing.setDevicePixelRatio(scale)
         p=QPainter(backing); p.setRenderHint(QPainter.Antialiasing)
-        dirty=QRegion(viewport.rect())
+        dirty=QRegion(QRect(0,0,render_width,viewport.height()))
         if partial:
             # Include neighbouring antialiased path edges in the work list.
             # Commit only the original damage after rasterization.
@@ -650,17 +798,19 @@ class TimelineWidget(BaseTimeline):
             # Rasterize without a complex damage clip; Qt's antialiased path
             # clipping at fractional device scales can otherwise blend edges
             # against retained pixels. The final copy is hard-clipped instead.
-        p.fillRect(viewport.rect(),QColor(pal.get("timeline_bg", "#191a1e"))); p.setFont(QFont("Segoe UI",9))
+        p.fillRect(QRect(0,0,render_width,viewport.height()),QColor(pal.get("timeline_bg", "#191a1e"))); p.setFont(QFont("Segoe UI",9))
         if not self.project:
             p.end(); screen=QPainter(viewport); screen.drawPixmap(0,0,backing); return
         self._frame_sec_rects=self._sections()
+        for rect in self._frame_sec_rects.values():rect.setWidth(render_width)
         self._frame_track_rects={t:self.track_rect(t) for t in self.tracks()}
+        for rect in self._frame_track_rects.values():rect.setWidth(render_width)
         link_counts={}
         for candidate in self.project.timeline:
             k=candidate.group_id if candidate.link_id is None else candidate.link_id
             if k:link_counts[k]=link_counts.get(k,0)+1
         try:
-            w=self.viewport().width(); h=self.viewport().height()
+            w=render_width; h=self.viewport().height()
             # Keep nested content clips inside the fixed track/section bounds.
             # The scratch pixmap has no QWidget system damage clip: partial
             # results are committed to the retained raster below.
@@ -682,6 +832,9 @@ class TimelineWidget(BaseTimeline):
             painted=self.project.timeline
             damage=dirty.intersected(QRegion(QRect(self.LABEL_WIDTH,self.RULER_HEIGHT,w-self.LABEL_WIDTH,h-self.RULER_HEIGHT))).boundingRect()
             visible_start=self.time_for_x(max(self.LABEL_WIDTH-6,damage.left()-6)); visible_end=self.time_for_x(min(w+6,damage.right()+6))
+            damaged_times=[(self.time_for_x(max(self.LABEL_WIDTH-6,part.left()-6)),
+                            self.time_for_x(min(w+6,part.right()+6))) for part in dirty
+                           if part.right()>=self.LABEL_WIDTH and part.bottom()>=self.RULER_HEIGHT]
             if self.drag_mode in {'trim_left','trim_right','retime_left','retime_right'}:
                 # Preview the same overwrite that release commits, without changing
                 # neighbours until the gesture is accepted (Escape still restores).
@@ -691,212 +844,59 @@ class TimelineWidget(BaseTimeline):
                 painted=sorted(staged.timeline,key=lambda i:i.id in self.snapshots)
             for item in painted+self.move_preview+self.incoming_preview:
                 if item.start+item.duration<visible_start or item.start>visible_end:continue
+                if not any(item.start+item.duration>=a and item.start<=b for a,b in damaged_times):continue
                 ghost=getattr(item,"_drag_ghost",False)
                 if self.move_preview and item.id in self.snapshots and not ghost and not self.alt_drag:continue
                 r=self.item_rect(item)
+                # Timeline coordinates are continuous; raster edges live on the
+                # device pixel grid. Keep each edge stable as the playhead-
+                # centred zoom anchor moves, so identical zoom levels can reuse
+                # clip pixels instead of rerasterizing fractional phases.
+                left=math.floor(r.left()*scale+.5)/scale; top=math.floor(r.top()*scale+.5)/scale
+                r=QRectF(left,top,max(5,math.floor(r.right()*scale+.5)/scale-left),math.floor(r.bottom()*scale+.5)/scale-top)
                 if not dirty.intersects(r.toAlignedRect().adjusted(-2,-2,2,2)):continue
                 item_clip=self.section_rect(item.track).intersected(QRectF(self.LABEL_WIDTH+1,self.RULER_HEIGHT,max(0,w-self.LABEL_WIDTH-1),h-self.RULER_HEIGHT))
                 if not r.intersects(item_clip):continue
-                p.save(); p.setClipRect(item_clip,Qt.IntersectClip)
-                shape=QPainterPath(); shape.addRoundedRect(r,3,3); p.setClipPath(shape,Qt.IntersectClip)
-                audio=self._section_name(item.track)=="audio"; media=(self.incoming_plan if getattr(item,"_incoming",False) else self.project).media_by_id(item.media_id)
-                from .missing_media import unavailable,label,offline_icon
-                offline=unavailable(media,item)
-                base=QColor("#326951" if audio else "#6d4a8e" if item.role=="graphic" else "#b8aa7c" if item.role=="title" else "#3c6c90"); selected=item.id in self.selected_ids and not self.read_only and not ghost
-                if offline:base=QColor('#510b0e')
-                p.fillRect(r,base.lighter(112) if selected else base)
-                p.setPen(QPen(QColor("#08090b"),1)); p.setBrush(Qt.NoBrush); p.drawRoundedRect(r.adjusted(.5,.5,-.5,-.5),3,3)
-                p.save(); p.setClipRect(r.adjusted(2,2,-2,-2),Qt.IntersectClip)
-                text_r=r.adjusted(6,0,-5,0)
-                if offline:
-                    if audio:
-                        p.setPen(QPen(QColor('#dc6057'),1)); p.drawLine(QPointF(r.left()+4,r.center().y()),QPointF(r.right()-4,r.center().y()))
-                    elif r.height()>36:
-                        if not hasattr(self,'_offline_icon'):self._offline_icon=offline_icon().pixmap(44,26)
-                        left=max(r.left()+4,self.LABEL_WIDTH+4)
-                        for x in range(round(left),round(min(r.right(),w)),62):p.drawPixmap(x,round(r.top()+3),self._offline_icon)
-                    text_r=QRectF(r.x()+6,r.bottom()-21,r.width()-12,20)
-                elif not audio and r.width()>=28 and r.height()>=52 and media and (media.thumbnail or media.kind=="image"):
-                    key=("rgba:"+media.path) if media.kind=="image" else media.thumbnail
-                    if key not in self.thumbnails:
-                        if media.kind=="image":
-                            # Old projects may still point at an alpha-flattened JPEG.
-                            from PySide6.QtGui import QImageReader
-                            from PySide6.QtCore import QSize
-                            reader=QImageReader(media.path); reader.setAutoTransform(True)
-                            if reader.size().isValid():reader.setScaledSize(reader.size().scaled(QSize(320,180),Qt.KeepAspectRatio))
-                            self.thumbnails[key]=QPixmap.fromImage(reader.read())
-                        else:self.thumbnails[key]=QPixmap(media.thumbnail)
-                    pix=self.thumbnails[key]; strip=QRectF(r.x()+2,r.y()+2,r.width()-4,r.height()-23)
-                    p.save(); thumb_shape=QPainterPath(); thumb_shape.addRoundedRect(strip,2.5,2.5); p.setClipPath(thumb_shape,Qt.IntersectClip)
-                    p.fillRect(strip,QColor("#08090b"))
-                    if not pix.isNull():
-                        th_h=round(strip.height()); scaled_key=(key,th_h)
-                        scaled=self._scaled_thumbnails.get(scaled_key)
-                        if scaled is None:
-                            tw=max(1,round(strip.height()*pix.width()/pix.height()))
-                            scaled=pix.scaled(tw,th_h,Qt.KeepAspectRatio,Qt.SmoothTransformation)
-                            self._scaled_thumbnails[scaled_key]=scaled
-                        tw=scaled.width(); begin=max(0,int((self.LABEL_WIDTH-strip.left())//tw))
-                        for n in range(begin,begin+math.ceil(min(r.width(),w)/tw)+2):p.drawPixmap(round(strip.left()+n*tw),round(strip.top()),scaled)
-                    p.restore(); p.setBrush(Qt.NoBrush); p.setPen(QPen(QColor('#050506'),1)); p.drawRoundedRect(strip.adjusted(.5,.5,-.5,-.5),2.5,2.5)
-                    text_r=QRectF(r.x()+6,r.bottom()-21,r.width()-12,20)
-                elif audio:
-                    samples=self.waveforms.get(item.media_id,[])
-                    if samples and media:
-                        from .waveforms import paint_waveform
-                        damage=dirty.intersected(QRegion(r.toAlignedRect())).boundingRect()
-                        wf_key=(item.id,int(r.width()),int(r.height()),round(item.in_point,3),round(item.speed,3),round(item.gain_db,2),round(item.fade_in,3),round(item.fade_out,3))
-                        cached_wf=self._waveform_pixmaps.get(wf_key)
-                        if cached_wf is None and 2<=r.width()<=4000 and r.height()>=2:
-                            pix=QPixmap(max(1,int(r.width())),max(1,int(r.height())))
-                            pix.fill(Qt.transparent)
-                            wf_p=QPainter(pix)
-                            wf_p.setRenderHint(QPainter.Antialiasing)
-                            local_r=QRectF(0,0,r.width(),r.height())
-                            paint_waveform(wf_p,local_r,samples,media,item,self.pixels_per_second,0,r.width())
-                            wf_p.end()
-                            if len(self._waveform_pixmaps)>120:self._waveform_pixmaps.clear()
-                            self._waveform_pixmaps[wf_key]=pix
-                            cached_wf=pix
-                        if cached_wf is not None:
-                            p.drawPixmap(round(r.left()),round(r.top()),cached_wf)
-                        else:
-                            paint_waveform(p,r,samples,media,item,self.pixels_per_second,max(self.LABEL_WIDTH,damage.left()),min(w,damage.right()+1))
-                    elif media and r.width()>140 and (media.id in self.waveform_pending or media.id in self.waveform_failures):
-                        p.setPen(QColor('#bdcfc4')); p.drawText(r.adjusted(6,2,-6,-20),Qt.AlignVCenter,'Loading waveform…' if media.id in self.waveform_pending else 'Waveform unavailable')
-                    text_r=QRectF(r.x()+6,r.bottom()-20,r.width()-12,19)
-                if r.width()>=26 and (audio or item.id==self.hover_id or item.id in self.selected_ids or item.fade_in or item.fade_out):
-                    p.setPen(QPen(QColor("#faf0c2"),1))
-                    fi=min(r.width(),item.fade_in*self.pixels_per_second); fo=min(r.width(),item.fade_out*self.pixels_per_second)
-                    span=r.bottom()-r.top()-3
-                    ramp_in=QPainterPath(r.bottomLeft()); ramp_in.cubicTo(QPointF(r.left()+fi*.3,r.bottom()-span*.35),QPointF(r.left()+fi*.7,r.top()+3+span*.25),QPointF(r.left()+fi,r.top()+3))
-                    ramp_out=QPainterPath(QPointF(r.right()-fo,r.top()+3)); ramp_out.cubicTo(QPointF(r.right()-fo*.7,r.top()+3+span*.25),QPointF(r.right()-fo*.3,r.bottom()-span*.35),r.bottomRight())
-                    p.save(); p.setPen(Qt.NoPen); p.setBrush(QColor(0,0,0,125))
-                    if fi>0:
-                        shade=QPainterPath(ramp_in); shade.lineTo(r.topLeft()); shade.closeSubpath(); p.drawPath(shade)
-                    if fo>0:
-                        shade=QPainterPath(ramp_out); shade.lineTo(r.topRight()); shade.closeSubpath(); p.drawPath(shade)
-                    p.restore()
-                    if fi>0:p.drawPath(ramp_in)
-                    if fo>0:p.drawPath(ramp_out)
-                    for mode,x in (("fade_in",r.left()+max(5,fi)),("fade_out",r.right()-max(5,fo))):
-                        if r.width()<34:continue
-                        active=self.drag_mode==mode and item.id==self.selected_id
-                        p.save(); p.setRenderHint(QPainter.Antialiasing); p.setPen(QPen(QColor(0,0,0,160),1)); p.setBrush(QColor("#ef6657" if active else "#f3ead1")); p.drawEllipse(QPointF(x,r.top()+5),4,4); p.restore()
-                k=item.group_id if item.link_id is None else item.link_id
-                is_linked=bool(k and link_counts.get(k,0)>1)
-                if text_r.width()>=44:
-                    name=(f"Graphic · {item.graphic_type or 'Shape'}" if item.role=="graphic" else getattr(item,"title_text","") if item.role=="title" else (media.name if media else "Offline"))
-                    if offline:name=label(media,item)
-                    reserve=22 if is_linked and r.width()>=110 else 0
-                    shown=QFontMetrics(p.font()).elidedText(name,Qt.ElideRight,max(0,round(text_r.width()-reserve)))
-                    p.setPen(QColor("#ffffff")); p.drawText(text_r.adjusted(0,0,-reserve,0),Qt.AlignVCenter|Qt.TextSingleLine,shown)
-                if is_linked and r.width()>=110:p.drawPixmap(round(r.right()-20),round(r.bottom()-19),lucide_icon("link","@on_dark",13).pixmap(13,13))
-                if item.id in self.retime_ids and not self.read_only:
-                    p.fillRect(QRectF(r.x(),r.top(),r.width(),17),QColor("#244157")); p.setPen(QColor("#f4f4f4")); p.drawText(QRectF(r.x()+5,r.top(),r.width()-10,17),Qt.AlignVCenter,"×  Speed Change  "+(media.name if media else "Offline"))
-                    p.fillRect(QRectF(r.x(),r.bottom()-21,r.width(),21),QColor("#244157")); p.drawText(QRectF(r.x()+5,r.bottom()-21,r.width()-10,21),Qt.AlignCenter,f"{item.speed*100:g}%  ▾")
-                if item.id==self.selected_id and self.drag_mode in {"fade_in","fade_out"}:
-                    tag=QRectF(max(r.left(),min(r.right()-85,w-90)),r.bottom()-23,85,21); p.fillRect(tag,QColor("#111318")); p.setPen(QColor("white")); p.drawText(tag,Qt.AlignCenter,f"{getattr(item,self.drag_mode):.2f} s")
-                p.restore()
-                p.setBrush(Qt.NoBrush); p.setPen(QPen(QColor('#050506'),1)); p.drawRoundedRect(r.adjusted(.5,.5,-.5,-.5),3,3)
-                if offline:p.setPen(QPen(QColor('#d9473d'),1)); p.drawRoundedRect(r.adjusted(.5,.5,-.5,-.5),3,3)
-                if selected:
-                    # Paint selection last and outside the clip-content mask so the
-                    # full Resolve-style red perimeter remains visible over thumbs,
-                    # waveforms, titles, fades and linked-selection decoration.
-                    p.setBrush(Qt.NoBrush); p.setPen(QPen(QColor("#f05a50"),2)); p.drawRoundedRect(r.adjusted(1,1,-1,-1),3,3)
-                # Visual FX Duration Clamper Overlay along the top edge of the media clip (Image 3 mockup)
-                vfx_effects = [e for e in getattr(item, "effects", []) if e.get("category") == "Visual FX" and e.get("enabled", True)]
-                is_flashing = (self._vfx_flash_item_id == item.id)
-                for eff in vfx_effects:
-                    show_overlay = bool(eff.get("show_timeline_overlay", True))
-                    if not (is_flashing or (selected and show_overlay)):
-                        continue
-                    timing_mode = eff.get("timing_mode", "clip_start")
-                    eff_dur = float(eff.get("duration", 1.0))
-                    clip_dur = max(0.01, getattr(item, "duration", 1.0))
-                    dur = clip_dur if timing_mode == "entire_clip" else min(clip_dur, max(0.05, eff_dur))
-                    if timing_mode == "clip_end":
-                        start_off = max(0.0, clip_dur - dur)
-                    elif timing_mode == "entire_clip":
-                        start_off = 0.0
-                    else:
-                        start_off = max(0.0, min(clip_dur - 0.05, float(eff.get("start_time", 0.0))))
-
-                    t_start = item.start + start_off
-                    t_end = min(item.start + clip_dur, t_start + dur)
-                    x1 = max(r.left(), min(r.right(), self.x_for_time(t_start)))
-                    x2 = max(r.left(), min(r.right(), self.x_for_time(t_end)))
-                    w_bar = max(0.0, x2 - x1)
-                    if w_bar < 2.0:
-                        continue
-
-                    bar_y = r.top() + 1.0
-                    bar_h = 4.0
-
-                    from .visual_fx import ZOOM_IN_EFFECTS, SUBSECTION_BY_EFFECT
-                    name = eff.get("name", "")
-                    sub = eff.get("subsection", SUBSECTION_BY_EFFECT.get(name, "Zooms"))
-                    has_return = bool(eff.get("zoom_return", False)) and sub == "Zooms" and name in ZOOM_IN_EFFECTS
-
-                    # Luminous flash glow if recently adjusted in inspector
-                    if is_flashing:
-                        p.setPen(QPen(QColor(80, 223, 116, 180), 2.5))
-                        p.setBrush(Qt.NoBrush)
-                        p.drawRoundedRect(QRectF(x1 - 1, bar_y - 1, w_bar + 2, bar_h + 2), 2, 2)
-
-                    if has_return and w_bar > 12:
-                        hold_s = max(0.0, float(eff.get("zoom_hold_duration", 0.15)))
-                        hold_s = min(hold_s, max(0.0, dur - 0.02))
-                        r_avail = max(0.02, dur - hold_s)
-                        att_req = eff.get("zoom_attack_duration")
-                        att_s = max(0.01, min(r_avail - 0.01, float(att_req))) if att_req is not None else r_avail / 2.0
-
-                        xp1 = max(r.left(), min(r.right(), self.x_for_time(t_start + att_s)))
-                        xp2 = max(r.left(), min(r.right(), self.x_for_time(t_start + att_s + hold_s)))
-
-                        # Phase 1: Attack (Blue)
-                        p.setPen(Qt.NoPen)
-                        p.setBrush(QColor("#3d8cff"))
-                        p.drawRoundedRect(QRectF(x1, bar_y, max(1.0, xp1 - x1), bar_h), 1.5, 1.5)
-
-                        # Phase 2: Peak Hold (Vibrant Green)
-                        p.setBrush(QColor("#50df74"))
-                        p.drawRoundedRect(QRectF(xp1, bar_y - 0.5, max(2.0, xp2 - xp1), bar_h + 1.0), 2, 2)
-
-                        # Phase 3: Ease Out (Blue)
-                        p.setBrush(QColor("#3d8cff"))
-                        p.drawRoundedRect(QRectF(xp2, bar_y, max(1.0, x2 - xp2), bar_h), 1.5, 1.5)
-
-                        # Circular pips at ends
-                        p.setPen(QPen(QColor("#ffffff"), 1.0))
-                        p.setBrush(QColor("#3d8cff"))
-                        p.drawEllipse(QPointF(x1, bar_y + bar_h / 2.0), 2.5, 2.5)
-                        p.drawEllipse(QPointF(x2, bar_y + bar_h / 2.0), 2.5, 2.5)
-                    else:
-                        # Standard vibrant green clamper bar (Image 3 mockup)
-                        p.setPen(Qt.NoPen)
-                        p.setBrush(QColor("#50df74"))
-                        p.drawRoundedRect(QRectF(x1, bar_y, w_bar, bar_h), 1.5, 1.5)
-
-                        # Circular pips at ends (matching user's green circles in image 3)
-                        p.setPen(QPen(QColor("#ffffff"), 1.0))
-                        p.setBrush(QColor("#50df74"))
-                        p.drawEllipse(QPointF(x1, bar_y + bar_h / 2.0), 2.8, 2.8)
-                        p.drawEllipse(QPointF(x2, bar_y + bar_h / 2.0), 2.8, 2.8)
-                if item.effects and r.width()>70:
-                    badge=QRectF(max(r.left()+5,self.LABEL_WIDTH+5),r.top()+12,22,15)
-                    p.fillRect(badge,QColor("#202833")); p.setPen(QColor("#afc6e1")); p.setFont(QFont("Segoe UI",8,QFont.DemiBold)); p.drawText(badge,Qt.AlignCenter,"fx"); p.setFont(QFont("Segoe UI",9))
-                if self.effect_hover and self.effect_hover[1]==item.id:
-                    p.fillRect(r,QColor(172,181,194,115)); p.setPen(QPen(QColor("#dfe8f5"),2)); p.setBrush(Qt.NoBrush); p.drawRoundedRect(r.adjusted(1,1,-1,-1),3,3)
-                    label=r.intersected(item_clip).adjusted(5,3,-5,-3)
-                    if label.width()>60:
-                        p.fillRect(QRectF(label.left(),label.center().y()-10,label.width(),20),QColor(28,33,40,225)); p.setPen(QColor("white"))
-                        p.drawText(label,Qt.AlignCenter,QFontMetrics(p.font()).elidedText("+ "+self.effect_hover[0],Qt.ElideRight,int(label.width())))
-                if ghost:
-                    p.fillRect(r,QColor(173,180,192,130)); p.setBrush(Qt.NoBrush); p.setPen(QPen(QColor("#e0e5ed"),1,Qt.DashLine)); p.drawRoundedRect(r.adjusted(1,1,-1,-1),3,3)
-                p.restore()
+                if skeleton:
+                    self._paint_navigation_placeholder(p,item,r,item_clip,pal);continue
+                from .missing_media import unavailable
+                media=(self.incoming_plan if getattr(item,"_incoming",False) else self.project).media_by_id(item.media_id)
+                bounds=QRectF((math.floor(r.left()*scale)-2)/scale,(math.floor(r.top()*scale)-2)/scale,
+                              (math.ceil(r.right()*scale)-math.floor(r.left()*scale)+4)/scale,
+                              (math.ceil(r.bottom()*scale)-math.floor(r.top()*scale)+4)/scale)
+                cacheable=((self.drag_mode in {'','pan','marquee','playhead'} or
+                            (self.drag_mode in {'move','trim_left','trim_right','fade_in','fade_out','retime_left','retime_right'}
+                             and item.id not in self.snapshots)) and not ghost
+                           and not getattr(item,'_incoming',False)
+                           and item_clip.left()<=bounds.left() and bounds.right()<=item_clip.right()
+                           and bounds.width()*bounds.height()*scale*scale<=4*1024**2
+                           and item.id!=self._vfx_flash_item_id)
+                key=None; tile=None
+                if cacheable:
+                    group=item.group_id if item.link_id is None else item.link_id
+                    visual=(item.id,item.role,item.graphic_type,item.title_text,item.in_point,item.speed,item.gain_db,
+                            item.fade_in,item.fade_out,item.duration,repr(item.effects))
+                    asset=(media.id,media.path,media.kind,media.name,media.thumbnail,media.duration) if media else None
+                    key=(visual,round(r.width(),6),round(r.height(),6),round(r.x()-bounds.x(),6),round(r.y()-bounds.y(),6),
+                         scale,palette_key,item.id in self.selected_ids,self.read_only,item.id==self.hover_id,
+                         item.id in self.retime_ids,link_counts.get(group,0),asset,unavailable(media,item),
+                         id(self.waveforms.get(item.media_id)),item.media_id in self.waveform_pending,
+                         item.media_id in self.waveform_failures,round(self.pixels_per_second,6),
+                         repr(self.effect_hover) if self.effect_hover and self.effect_hover[1]==item.id else '',item.id==self.selected_id,overscan,
+                         max(0,item_clip.top()-r.top()),min(r.height(),item_clip.bottom()-r.top()))
+                    if scale!=round(scale):key+=(round(r.x(),6),round(r.y(),6))
+                    tile=self._clip_surfaces.get(key)
+                if tile is None:
+                    if cacheable:
+                        tile=QImage(round(bounds.width()*scale),round(bounds.height()*scale),QImage.Format_ARGB32_Premultiplied)
+                        tile.setDevicePixelRatio(scale); tile.fill(Qt.transparent)
+                        cp=QPainter(tile); cp.setRenderHint(QPainter.Antialiasing); cp.setFont(p.font())
+                        cp.translate(-bounds.x(),-bounds.y())
+                        try:self._paint_clip(cp,item,r,item_clip,pal,link_counts,ghost,QRegion(bounds.toAlignedRect()),w)
+                        finally:cp.end()
+                        self._clip_surfaces.put(key,tile)
+                    else:self._paint_clip(p,item,r,item_clip,pal,link_counts,ghost,dirty,w)
+                if tile is not None:p.drawImage(bounds.topLeft(),tile)
             for caption in self.caption_painted if self.caption_painted is not None else self.project.captions:
                 if caption.end<visible_start or caption.start>visible_end:continue
                 r=self.caption_rect(caption)
@@ -1008,22 +1008,7 @@ class TimelineWidget(BaseTimeline):
             p.fillRect(QRectF(self.LABEL_WIDTH-2,self.RULER_HEIGHT,3,h-self.RULER_HEIGHT),QColor(pal.get("timeline_divider", "#0b0c0e")))
             for divider in (self._subtitle_divider_rect(),self._av_divider_rect()):
                 if not divider.isEmpty():p.fillRect(divider,QColor(pal.get("timeline_divider", "#0b0c0f"))); p.setPen(QColor(pal.get("border_subtle", "#555860"))); p.drawLine(0,round(divider.center().y()),w,round(divider.center().y()))
-            p.fillRect(QRectF(0,0,w,self.RULER_HEIGHT),QColor(pal.get("timeline_ruler_bg", "#26272c")))
-            p.fillRect(QRectF(0,0,self.LABEL_WIDTH-2,self.RULER_HEIGHT),QColor(pal.get("timeline_header_bg", "#202126")))
-            p.setFont(QFont("Segoe UI",8)); major=next((step for step in (1,5,10,15,30,60,120,300,600) if step*self.pixels_per_second>=75),600); divisions=max(2,min(20,round(major*self.pixels_per_second/8))); minor=major/divisions
-            first=max(0,math.floor(self.time_for_x(self.LABEL_WIDTH)/minor)*minor); last=self.time_for_x(w)+minor; count=math.ceil((last-first)/minor)
-            for index in range(count+1):
-                moment=first+index*minor; x=self.x_for_time(moment)
-                if x<self.LABEL_WIDTH:continue
-                unit=round(moment/minor); major_tick=unit%divisions==0; middle_tick=unit%(divisions//2)==0
-                # Qt clips raster writes, not Python draw/layout calls. Most
-                # playback damage is only two cursor strips plus the timecode.
-                if not dirty.intersects(QRect(round(x)-1,0,65 if major_tick else 3,self.RULER_HEIGHT)):continue
-                tick_height=12 if major_tick else 8 if middle_tick else 4
-                p.setPen(QColor(pal.get("timeline_text", "#858990") if major_tick else pal.get("icon_sub_color", "#4e5158"))); p.drawLine(round(x),self.RULER_HEIGHT-tick_height,round(x),self.RULER_HEIGHT)
-                if major_tick:
-                    second=max(0,round(moment)); p.setPen(QColor(pal.get("timeline_text", "#b7bac1"))); p.drawText(round(x)+4,13,f"{second//60:02d}:{second%60:02d}")
-            p.fillRect(QRectF(self.LABEL_WIDTH-2,0,3,self.RULER_HEIGHT),QColor(pal.get("timeline_divider", "#0b0c0e")))
+            self._paint_ruler(p,pal,w,dirty)
             if self.roll_hover:
                 left,right=self.roll_hover; boundary=self.x_for_time(right.start)
                 rect=self.track_rect(left.track).intersected(self.section_rect(left.track))
@@ -1033,13 +1018,302 @@ class TimelineWidget(BaseTimeline):
         finally:
             self._frame_sec_rects=None
             self._frame_track_rects=None
+            self._paint_x_offset=0; self._overscanning=False
             p.end()
         if partial:
             merged=QPixmap(self._timeline_backing)
             commit=QPainter(merged); commit.setClipRegion(event.region())
             commit.drawPixmap(0,0,backing); commit.end(); backing=merged
+        self._paint_x_offset=0; self._overscanning=False
+        if overscan:
+            self._view_rasters[(view,bucket)]=QPixmap(backing)
+            self._view_rasters.move_to_end((view,bucket))
+            self._bound_navigation_rasters()
+            backing=self._navigation_raster(backing,offset-bucket,viewport.size(),scale)
         self._timeline_backing=backing
+        self._backing_view=(view,offset)
         screen=QPainter(viewport); screen.drawPixmap(0,0,backing); self._paint_clock(screen,pal); self._paint_selection_overlay(screen); self._paint_audio_levels(screen)
+
+    def x_for_time(self,value):
+        return super().x_for_time(value)+getattr(self,'_paint_x_offset',0)
+
+    def time_for_x(self,value):
+        return super().time_for_x(value-getattr(self,'_paint_x_offset',0))
+
+    def _paint_navigation_placeholder(self,p,item,r,clip,pal):
+        """Immediate editable geometry while detailed thumbnails/peaks render."""
+        media=self.project.media_by_id(item.media_id);audio=item.track in self.project.audio_tracks
+        base=QColor('#326951' if audio else '#6d4a8e' if item.role=='graphic' else '#b8aa7c' if item.role=='title' else '#3c6c90')
+        selected=item.id in self.selected_ids and not self.read_only
+        p.save();p.setClipRect(clip);p.setBrush(base.lighter(112) if selected else base)
+        p.setPen(QPen(QColor('#f05a50' if selected else '#08090b'),2 if selected else 1));p.drawRoundedRect(r.adjusted(.5,.5,-.5,-.5),3,3)
+        if r.width()>35:
+            text=item.title_text if item.role=='title' else 'Graphic · '+item.graphic_type if item.role=='graphic' else media.name if media else 'Offline'
+            p.setPen(QColor('white'));label=r.adjusted(6,0,-5,0)
+            p.drawText(label,Qt.AlignBottom|Qt.TextSingleLine,QFontMetrics(p.font()).elidedText(text,Qt.ElideRight,max(0,_pixel(label.width()))))
+            if audio or selected or item.fade_in or item.fade_out:
+                p.setBrush(QColor('#f3ead1'));p.setPen(QPen(QColor('#faf0c2'),1))
+                for at in (r.left()+max(5,min(r.width(),item.fade_in*self.pixels_per_second)),r.right()-max(5,min(r.width(),item.fade_out*self.pixels_per_second))):
+                    p.drawEllipse(QPointF(at,r.top()+5),4,4)
+        p.restore()
+
+    def _navigation_raster(self,source,shift,size,scale):
+        self._frame_sec_rects=self._sections()
+        self._frame_track_rects={track:self.track_rect(track) for track in self.tracks()}
+        result=QPixmap(size*scale); result.setDevicePixelRatio(scale)
+        painter=QPainter(result)
+        painter.setRenderHint(QPainter.Antialiasing)
+        edge=self.LABEL_WIDTH+1
+        painter.drawPixmap(QRectF(0,0,edge,size.height()),source,
+                           QRectF(0,0,edge*scale,size.height()*scale))
+        painter.drawPixmap(QRectF(edge,0,size.width()-edge,size.height()),source,
+                           QRectF((edge+shift)*scale,0,(size.width()-edge)*scale,size.height()*scale))
+        # These badges stay pinned to the visible clip edge; all other clip
+        # decoration belongs to the source-aligned raster above.
+        if not hasattr(self,'_fx_badge') or self._fx_badge.devicePixelRatioF()!=scale:
+            self._fx_badge=QPixmap(round(22*scale),round(15*scale)); self._fx_badge.setDevicePixelRatio(scale); self._fx_badge.fill(QColor('#202833'))
+            badge=QPainter(self._fx_badge); badge.setPen(QColor('#afc6e1'))
+            badge.setFont(QFont('Segoe UI',8,QFont.DemiBold)); badge.drawText(QRectF(0,0,22,15),Qt.AlignCenter,'fx'); badge.end()
+        for item in self.project.timeline:
+            if not item.effects:continue
+            if item.start+item.duration<self.time_for_x(self.LABEL_WIDTH) or item.start>self.time_for_x(size.width()):continue
+            r=self.item_rect(item); clip=self.section_rect(item.track).intersected(QRectF(self.LABEL_WIDTH+1,self.RULER_HEIGHT,size.width()-self.LABEL_WIDTH-1,size.height()-self.RULER_HEIGHT))
+            left=math.floor(r.left()*scale+.5)/scale; top=math.floor(r.top()*scale+.5)/scale
+            r=QRectF(left,top,max(5,math.floor(r.right()*scale+.5)/scale-left),math.floor(r.bottom()*scale+.5)/scale-top)
+            if r.width()<=70 or not r.intersects(clip):continue
+            painter.save(); painter.setClipRect(clip.intersected(r))
+            badge_rect=QRectF(max(r.left()+5,self.LABEL_WIDTH+5),r.top()+12,22,15)
+            if scale==round(scale):painter.drawPixmap(_pixel(badge_rect.left()),_pixel(badge_rect.top()),self._fx_badge)
+            else:
+                painter.fillRect(badge_rect,QColor('#202833')); painter.setPen(QColor('#afc6e1'))
+                painter.setFont(QFont('Segoe UI',8,QFont.DemiBold)); painter.drawText(badge_rect,Qt.AlignCenter,'fx')
+            painter.restore()
+        painter.end(); self._frame_sec_rects=None; self._frame_track_rects=None; return result
+
+    def _paint_ruler(self,p,pal,w,dirty):
+        p.fillRect(QRectF(0,0,w,self.RULER_HEIGHT+1),QColor(pal.get("timeline_ruler_bg", "#26272c")))
+        p.fillRect(QRectF(0,0,self.LABEL_WIDTH-2,self.RULER_HEIGHT),QColor(pal.get("timeline_header_bg", "#202126")))
+        p.setFont(QFont("Segoe UI",8)); major=next((step for step in (1,5,10,15,30,60,120,300,600) if step*self.pixels_per_second>=75),600); divisions=max(2,min(20,round(major*self.pixels_per_second/8))); minor=major/divisions
+        # Retain the preceding major label and hard-clip at the header. This
+        # makes ruler pixels translate exactly with their timeline time, even
+        # when a label is partly visible at the left edge during navigation.
+        first=max(0,math.floor(self.time_for_x(self.LABEL_WIDTH)/major)*major); last=self.time_for_x(w)+minor; count=math.ceil((last-first)/minor)
+        p.save(); p.setClipRect(QRectF(self.LABEL_WIDTH+1,0,max(0,w-self.LABEL_WIDTH-1),self.RULER_HEIGHT+1),Qt.IntersectClip)
+        for index in range(count+1):
+            moment=first+index*minor
+            x=self.LABEL_WIDTH+math.floor(moment*self.pixels_per_second+.5)-self.horizontalScrollBar().value()+getattr(self,'_paint_x_offset',0)
+            unit=round(moment/minor); major_tick=unit%divisions==0; middle_tick=unit%(divisions//2)==0
+            # Qt clips raster writes, not Python draw/layout calls. Most
+            # playback damage is only two cursor strips plus the timecode.
+            if not dirty.intersects(QRect(round(x)-1,0,65 if major_tick else 3,self.RULER_HEIGHT)):continue
+            tick_height=12 if major_tick else 8 if middle_tick else 4
+            p.setPen(QColor(pal.get("timeline_text", "#858990") if major_tick else pal.get("icon_sub_color", "#4e5158"))); p.drawLine(round(x),self.RULER_HEIGHT-tick_height,round(x),self.RULER_HEIGHT)
+            if major_tick:
+                second=max(0,round(moment)); p.setPen(QColor(pal.get("timeline_text", "#b7bac1"))); p.drawText(round(x)+4,13,f"{second//60:02d}:{second%60:02d}")
+        p.restore()
+        p.fillRect(QRectF(self.LABEL_WIDTH-2,0,3,self.RULER_HEIGHT+1),QColor(pal.get("timeline_divider", "#0b0c0e")))
+
+    def _paint_clip(self,p,item,r,item_clip,pal,link_counts,ghost,dirty,w):
+        p.save(); p.setClipRect(item_clip,Qt.IntersectClip)
+        shape=QPainterPath(); shape.addRoundedRect(r,3,3); p.setClipPath(shape,Qt.IntersectClip)
+        audio=self._section_name(item.track)=="audio"; media=(self.incoming_plan if getattr(item,"_incoming",False) else self.project).media_by_id(item.media_id)
+        from .missing_media import unavailable,label,offline_icon
+        offline=unavailable(media,item)
+        base=QColor("#326951" if audio else "#6d4a8e" if item.role=="graphic" else "#b8aa7c" if item.role=="title" else "#3c6c90"); selected=item.id in self.selected_ids and not self.read_only and not ghost
+        if offline:base=QColor('#510b0e')
+        p.fillRect(r,base.lighter(112) if selected else base)
+        p.setPen(QPen(QColor("#08090b"),1)); p.setBrush(Qt.NoBrush); p.drawRoundedRect(r.adjusted(.5,.5,-.5,-.5),3,3)
+        p.save(); p.setClipRect(r.adjusted(2,2,-2,-2),Qt.IntersectClip)
+        text_r=r.adjusted(6,0,-5,0)
+        if offline:
+            if audio:
+                p.setPen(QPen(QColor('#dc6057'),1)); p.drawLine(QPointF(r.left()+4,r.center().y()),QPointF(r.right()-4,r.center().y()))
+            elif r.height()>36:
+                if not hasattr(self,'_offline_icon'):self._offline_icon=offline_icon().pixmap(44,26)
+                left=max(r.left()+4,self.LABEL_WIDTH+4)
+                for x in range(_pixel(left),_pixel(min(r.right(),w)),62):p.drawPixmap(x,_pixel(r.top()+3),self._offline_icon)
+            text_r=QRectF(r.x()+6,r.bottom()-21,r.width()-12,20)
+        elif not audio and r.width()>=28 and r.height()>=52 and media and (media.thumbnail or media.kind=="image"):
+            key=("rgba:"+media.path) if media.kind=="image" else media.thumbnail
+            if key not in self.thumbnails:
+                if media.kind=="image":
+                    # Old projects may still point at an alpha-flattened JPEG.
+                    from PySide6.QtGui import QImageReader
+                    from PySide6.QtCore import QSize
+                    reader=QImageReader(media.path); reader.setAutoTransform(True)
+                    if reader.size().isValid():reader.setScaledSize(reader.size().scaled(QSize(320,180),Qt.KeepAspectRatio))
+                    self.thumbnails[key]=QPixmap.fromImage(reader.read())
+                else:self.thumbnails[key]=QPixmap(media.thumbnail)
+            pix=self.thumbnails[key]; strip=QRectF(r.x()+2,r.y()+2,r.width()-4,r.height()-23)
+            p.save(); thumb_shape=QPainterPath(); thumb_shape.addRoundedRect(strip,2.5,2.5); p.setClipPath(thumb_shape,Qt.IntersectClip)
+            p.fillRect(strip,QColor("#08090b"))
+            if not pix.isNull():
+                th_h=_pixel(strip.height()); scaled_key=(key,th_h)
+                scaled=self._scaled_thumbnails.get(scaled_key)
+                if scaled is None:
+                    tw=max(1,_pixel(strip.height()*pix.width()/pix.height()))
+                    scaled=pix.scaled(tw,th_h,Qt.KeepAspectRatio,Qt.SmoothTransformation)
+                    self._scaled_thumbnails[scaled_key]=scaled
+                tw=scaled.width(); begin=max(0,int((self.LABEL_WIDTH-strip.left())//tw))
+                for n in range(begin,begin+math.ceil(min(r.width(),w)/tw)+2):p.drawPixmap(_pixel(strip.left()+n*tw),_pixel(strip.top()),scaled)
+            p.restore(); p.setBrush(Qt.NoBrush); p.setPen(QPen(QColor('#050506'),1)); p.drawRoundedRect(strip.adjusted(.5,.5,-.5,-.5),2.5,2.5)
+            text_r=QRectF(r.x()+6,r.bottom()-21,r.width()-12,20)
+        elif audio:
+            samples=self.waveforms.get(item.media_id,[])
+            if samples and media:
+                from .waveforms import paint_waveform
+                damage=dirty.intersected(QRegion(r.toAlignedRect())).boundingRect()
+                wf_key=(id(samples),media.duration,self.pixels_per_second,item.id,int(r.width()),int(r.height()),_pixel(item.in_point,3),_pixel(item.speed,3),_pixel(item.gain_db,2),_pixel(item.fade_in,3),_pixel(item.fade_out,3))
+                cached_wf=self._waveform_pixmaps.get(wf_key)
+                if cached_wf is None and 2<=r.width()<=4000 and r.height()>=2:
+                    pix=QPixmap(max(1,int(r.width())),max(1,int(r.height())))
+                    pix.fill(Qt.transparent)
+                    wf_p=QPainter(pix)
+                    wf_p.setRenderHint(QPainter.Antialiasing)
+                    local_r=QRectF(0,0,r.width(),r.height())
+                    paint_waveform(wf_p,local_r,samples,media,item,self.pixels_per_second,0,r.width())
+                    wf_p.end()
+                    if len(self._waveform_pixmaps)>120:self._waveform_pixmaps.clear()
+                    self._waveform_pixmaps[wf_key]=pix
+                    cached_wf=pix
+                if cached_wf is not None:
+                    p.drawPixmap(_pixel(r.left()),_pixel(r.top()),cached_wf)
+                else:
+                    paint_waveform(p,r,samples,media,item,self.pixels_per_second,max(self.LABEL_WIDTH,damage.left()),min(w,damage.right()+1))
+            elif media and r.width()>140 and (media.id in self.waveform_pending or media.id in self.waveform_failures):
+                p.setPen(QColor('#bdcfc4')); p.drawText(r.adjusted(6,2,-6,-20),Qt.AlignVCenter,'Loading waveform…' if media.id in self.waveform_pending else 'Waveform unavailable')
+            text_r=QRectF(r.x()+6,r.bottom()-20,r.width()-12,19)
+        if r.width()>=26 and (audio or item.id==self.hover_id or item.id in self.selected_ids or item.fade_in or item.fade_out):
+            p.setPen(QPen(QColor("#faf0c2"),1))
+            fi=min(r.width(),item.fade_in*self.pixels_per_second); fo=min(r.width(),item.fade_out*self.pixels_per_second)
+            span=r.bottom()-r.top()-3
+            ramp_in=QPainterPath(r.bottomLeft()); ramp_in.cubicTo(QPointF(r.left()+fi*.3,r.bottom()-span*.35),QPointF(r.left()+fi*.7,r.top()+3+span*.25),QPointF(r.left()+fi,r.top()+3))
+            ramp_out=QPainterPath(QPointF(r.right()-fo,r.top()+3)); ramp_out.cubicTo(QPointF(r.right()-fo*.7,r.top()+3+span*.25),QPointF(r.right()-fo*.3,r.bottom()-span*.35),r.bottomRight())
+            p.save(); p.setPen(Qt.NoPen); p.setBrush(QColor(0,0,0,125))
+            if fi>0:
+                shade=QPainterPath(ramp_in); shade.lineTo(r.topLeft()); shade.closeSubpath(); p.drawPath(shade)
+            if fo>0:
+                shade=QPainterPath(ramp_out); shade.lineTo(r.topRight()); shade.closeSubpath(); p.drawPath(shade)
+            p.restore()
+            if fi>0:p.drawPath(ramp_in)
+            if fo>0:p.drawPath(ramp_out)
+            for mode,x in (("fade_in",r.left()+max(5,fi)),("fade_out",r.right()-max(5,fo))):
+                if r.width()<34:continue
+                active=self.drag_mode==mode and item.id==self.selected_id
+                p.save(); p.setRenderHint(QPainter.Antialiasing); p.setPen(QPen(QColor(0,0,0,160),1)); p.setBrush(QColor("#ef6657" if active else "#f3ead1")); p.drawEllipse(QPointF(x,r.top()+5),4,4); p.restore()
+        k=item.group_id if item.link_id is None else item.link_id
+        is_linked=bool(k and link_counts.get(k,0)>1)
+        if text_r.width()>=44:
+            name=(f"Graphic · {item.graphic_type or 'Shape'}" if item.role=="graphic" else getattr(item,"title_text","") if item.role=="title" else (media.name if media else "Offline"))
+            if offline:name=label(media,item)
+            reserve=22 if is_linked and r.width()>=110 else 0
+            shown=QFontMetrics(p.font()).elidedText(name,Qt.ElideRight,max(0,_pixel(text_r.width()-reserve)))
+            p.setPen(QColor("#ffffff")); p.drawText(text_r.adjusted(0,0,-reserve,0),Qt.AlignVCenter|Qt.TextSingleLine,shown)
+        if is_linked and r.width()>=110:p.drawPixmap(_pixel(r.right()-20),_pixel(r.bottom()-19),lucide_icon("link","@on_dark",13).pixmap(13,13))
+        if item.id in self.retime_ids and not self.read_only:
+            p.fillRect(QRectF(r.x(),r.top(),r.width(),17),QColor("#244157")); p.setPen(QColor("#f4f4f4")); p.drawText(QRectF(r.x()+5,r.top(),r.width()-10,17),Qt.AlignVCenter,"×  Speed Change  "+(media.name if media else "Offline"))
+            p.fillRect(QRectF(r.x(),r.bottom()-21,r.width(),21),QColor("#244157")); p.drawText(QRectF(r.x()+5,r.bottom()-21,r.width()-10,21),Qt.AlignCenter,f"{item.speed*100:g}%  ▾")
+        if item.id==self.selected_id and self.drag_mode in {"fade_in","fade_out"}:
+            tag=QRectF(max(r.left(),min(r.right()-85,w-90)),r.bottom()-23,85,21); p.fillRect(tag,QColor("#111318")); p.setPen(QColor("white")); p.drawText(tag,Qt.AlignCenter,f"{getattr(item,self.drag_mode):.2f} s")
+        p.restore()
+        p.setBrush(Qt.NoBrush); p.setPen(QPen(QColor('#050506'),1)); p.drawRoundedRect(r.adjusted(.5,.5,-.5,-.5),3,3)
+        if offline:p.setPen(QPen(QColor('#d9473d'),1)); p.drawRoundedRect(r.adjusted(.5,.5,-.5,-.5),3,3)
+        if selected:
+            # Paint selection last and outside the clip-content mask so the
+            # full Resolve-style red perimeter remains visible over thumbs,
+            # waveforms, titles, fades and linked-selection decoration.
+            p.setBrush(Qt.NoBrush); p.setPen(QPen(QColor("#f05a50"),2)); p.drawRoundedRect(r.adjusted(1,1,-1,-1),3,3)
+        # Visual FX Duration Clamper Overlay along the top edge of the media clip (Image 3 mockup)
+        vfx_effects = [e for e in getattr(item, "effects", []) if e.get("category") == "Visual FX" and e.get("enabled", True)]
+        is_flashing = (self._vfx_flash_item_id == item.id)
+        for eff in vfx_effects:
+            show_overlay = bool(eff.get("show_timeline_overlay", True))
+            if not (is_flashing or (selected and show_overlay)):
+                continue
+            timing_mode = eff.get("timing_mode", "clip_start")
+            eff_dur = float(eff.get("duration", 1.0))
+            clip_dur = max(0.01, getattr(item, "duration", 1.0))
+            dur = clip_dur if timing_mode == "entire_clip" else min(clip_dur, max(0.05, eff_dur))
+            if timing_mode == "clip_end":
+                start_off = max(0.0, clip_dur - dur)
+            elif timing_mode == "entire_clip":
+                start_off = 0.0
+            else:
+                start_off = max(0.0, min(clip_dur - 0.05, float(eff.get("start_time", 0.0))))
+
+            t_start = item.start + start_off
+            t_end = min(item.start + clip_dur, t_start + dur)
+            x1 = max(r.left(), min(r.right(), self.x_for_time(t_start)))
+            x2 = max(r.left(), min(r.right(), self.x_for_time(t_end)))
+            w_bar = max(0.0, x2 - x1)
+            if w_bar < 2.0:
+                continue
+
+            bar_y = r.top() + 1.0
+            bar_h = 4.0
+
+            from .visual_fx import ZOOM_IN_EFFECTS, SUBSECTION_BY_EFFECT
+            name = eff.get("name", "")
+            sub = eff.get("subsection", SUBSECTION_BY_EFFECT.get(name, "Zooms"))
+            has_return = bool(eff.get("zoom_return", False)) and sub == "Zooms" and name in ZOOM_IN_EFFECTS
+
+            # Luminous flash glow if recently adjusted in inspector
+            if is_flashing:
+                p.setPen(QPen(QColor(80, 223, 116, 180), 2.5))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(QRectF(x1 - 1, bar_y - 1, w_bar + 2, bar_h + 2), 2, 2)
+
+            if has_return and w_bar > 12:
+                hold_s = max(0.0, float(eff.get("zoom_hold_duration", 0.15)))
+                hold_s = min(hold_s, max(0.0, dur - 0.02))
+                r_avail = max(0.02, dur - hold_s)
+                att_req = eff.get("zoom_attack_duration")
+                att_s = max(0.01, min(r_avail - 0.01, float(att_req))) if att_req is not None else r_avail / 2.0
+
+                xp1 = max(r.left(), min(r.right(), self.x_for_time(t_start + att_s)))
+                xp2 = max(r.left(), min(r.right(), self.x_for_time(t_start + att_s + hold_s)))
+
+                # Phase 1: Attack (Blue)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor("#3d8cff"))
+                p.drawRoundedRect(QRectF(x1, bar_y, max(1.0, xp1 - x1), bar_h), 1.5, 1.5)
+
+                # Phase 2: Peak Hold (Vibrant Green)
+                p.setBrush(QColor("#50df74"))
+                p.drawRoundedRect(QRectF(xp1, bar_y - 0.5, max(2.0, xp2 - xp1), bar_h + 1.0), 2, 2)
+
+                # Phase 3: Ease Out (Blue)
+                p.setBrush(QColor("#3d8cff"))
+                p.drawRoundedRect(QRectF(xp2, bar_y, max(1.0, x2 - xp2), bar_h), 1.5, 1.5)
+
+                # Circular pips at ends
+                p.setPen(QPen(QColor("#ffffff"), 1.0))
+                p.setBrush(QColor("#3d8cff"))
+                p.drawEllipse(QPointF(x1, bar_y + bar_h / 2.0), 2.5, 2.5)
+                p.drawEllipse(QPointF(x2, bar_y + bar_h / 2.0), 2.5, 2.5)
+            else:
+                # Standard vibrant green clamper bar (Image 3 mockup)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor("#50df74"))
+                p.drawRoundedRect(QRectF(x1, bar_y, w_bar, bar_h), 1.5, 1.5)
+
+                # Circular pips at ends (matching user's green circles in image 3)
+                p.setPen(QPen(QColor("#ffffff"), 1.0))
+                p.setBrush(QColor("#50df74"))
+                p.drawEllipse(QPointF(x1, bar_y + bar_h / 2.0), 2.8, 2.8)
+                p.drawEllipse(QPointF(x2, bar_y + bar_h / 2.0), 2.8, 2.8)
+        if item.effects and r.width()>70 and not getattr(self,"_overscanning",False):
+            badge=QRectF(max(r.left()+5,self.LABEL_WIDTH+5),r.top()+12,22,15)
+            p.fillRect(badge,QColor("#202833")); p.setPen(QColor("#afc6e1")); p.setFont(QFont("Segoe UI",8,QFont.DemiBold)); p.drawText(badge,Qt.AlignCenter,"fx"); p.setFont(QFont("Segoe UI",9))
+        if self.effect_hover and self.effect_hover[1]==item.id:
+            p.fillRect(r,QColor(172,181,194,115)); p.setPen(QPen(QColor("#dfe8f5"),2)); p.setBrush(Qt.NoBrush); p.drawRoundedRect(r.adjusted(1,1,-1,-1),3,3)
+            label=r.intersected(item_clip).adjusted(5,3,-5,-3)
+            if label.width()>60:
+                p.fillRect(QRectF(label.left(),label.center().y()-10,label.width(),20),QColor(28,33,40,225)); p.setPen(QColor("white"))
+                p.drawText(label,Qt.AlignCenter,QFontMetrics(p.font()).elidedText("+ "+self.effect_hover[0],Qt.ElideRight,int(label.width())))
+        if ghost:
+            p.fillRect(r,QColor(173,180,192,130)); p.setBrush(Qt.NoBrush); p.setPen(QPen(QColor("#e0e5ed"),1,Qt.DashLine)); p.drawRoundedRect(r.adjusted(1,1,-1,-1),3,3)
+        p.restore()
 
     def _paint_selection_overlay(self,p):
         # Keep one continuous box above all sections, but OUT of the static cache.
@@ -1066,6 +1340,7 @@ class TimelineWidget(BaseTimeline):
     def mousePressEvent(self,event):
         if not self.project:return
         if event.button()==Qt.MiddleButton:
+            self.manual_playback_navigation=True
             if self.drag_mode:self.cancel_drag()
             self.pan_section=next((n for n,r in self._sections().items() if r.contains(event.position())), '')
             if self.pan_section:
@@ -1514,6 +1789,7 @@ class TimelineWidget(BaseTimeline):
                 self.horizontalScrollBar().setValue(round(self.project.playhead*self.pixels_per_second+self.LABEL_WIDTH-center))
             event.accept(); return
         if event.modifiers()&Qt.ControlModifier:
+            self.manual_playback_navigation=True
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value()-delta); event.accept(); return
         if event.modifiers()&Qt.ShiftModifier and not self.read_only:
             section=next((name for name,rect in self._sections().items() if rect.contains(event.position())),None)

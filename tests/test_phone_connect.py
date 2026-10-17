@@ -18,7 +18,7 @@ class RemovedPhoneTests(unittest.TestCase):
    set_page(window,0);self.assertEqual(window.current_page,0)
   finally:window.close();window.deleteLater();app.processEvents()
  def test_phone_components_cannot_be_installed(self):
-  self.assertEqual(set(feature_packs.ROOTS),{'vision','vocals'})
+  self.assertEqual(set(feature_packs.ROOTS),{'vision','vocals','enhance'})
   for key in ('android','iphone'):
    with self.assertRaises(KeyError):feature_packs.component_root(key)
 if __name__=='__main__':unittest.main()

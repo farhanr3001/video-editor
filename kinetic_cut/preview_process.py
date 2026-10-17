@@ -163,19 +163,24 @@ class RendererProcess:
             else:result=unpack(answer[1])
             return result,{k:QRectF(*r) for k,r in answer[2]},answer[3]
     def close(self):
+        if self.closed:return
         self.closed=True
-        process=self.process
-        if process is not None:
-            try:
-                if process.is_alive():process.terminate()
-            except (ValueError,AssertionError):pass
-            # Reap off the GUI thread. A bridge in recv() is released by EOF.
-            def reap():
-                try:process.join(2)
-                except (ValueError,AssertionError):pass
-                with self.lock:
-                    if self.shared:self.shared.close()
-            threading.Thread(target=reap,name='preview-reap',daemon=True).start()
-        if self.connection:
-            try:self.connection.close()
-            except OSError:pass
+        # EOF from terminating the child releases an in-flight poll/recv. Never
+        # close the local Windows pipe while that wait owns its native handle:
+        # doing so can raise STATUS_INVALID_HANDLE outside Python's exception
+        # machinery. Close pipe/mappings only after the bridge releases lock.
+        def reap():
+            process=self.process
+            if process is not None:
+                try:
+                    if process.is_alive():process.terminate()
+                    process.join(2)
+                except (OSError,ValueError,AssertionError):pass
+            with self.lock:
+                # A render may have been between its first closed check and
+                # process creation. Its second check retires that child itself.
+                if self.connection:
+                    try:self.connection.close()
+                    except OSError:pass
+                if self.shared:self.shared.close()
+        threading.Thread(target=reap,name='preview-reap',daemon=True).start()

@@ -176,6 +176,14 @@ class PreviewCanvas(QWidget):
     def reset_view(self):
         self.view_zoom=1.; self.view_pan=QPointF(); self.update()
 
+    def set_playback_active(self,playing):
+        # Stop a middle-button gesture immediately if Play starts mid-drag.
+        if playing and self.pan_origin is not None:
+            self.pan_origin=None; self.setCursor(Qt.ArrowCursor)
+
+    def _viewer_pan_locked(self):
+        return bool(getattr(getattr(self.window(),'transport',None),'playing',False))
+
     def wheelEvent(self,event):
         if self.pan_origin is not None or event.buttons() & Qt.MiddleButton:
             event.accept(); return
@@ -186,7 +194,7 @@ class PreviewCanvas(QWidget):
         self.update(); event.accept()
 
     def mouseDoubleClickEvent(self,event):
-        if event.button()==Qt.MiddleButton:self.reset_view()
+        if event.button()==Qt.MiddleButton and not self._viewer_pan_locked():self.reset_view()
 
     def _active(self, track: str) -> TimelineItem | None:
         if not self.project:
@@ -817,6 +825,7 @@ class PreviewCanvas(QWidget):
     def mousePressEvent(self, event):
         self.center_guide_active=False
         if event.button()==Qt.MiddleButton:
+            if self._viewer_pan_locked():event.accept(); return
             self.pan_origin=event.position(); self.setCursor(Qt.ClosedHandCursor); return
         if event.button() != Qt.LeftButton or not self.project or self.read_only:
             return
@@ -928,6 +937,8 @@ class PreviewCanvas(QWidget):
 
     def mouseMoveEvent(self, event):
         if self.pan_origin is not None:
+            if self._viewer_pan_locked():
+                self.set_playback_active(True); event.accept(); return
             self.view_pan+=event.position()-self.pan_origin; self.pan_origin=event.position(); self.update(); return
         if self.read_only or not self.transform_controls_visible:
             self.setCursor(Qt.ArrowCursor); return

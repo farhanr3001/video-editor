@@ -87,6 +87,9 @@ if __name__ == "__main__":
     elif len(sys.argv) == 4 and sys.argv[1] == '--timeline-selftest':
         from kinetic_cut.timeline_diagnostics import run
         sys.exit(run(sys.argv[2], sys.argv[3]))
+    elif len(sys.argv) == 4 and sys.argv[1] == '--interaction-selftest':
+        from kinetic_cut.interaction_diagnostics import run
+        sys.exit(run(sys.argv[2], sys.argv[3]))
     elif len(sys.argv) == 4 and sys.argv[1] == '--playback-selftest':
         from kinetic_cut.playback_diagnostics import run
         sys.exit(run(sys.argv[2], sys.argv[3]))

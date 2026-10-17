@@ -235,6 +235,8 @@ class MainWindow(QMainWindow):
         self.compounds=CompoundController(self)
         self.transport.stateChanged.connect(lambda playing:self.play_button.setIcon(lucide_icon("pause" if playing else "play")))
         self.transport.stateChanged.connect(lambda playing:self.preview.set_transform_controls_visible(not playing and self.current_page==0 and self.transform_box_tool.isChecked()))
+        self.transport.stateChanged.connect(self.preview.set_playback_active)
+        self.transport.stateChanged.connect(lambda playing:setattr(self.timeline,'manual_playback_navigation',False) if playing else None)
         self.transport.stateChanged.connect(lambda playing:None if playing else self.preview_quality.apply())
         self.transport.stateChanged.connect(lambda _:self.preview.update())
         progress(94,"Preparing workspace")
@@ -1235,6 +1237,7 @@ class MainWindow(QMainWindow):
         return next((i for i in videos if i.role=="content" and i.start<=t<i.start+i.duration),next((i for i in videos if i.start<=t<i.start+i.duration),next(iter(videos),None)))
 
     def seek(self,value:float):
+        self.timeline.manual_playback_navigation=False
         if self.timeline.drag_mode!="playhead":self.timeline.ensure_playhead_visible(value)
         if hasattr(self,"transport"):
             if self.timeline.drag_mode=="playhead" or getattr(self,"_restoring",False):self.transport.scrub(value)
@@ -1285,7 +1288,7 @@ class MainWindow(QMainWindow):
 
     def transport_position(self,value):
         self.project.playhead=value; self.time_label.setText(timecode(value,self.project.settings.fps)); self.timeline.update_playhead(); self.preview.update()
-        if self.transport.playing and self.timeline.drag_mode!="playhead":self.timeline.ensure_playhead_visible(value)
+        if self.transport.playing and self.timeline.drag_mode!="playhead" and not self.timeline.manual_playback_navigation:self.timeline.ensure_playhead_visible(value)
     def shuttle(self,direction:int):
         if hasattr(self,"transport"):
             if direction<0:self.transport.pause(); self.seek(max(0,self.project.playhead-.5))
@@ -2274,6 +2277,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'update_controller') and hasattr(self.update_controller, '_cancel'):
             self.update_controller._cancel.set()
         if hasattr(self,"transport"):self.transport.shutdown()
+        self.timeline.close_renderer()
         self.autosave(); self.player.stop()
         self._shutdown_wait_timer=QTimer(self)
         self._shutdown_wait_timer.setInterval(50)

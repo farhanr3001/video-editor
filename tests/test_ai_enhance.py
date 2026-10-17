@@ -240,4 +240,9 @@ class EnhanceUI(unittest.TestCase):
                 storage.finishing=True;storage.timer.stop();deadline=time.monotonic()+10
                 while storage.job is not None and time.monotonic()<deadline:QTest.qWait(10)
                 self.assertIsNone(storage.job);storage.deleteLater();del self.w._enhance_storage
+            # Release the fake video decoder's shared source handle before the
+            # fixture deletes its PNG. Editor close normally owns this barrier.
+            self.w.set_project(Project()); self.w.transport.sync(); QTest.qWait(50)
+            self.assertTrue(self.w.transport.video_pool.waitForDone(10000))
+            QTest.qWait(50)
 
