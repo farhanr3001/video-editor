@@ -10,6 +10,11 @@ from .transitions import (
     TRANSITION_DESCRIPTIONS,
 )
 
+from .creative_effects import NAMES as CREATIVE_NAMES, DESCRIPTIONS as CREATIVE_DESCRIPTIONS
+
+from .finishing_effects import CATEGORIES as FINISHING_CATEGORIES
+from .speed_presets import NAMES as SPEED_NAMES, DESCRIPTIONS as SPEED_DESCRIPTIONS
+
 CATALOG = {
     "Visual FX": VISUAL_FX_NAMES,
     "Video Transitions": TRANSITION_NAMES,
@@ -20,6 +25,9 @@ CATALOG = {
     "Keying": ["Chroma Key", "Green Screen"],
     "Person / Background": ["Remove Person Background"],
     "Face Filters": ["Big Eyes", "Big Nose", "Big Lips", "Face Twist", "Custom Face", "Puppy Ears & Nose", "Cat Ears & Whiskers", "AR Plague Mask", "AR Pixel Glasses"],
+    "Light & Color": list(CREATIVE_NAMES[:6]),
+    **FINISHING_CATEGORIES,
+    "Time & Speed": list(SPEED_NAMES),
     "Colour": ["Black & White", "Light Boost", "Cinematic Contrast", "Warm Tone", "Cool Tone", "Sepia", "Channel Swap"],
     "Titles": ["Text", "Headline"],
     "Audio": [*VOICE_NAMES, "Noise Clean", "Voice Clarity", "Low Cut", "Auto Duck", "Fade In / Out", "Cut curse words", "Remove Silence", "Vocal Only"],
@@ -37,6 +45,8 @@ TITLES = set(CATALOG["Titles"])
 GRAPHICS = set(CATALOG["Graphics"])
 
 EFFECT_ICONS = {
+    **{name:"sparkles" for name in CREATIVE_NAMES},
+    **{name:"timer" for name in SPEED_NAMES},
     "AI Enhance": "sparkles",
     **{name:'layers' for name in PRESETS},
     "Object Tracking": "crosshair",
@@ -106,6 +116,8 @@ MATRICES = {
 }
 ADJUSTABLE = set(MATRICES) | {"Voice Clarity", "Low Cut"} | set(VOICE_NAMES)
 DESCRIPTIONS = {
+    **CREATIVE_DESCRIPTIONS,
+    **SPEED_DESCRIPTIONS,
     "AI Enhance": "Optional local temporal video restoration. Prepare enhanced frames in the background; preserve crop, placement and audio. Model downloads always require confirmation.",
     **{name:info['description'] for name,info in PRESETS.items()},
     **VOICE_DESCRIPTIONS,
@@ -199,6 +211,9 @@ DESCRIPTIONS = {
     "Fade In / Out": "Add a quarter-second fade to the selected video or audio clip.",
 }
 CATEGORY_STYLE = {
+    "Time & Speed": ("timer", "#88b8d1"),
+    **{name:("sliders-horizontal", "#89b0cd") for name in FINISHING_CATEGORIES},
+    "Light & Color": ("palette", "#d8ad78"),
     "Quality Enhancer": ("sparkles", "#7eafdc"),
     "Visual FX": ("camera", "#8ba2bd"),
     "Video Transitions": ("sparkles", "#5ec2f8"),
@@ -218,6 +233,12 @@ CATEGORY_STYLE = {
 def compatible(name, item, project):
     if not item or name in TITLES or name in GRAPHICS or name in TRANSITION_SET or project.track_states.get(item.track, {}).get("locked", False):
         return False
+    if name in SPEED_NAMES:
+        media=project.media_by_id(item.media_id)
+        return bool(media and media.kind=='video' and item.track in project.video_tracks and item.role not in {'title','graphic'})
+    if name in CREATIVE_NAMES:
+        media=project.media_by_id(item.media_id)
+        return bool(media and media.kind in {'video','image'} and item.track in project.video_tracks and item.role not in {'title','graphic'})
     if name=='AI Enhance':
         media=project.media_by_id(item.media_id)
         return bool(media and media.kind=='video' and item.track in project.video_tracks and item.role not in {'title','graphic'})

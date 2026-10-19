@@ -209,6 +209,8 @@ class CacheManagerDialog(QDialog):
                 from .component_ui import events
                 events().changed.emit()
             count, released = clear(selected) if selected else (0, 0)
+            gpu=getattr(getattr(window,'preview',None),'gpu',None) if selected else None
+            if selected and gpu:gpu.invalidate_caches()
             if 'ai-enhance' in selected:
                 from . import enhance
                 from .enhance_preview import frames as enhanced_frames

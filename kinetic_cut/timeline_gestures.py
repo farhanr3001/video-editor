@@ -40,7 +40,11 @@ def roll_pair(view,pos):
     if not track or view._state(track).get('locked'):return None
     row=view.track_rect(track)
     if pos.y()<row.top()+15 or pos.y()>row.bottom()-12:return None  # Keep corners independent.
-    items=sorted((i for i in view.project.timeline if i.track==track),key=lambda i:i.start)
+    at=view.time_for_x(pos.x());margin=3/max(.001,view.pixels_per_second)
+    items=sorted((i for i in view.project.runtime_index.query('timeline',at-margin,at+margin) if i.track==track),key=lambda i:i.start)
+    for item in items:
+        rect=view.item_rect(item)
+        if rect.width()<24 and rect.contains(pos) and not view._trim_edge(rect,pos.x()):return None
     for left,right in zip(items,items[1:]):
         if abs(left.start+left.duration-right.start)<1e-5 and abs(pos.x()-view.x_for_time(right.start))<=2.5:
             return left,right
@@ -70,7 +74,7 @@ def roll(project,ends,starts,delta):
         for key,old in originals.items():
             item=project.item_by_id(key)
             if item is None:continue
-            item.__dict__.update(copy.deepcopy(old.__dict__))
+            item.restore_edit_state(old)
             if is_left:item.duration=old.duration+delta
             else:
                 item.start=old.start+delta; item.duration=old.duration-delta; media=project.media_by_id(old.media_id)

@@ -105,11 +105,16 @@ class TestTTSCancellation(unittest.TestCase):
         from kinetic_cut.ui import MainWindow
         started = threading.Event()
         canceled = threading.Event()
+        release = threading.Event()
         def pending(**kwargs):
             started.set()
             while not kwargs["cancel_check"]():
                 time.sleep(.005)
             canceled.set()
+            # Keep the canceled worker alive until the first close returns.
+            # Decoder teardown can otherwise outlast this cooperative worker,
+            # legitimately completing close before the assertion below.
+            release.wait(3)
             raise InterruptedError("Cancelled")
         window = MainWindow()
         window.show()
@@ -119,9 +124,12 @@ class TestTTSCancellation(unittest.TestCase):
             dialog._on_generate_clicked()
             settle(started.is_set)
             begin = time.monotonic()
-            self.assertFalse(window.close())
-            self.assertLess(time.monotonic() - begin, .2)
-            settle(canceled.is_set)
+            try:
+                self.assertFalse(window.close())
+                self.assertLess(time.monotonic() - begin, .2)
+                settle(canceled.is_set)
+            finally:
+                release.set()
             settle(lambda: not window.isVisible())
         self.assertFalse(active_dialog_threads())
         self.assertEqual(window.project.timeline, [])

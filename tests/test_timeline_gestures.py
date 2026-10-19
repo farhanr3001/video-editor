@@ -9,6 +9,13 @@ from kinetic_cut.timeline_gestures import roll,roll_snapshots,roll_pair
 
 
 class GestureTests(unittest.TestCase):
+    def test_selecting_without_drag_does_not_emit_an_edit(self):
+        t=self.t;changes=[];t.itemChanged.connect(changes.append)
+        before=copy.deepcopy(t.project.to_dict());point=t.visible_item_rect(t.project.timeline[0]).center().toPoint()
+        QTest.mouseClick(t.viewport(),Qt.LeftButton,pos=point)
+        self.assertEqual(t.selected_id,'clip');self.assertEqual(changes,[])
+        self.assertEqual(t.project.to_dict(),before);self.assertEqual(t.drag_mode,'')
+
     def test_layer_wheel_notch_moves_half_row_without_skipping_layers(self):
         t=self.t;t.resize(900,220);self.app.processEvents()
         for section in ('video','audio'):

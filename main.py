@@ -6,6 +6,18 @@ from kinetic_cut.process import install_desktop_process_policy
 
 
 if __name__ == "__main__":
+    if len(sys.argv)==3 and sys.argv[1]=='--caption-worker':
+        install_desktop_process_policy()
+        from kinetic_cut.caption_process import worker
+        sys.exit(worker(sys.argv[2]))
+    if len(sys.argv)==3 and sys.argv[1]=='--gpu-export-selftest':
+        install_desktop_process_policy()
+        from kinetic_cut.gpu_export_diagnostics import run
+        sys.exit(run(sys.argv[2]))
+    if len(sys.argv)==3 and sys.argv[1]=='--gpu-export-worker':
+        install_desktop_process_policy()
+        from kinetic_cut.gpu_export import worker
+        sys.exit(worker(sys.argv[2]))
     if len(sys.argv)==3 and sys.argv[1]=='--phone-removal-selftest':
         from kinetic_cut.phone_removal_diagnostics import run
         sys.exit(run(sys.argv[2]))
@@ -30,6 +42,14 @@ if __name__ == "__main__":
         sys.exit(install_selected(sys.argv[2].split(','),sys.argv[3] if len(sys.argv)==4 else None))
     install_desktop_process_policy()
     import multiprocessing
+    if '--multiprocessing-fork' in sys.argv:
+        # Windowed bootloaders have no Python standard streams. CPython's
+        # multiprocessing exception reporter still expects writable streams;
+        # preserve the renderer's structured error instead of masking it with
+        # "NoneType has no attribute write" and an invisible error dialog.
+        import os
+        if sys.stdout is None:sys.stdout=open(os.devnull,'w')
+        if sys.stderr is None:sys.stderr=open(os.devnull,'w')
     multiprocessing.freeze_support()
     if len(sys.argv)==4 and sys.argv[1]=='--performance-selftest':
         from kinetic_cut.performance_diagnostics import run
@@ -72,6 +92,9 @@ if __name__ == "__main__":
     if len(sys.argv)==4 and sys.argv[1]=='--caption-followup-selftest':
         from kinetic_cut.caption_followup_diagnostics import run
         sys.exit(run(sys.argv[2],sys.argv[3]))
+    if len(sys.argv)==4 and sys.argv[1]=='--caption-generation-selftest':
+        from kinetic_cut.caption_generation_diagnostics import run
+        sys.exit(run(sys.argv[2],sys.argv[3]))
     if len(sys.argv) in (4,5) and sys.argv[1]=='--caption-emoji-selftest':
         from kinetic_cut.caption_emoji_diagnostics import run
         sys.exit(run(sys.argv[2],sys.argv[3],len(sys.argv)==5 and sys.argv[4]=='--regenerate'))
@@ -90,6 +113,9 @@ if __name__ == "__main__":
     elif len(sys.argv) == 4 and sys.argv[1] == '--interaction-selftest':
         from kinetic_cut.interaction_diagnostics import run
         sys.exit(run(sys.argv[2], sys.argv[3]))
+    elif len(sys.argv) in (3,4) and sys.argv[1] == '--gpu-functional-selftest':
+        from kinetic_cut.gpu_diagnostics import run
+        sys.exit(run(sys.argv[2],sys.argv[3] if len(sys.argv)==4 else None))
     elif len(sys.argv) == 4 and sys.argv[1] == '--playback-selftest':
         from kinetic_cut.playback_diagnostics import run
         sys.exit(run(sys.argv[2], sys.argv[3]))

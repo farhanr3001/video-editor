@@ -84,8 +84,9 @@ class BatchEditSafetyTests(unittest.TestCase):
         self.assertFalse(w.project.captions); self.assertNotIn("v",[i.id for i in w.project.timeline])
     def test_frame_sampling_is_bounded_and_shutdown_rejects_late_results(self):
         w=self.window(); t=w.transport; key=("live",); player=Mock(); output=Mock(); sink=Mock(); sink._frame_stamp=None
-        frame=Mock(); frame.isValid.return_value=True; frame.startTime.return_value=100; frame.endTime.return_value=200
-        pixels=QImage(2,2,QImage.Format_RGB32); pixels.fill(Qt.red); frame.toImage.return_value=pixels; sink.videoFrame.return_value=frame
+        from kinetic_cut.video_worker import CpuFrame
+        pixels=QImage(2,2,QImage.Format_RGB32);pixels.fill(Qt.red);frame=CpuFrame(pixels,.0001,.0002)
+        frame.toImage=Mock(wraps=frame.toImage);sink.videoFrame.return_value=frame
         t.decoders[key]=(player,output,sink); t.poll_frames(); t.poll_frames(); frame.toImage.assert_called_once()
         pixels.fill(Qt.blue); self.assertEqual(w.preview.frames[key].pixelColor(0,0).name(),"#ff0000")
         with patch("kinetic_cut.transport.QMetaObject.invokeMethod"):t.shutdown()

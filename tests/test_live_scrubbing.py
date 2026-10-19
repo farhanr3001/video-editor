@@ -58,10 +58,12 @@ class LiveScrubbingTests(unittest.TestCase):
         self.transport.scrub(value); self.transport.frame_timer.stop()
 
     def frame(self,key,start,end=None,image=None):
+        from kinetic_cut.video_worker import CpuFrame
         sink=self.transport.decoders[key][2]; frame=sink.videoFrame.return_value
-        frame.isValid.return_value=True; frame.startTime.return_value=start
-        frame.endTime.return_value=end if end is not None else start+16667
-        frame.toImage.return_value=image if image is not None else self.image
+        if not isinstance(frame,CpuFrame):
+            frame=CpuFrame();frame.toImage=Mock(wraps=frame.toImage);sink.videoFrame.return_value=frame
+        frame.image=image if image is not None else self.image
+        frame.start=start;frame.end=end if end is not None else start+16667
         return frame
 
     def test_release_uses_timeline_transport_without_opening_legacy_source_player(self):

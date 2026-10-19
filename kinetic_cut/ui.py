@@ -27,7 +27,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox,
                                QPushButton, QButtonGroup, QProgressDialog, QFontComboBox, QScrollArea, QSlider, QSpinBox, QSplitter, QStatusBar, QTabWidget,
                                QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget)
 
-from .captions import CaptionBackendError, merge_captions, split_caption, transcribe
+from .captions import CaptionBackendError, merge_captions, split_caption
+from .caption_process import run as transcribe
 from .controls import InspectorSection, SafeComboBox, SafeDoubleSpinBox
 from .config import (AUTOSAVE_PATH, CACHE_DIR, SESSION_LOCK_PATH, load_settings, load_templates, save_settings,
                      save_templates)
@@ -229,6 +230,12 @@ class MainWindow(QMainWindow):
         progress(84,"Connecting audio and video transport")
         from .transport import TimelineTransport
         self.transport=TimelineTransport(self); self.transport.changed.connect(self.transport_position)
+        from .gpu_preview import attach as attach_gpu_preview
+        attach_gpu_preview(self.preview)
+        from .gpu_timeline import attach as attach_gpu_timeline
+        attach_gpu_timeline(self.timeline)
+        from .playback_diagnostics_ui import EventMonitor
+        self.event_monitor=EventMonitor(self)
         self.transport.levelsChanged.connect(self.timeline.set_audio_levels)
         self.transport.levelsChanged.connect(self.inspector.set_audio_levels)
         from .compound_ui import CompoundController
@@ -291,6 +298,8 @@ class MainWindow(QMainWindow):
         act_updates = QAction("Check for updates…", self)
         act_updates.triggered.connect(self.check_for_updates); file_menu.addAction(act_updates)
         act_themes = QAction("UI Themes…", self); act_themes.triggered.connect(self.open_ui_themes_dialog); file_menu.addAction(act_themes)
+        from .playback_diagnostics_ui import show as show_playback_diagnostics
+        diagnostics=QAction('Playback Diagnostics…',self);diagnostics.triggered.connect(lambda:show_playback_diagnostics(self));file_menu.insertAction(act_cache,diagnostics)
 
         # Preserved application shortcuts (removed from File menu per design)
         act_import = QAction("Import Media", self); act_import.triggered.connect(self.import_media); act_import.setShortcut(QKeySequence(self.settings.get("shortcuts", {}).get("import", "Ctrl+I"))); self.addAction(act_import); self.shortcut_actions["import"]=act_import; self.editing_actions.append(act_import)
@@ -349,6 +358,7 @@ class MainWindow(QMainWindow):
         for media in project.media:
             self.request_waveform(media)
         if hasattr(self,'compounds'):self.compounds.switched()
+        if hasattr(self,'delivery') and not (hasattr(self,'compounds') and self.compounds.navigating):self.delivery.activate_project(project)
         self.preview_quality.apply(); self.preview_quality.request()
 
     def request_waveform(self,media):
@@ -388,23 +398,31 @@ class MainWindow(QMainWindow):
         worker.signals.result.connect(ready); worker.signals.error.connect(failed); worker.signals.finished.connect(finished); self.start_worker(worker)
 
     def _history_key(self,project):
-        payload=project.to_dict(); payload.pop("modified_at",None); payload.pop("playhead",None); return json.dumps(payload,sort_keys=True,default=str)
+        payload=project.to_dict(); payload.pop("modified_at",None); payload.pop("playhead",None); payload.pop('render_history',None); return json.dumps(payload,sort_keys=True,default=str)
     def commit_history(self):
         if self._restoring or getattr(self,"_property_scrubbing",False):return
         if hasattr(self,'_text_history_timer'):self._text_history_timer.stop()
         from dataclasses import fields
         previous=self._history[self._history_index] if self._history_index>=0 else None
-        if previous and all(getattr(previous,f.name)==getattr(self.project,f.name) for f in fields(Project) if f.name not in {'playhead','modified_at'}):return
         # History objects are immutable; reuse unchanged records between snapshots.
-        # Only changed live records are copied, never referenced from history.
+        # Compare each record only once. Reused immutable snapshot values never
+        # reference mutable live objects, including nested dictionaries/styles.
         snapshot=copy.copy(self.project)
+        object.__setattr__(snapshot,'_history_snapshot',True)
+        changed=previous is None
         for field in fields(Project):
             value=getattr(self.project,field.name)
+            old_value=getattr(previous,field.name) if previous is not None else None
             if previous and field.name in {'timeline','captions','media'}:
-                old={i.id:i for i in getattr(previous,field.name)}
+                old={i.id:i for i in old_value}
                 value=[old[i.id] if i.id in old and old[i.id]==i else copy.deepcopy(i) for i in value]
-            else:value=copy.deepcopy(value)
+                equal=len(value)==len(old_value) and all(a is b for a,b in zip(value,old_value))
+            else:
+                equal=previous is not None and value==old_value
+                value=old_value if equal else copy.deepcopy(value)
+            if field.name not in {'playhead','modified_at','render_history'} and not equal:changed=True
             setattr(snapshot,field.name,value)
+        if not changed:return
         self._history=self._history[:self._history_index+1]; self._history.append(snapshot)
         if len(self._history)>100:self._history.pop(0)
         self._history_index=len(self._history)-1
@@ -424,7 +442,8 @@ class MainWindow(QMainWindow):
         try:
             position=self.project.playhead
             old_media=self.project.media if self.project else []
-            self.project=copy.deepcopy(self._history[index]); self.project.playhead=position
+            render_history=self.project.render_history
+            self.project=copy.deepcopy(self._history[index]); self.project.playhead=position; self.project.render_history=copy.deepcopy(render_history)
             self.project.ensure_track_model(); self.preview.set_project(self.project); self.timeline.set_project(self.project); self.project_label.setText(Path(self.project.path).stem if self.project.path else self.project.name); self.caption_panel.refresh()
             if self.project.media!=old_media:
                 self.refresh_media()
@@ -1301,19 +1320,37 @@ class MainWindow(QMainWindow):
     @edit_only
     def mark_out(self):self.project.mark_out=self.project.playhead; self.statusBar().showMessage(f"Out · {timecode(self.project.mark_out,self.project.settings.fps)}",2500)
 
+    def focus_timeline_text(self,kind,identifier):
+        if self.current_page!=0:return
+        if kind=='caption':
+            if not any(c.id==identifier for c in self.project.captions):return
+            self.select_caption(identifier);field=self.inspector.caption_text
+        elif kind=='title':
+            item=self.project.item_by_id(identifier)
+            if not item or item.role!='title':return
+            self.select_item(identifier);field=self.inspector.title_text
+        else:return
+        from PySide6.QtGui import QTextCursor
+        self.inspector_toggle.setChecked(True)
+        field.setFocus(Qt.MouseFocusReason)
+        field.moveCursor(QTextCursor.End)
+        field.ensureCursorVisible()
+
     def select_item(self,item_id:str):
         item=self.project.item_by_id(item_id)
         if item_id:
             if item_id not in self.timeline.selected_ids:
                 self.timeline.selected_caption=""; self.timeline.selected_caption_ids=set(); self.timeline.selected_ids={item_id}
             self.timeline.selected_transition_id=""
-            self.timeline.selected_id=item_id; self.inspector.select(item_id); self.preview.select_item(item_id)
+            self.timeline.selected_id=item_id
+            if self.timeline.drag_mode!='marquee':self.inspector.select(item_id)
+            self.preview.select_item(item_id)
             if item:self.timeline.selected_track=item.track
         else:
             self.timeline.selected_id=""
             self.preview.select_item("")
             if not getattr(self.timeline, "selected_transition_id", "") and not getattr(self.timeline, "selected_caption", ""):
-                self.inspector.select("")
+                if self.timeline.drag_mode!='marquee':self.inspector.select("")
         # Box selection owns the exact clip/caption and rubber-band damage.
         # Repainting the complete timeline here defeats that bounded redraw.
         if self.timeline.drag_mode!='marquee':self.timeline.viewport().update()
@@ -1344,11 +1381,15 @@ class MainWindow(QMainWindow):
         if hasattr(self,'keyframe_button'):self.keyframe_button.setEnabled(False)
         self.timeline.selected_transition_id=""
         if not caption_id:
-            self.timeline.selected_caption=""; self.timeline.selected_caption_ids=set(); self.timeline.selected_ids=set(); self.timeline.selected_id=""; self.preview.select_caption(""); self.inspector.select(""); self.retime_button.update_state(); return
+            self.timeline.selected_caption=""; self.timeline.selected_caption_ids=set(); self.timeline.selected_ids=set(); self.timeline.selected_id=""; self.preview.select_caption("")
+            if self.timeline.drag_mode!='marquee':self.inspector.select("")
+            self.retime_button.update_state(); return
         if caption_id not in self.timeline.selected_caption_ids:
             self.timeline.selected_caption_ids={caption_id}; self.timeline.selected_ids=set(); self.timeline.selected_id=""
         self.timeline.selected_caption=caption_id
-        self.inspector_toggle.setChecked(True); self.inspector.select_caption(caption_id); self.preview.select_caption(caption_id)
+        if self.timeline.drag_mode!='marquee':
+            self.inspector_toggle.setChecked(True); self.inspector.select_caption(caption_id)
+        self.preview.select_caption(caption_id)
         if hasattr(self,'caption_focus'):self.caption_focus.selected(caption_id)
         self.retime_button.update_state()
 
@@ -1803,18 +1844,31 @@ class MainWindow(QMainWindow):
             if not ok or not name.strip():return
             self.project.track_names[track]=name.strip()
         elif command=="delete_track":
+            last_video=track in self.project.video_tracks and len(self.project.video_tracks)==1
+            last_audio=track in self.project.audio_tracks and len(self.project.audio_tracks)==1
             if (any(i.track==track for i in self.project.timeline) or track=='subtitle_1' and self.project.captions) and QMessageBox.question(self,"Delete track",f"Delete {self.project.track_names.get(track,track)} and every clip on it?")!=QMessageBox.Yes:return
-            if not self.project.delete_track(track):return QMessageBox.information(self,"Delete track","A timeline must keep at least one track of each type.")
+            if not self.project.delete_track(track):return
+            if last_video or last_audio:self.timeline.selected_track='video_1' if last_video else 'audio_1'
             if track=='subtitle_1':self.timeline.select_captions(set(),''); self.preview.select_caption('')
         elif command=="delete_empty_tracks":
-            for candidate in list(reversed(self.project.video_tracks[1:])):
-                if not any(i.track==candidate for i in self.project.timeline):self.project.delete_track(candidate)
-            for candidate in list(reversed(self.project.audio_tracks[1:])):
-                if not any(i.track==candidate for i in self.project.timeline):self.project.delete_track(candidate)
+            occupied={item.track for item in self.project.timeline}
+            for kind,tracks in (("Video",self.project.video_tracks),("Audio",self.project.audio_tracks)):
+                original=list(tracks)
+                defaults={lane for index,lane in enumerate(original,1)
+                          if self.project.track_names.get(lane)==f"{kind} {index}"}
+                for candidate in reversed(original):
+                    if len(tracks)>1 and candidate not in occupied:self.project.delete_track(candidate)
+                for index,lane in enumerate(tracks,1):
+                    if lane in defaults:self.project.track_names[lane]=f"{kind} {index}"
+                if self.timeline.selected_track in original and self.timeline.selected_track not in tracks:
+                    self.timeline.selected_track=tracks[0]
         self.model_changed()
 
     @edit_only
     def apply_effect(self,name:str):
+        from .creative_effects import NAMES as CREATIVE_NAMES, default_effect as creative_default
+        from .speed_presets import NAMES as SPEED_NAMES, apply as apply_speed
+        if name in SPEED_NAMES:apply_speed(self,name);return
         from .effects import TITLES, GRAPHICS, ADJUSTABLE, compatible, preset_owner
         if name=='AI Enhance':
             from .enhance_ui import apply
@@ -1867,6 +1921,8 @@ class MainWindow(QMainWindow):
                 item.effects.append(dict(name=name,enabled=True,color="#00ff00",similarity=15.,softness=8.))
             elif name in ADJUSTABLE:
                 item.effects.append(dict(name=name,enabled=True,amount=100. if name not in {"Voice Clarity","Low Cut"} else 50.))
+            elif name in CREATIVE_NAMES:
+                item.effects.append(creative_default(name,item))
             elif name=="Gaussian Blur":
                 item.effects.append(dict(name="Gaussian Blur",enabled=True,horizontal=12.,vertical=12.,linked=True,border="Reflect",blend=100.))
             elif name=="Circle Facecam":
@@ -2029,8 +2085,8 @@ class MainWindow(QMainWindow):
         self._caption_cancel=cancel
         progress_dialog=None
         if not headless and not QApplication.activeModalWidget():
-            progress_dialog=QProgressDialog("Preparing timeline audio…","Cancel",0,100,self)
-            progress_dialog.setWindowTitle("Generating Auto Captions")
+            from .caption_progress import CaptionProgressDialog
+            progress_dialog=CaptionProgressDialog(self)
             progress_dialog.canceled.connect(lambda:None if settled[0] else cancel.set())
             progress_dialog.setWindowModality(Qt.WindowModal)
             progress_dialog.setValue(5)
@@ -2059,15 +2115,14 @@ class MainWindow(QMainWindow):
                 args += ["-filter_complex",";".join(filters),"-map","[out]","-ac","1","-ar","16000","-t",str(duration),wav]
                 run_cancellable(args,check=True,capture_output=True,cancel_check=cancel.is_set)
                 worker.signals.progress.emit((20,"Audio prepared · loading speech model…"))
-                return transcribe(wav,settings,offset,lambda value:worker.signals.progress.emit(value if isinstance(value,tuple) else (45,value)),caption_word_count,.5,cancel_check=cancel.is_set)
+                return transcribe(wav,settings,offset,lambda value:worker.signals.progress.emit(value if isinstance(value,tuple) else (45,value)),caption_word_count,.08,cancel_check=cancel.is_set)
         worker=Worker(work)
         worker.cancel_callback=cancel.set
         def caption_progress(value):
             if cancel.is_set() or getattr(self,'_closing',False):return
             percent,text=value if isinstance(value,tuple) else (45,str(value))
             if progress_dialog:
-                progress_dialog.setValue(percent)
-                progress_dialog.setLabelText(text)
+                progress_dialog.set_progress(percent,text)
             self.statusBar().showMessage(text)
         worker.signals.progress.connect(caption_progress)
         def ready(result):
@@ -2187,7 +2242,7 @@ class MainWindow(QMainWindow):
         dialog=QDialog(self); dialog.setWindowTitle("Kinetic Cut settings"); dialog.resize(610,740); form=QFormLayout(dialog); ffmpeg=QLineEdit(self.settings.get("ffmpeg","ffmpeg")); ffprobe=QLineEdit(self.settings.get("ffprobe","ffprobe")); whisper_size=QComboBox(); whisper_size.addItems(["tiny.en","base.en","small.en"]); whisper_size.setCurrentText(self.settings.get("whisper_model","base.en")); whisper=QLineEdit(self.settings.get("whisper_cli","")); model=QLineEdit(self.settings.get("whisper_model_path","")); sfx=QLineEdit(self.settings.get("sfx_folder","")); buttons=QDialogButtonBox(QDialogButtonBox.Cancel|QDialogButtonBox.Save); buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow("FFmpeg command",ffmpeg); form.addRow("ffprobe command",ffprobe); form.addRow("Whisper model",whisper_size); form.addRow("whisper-cli override",whisper); form.addRow("whisper.cpp model",model); form.addRow("Auto-index SFX folder",sfx)
         from .playback_config import MODES
         decoder=QComboBox(); decoder.addItems(MODES); decoder.setCurrentText(self.settings.get('playback_decoder',MODES[0])); form.addRow('Playback decoder',decoder)
-        note=QLabel('Restart after changing decoder. GPU decoding depends on codec/driver support.\nPreview effects/composition use CPU; export encoder is selected in Deliver.'); note.setWordWrap(True); form.addRow(note)
+        note=QLabel('Restart after changing decoder. GPU decoding depends on codec/driver support.\nSee File → Playback Diagnostics for the active preview backend. Export encoder is selected in Deliver.'); note.setWordWrap(True); form.addRow(note)
         shortcut_box=QGroupBox("KEYBOARD SHORTCUTS"); shortcut_grid=QGridLayout(shortcut_box); shortcut_edits={}; labels={"import":"Import media","save":"Save project","export":"Export","undo":"Undo","redo":"Redo","selection_mode":"Selection mode","blade_mode":"Cut/Split","snapping":"Toggle snapping","play_pause":"Play / pause","shuttle_back":"Shuttle back","shuttle_stop":"Stop","shuttle_forward":"Shuttle forward","mark_in":"Mark in","mark_out":"Mark out","cut":"Split clip","delete":"Lift","ripple_delete":"Ripple delete","vertical_layout":"Vertical layout","captions":"Generate captions","remove_silence":"Remove silence","instant_package":"Instant package"}
         for index,(logical,label) in enumerate(labels.items()):
             edit=QLineEdit(self.settings.get("shortcuts",{}).get(logical,"")); edit.setPlaceholderText("e.g. Ctrl+Shift+K"); shortcut_edits[logical]=edit; shortcut_grid.addWidget(QLabel(label),index//2,index%2*2); shortcut_grid.addWidget(edit,index//2,index%2*2+1)
@@ -2232,7 +2287,9 @@ class MainWindow(QMainWindow):
         from .close_guard import confirm_close
         if getattr(self,'_closing',False):
             from .dialog_jobs import active_dialog_threads
-            if self._workers or active_dialog_threads():event.ignore(); return
+            from .qt_native import active as active_native_players
+            if self._workers or active_dialog_threads() or active_native_players():event.ignore(); return
+            if hasattr(self,'transport'):self.transport.finish_gpu_shutdown()
             from .enhance_storage import finish_work as finish_enhancement_work
             if finish_enhancement_work(self):event.ignore();return
             self._shutdown_wait_timer.stop()
@@ -2282,7 +2339,8 @@ class MainWindow(QMainWindow):
         self._shutdown_wait_timer=QTimer(self)
         self._shutdown_wait_timer.setInterval(50)
         self._shutdown_wait_timer.timeout.connect(self.close)
-        if self._workers or active_dialog_threads():
+        from .qt_native import active as active_native_players
+        if self._workers or active_dialog_threads() or active_native_players():
             self.statusBar().showMessage('Closing · waiting for background tasks to finish…')
             self._shutdown_wait_timer.start(); event.ignore()
         else:

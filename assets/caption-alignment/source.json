@@ -1,0 +1,9 @@
+{
+  "repository": "Xenova/wav2vec2-base-960h",
+  "revision": "a19f851b3d42865797e410752b4c570c871e4825",
+  "file": "onnx/model_quantized.onnx",
+  "sha256": "cd5040c147381580ed73258143dd8e0c28e800a09e74ee42ee2b3e8cb4d760a3",
+  "size": 95286046,
+  "license": "Apache-2.0",
+  "upstream": "facebook/wav2vec2-base-960h"
+}

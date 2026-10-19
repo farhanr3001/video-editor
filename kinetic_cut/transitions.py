@@ -4,6 +4,7 @@ Provides transition catalog, data models, default properties, easing curves,
 and compositing logic for real-time PreviewCanvas rendering and export.
 """
 from dataclasses import dataclass, field, asdict
+from .runtime_index import IndexedRecord
 import math
 from typing import Any
 from PySide6.QtCore import Qt, QRectF, QPointF
@@ -45,6 +46,9 @@ TRANSITION_SUBSECTIONS: dict[str, list[str]] = {
         "Pixelate",
     ],
 }
+
+from . import animated_transitions as animated
+TRANSITION_SUBSECTIONS.update(animated.CATEGORIES)
 
 # Flat list of all transition names
 TRANSITION_NAMES: list[str] = [name for names in TRANSITION_SUBSECTIONS.values() for name in names]
@@ -113,6 +117,9 @@ TRANSITION_DESCRIPTIONS: dict[str, str] = {
     "Pixelate": "Pixelated mosaic transition dissolving into the next scene.",
 }
 
+TRANSITION_DESCRIPTIONS.update(animated.DESCRIPTIONS)
+TRANSITION_ICONS.update({name:('puzzle' if 'Puzzle' in name else 'sparkles' if name in animated.CATEGORIES['Pieces & Particles'] else 'waves' if name in animated.CATEGORIES['Distortion & Flow'] else 'shapes') for name in animated.NAMES})
+
 # FFmpeg xfade transition filter mapping
 XFADE_MAP: dict[str, str] = {
     "Cross Dissolve": "fade",
@@ -150,7 +157,7 @@ def xfade_name(name: str) -> str:
 
 
 @dataclass
-class Transition:
+class Transition(IndexedRecord):
     id: str
     name: str
     category: str = "Dissolve"
@@ -204,6 +211,7 @@ class Transition:
 
 def default_transition_properties(name: str) -> dict[str, Any]:
     """Return default parameters for the specified transition name."""
+    if name in animated.NAMES:return animated.defaults(name)
     props: dict[str, Any] = {
         "easing": "Ease In-Out",
     }
@@ -319,6 +327,10 @@ def composite_transition(
     Zero lag implementation leveraging native QPainter clipping, opacity, transforms,
     and composition modes.
     """
+    if transition.name in animated.NAMES:
+        image=animated.composite(img_a,img_b,transition,raw_progress,(max(1,round(dest_rect.width())),max(1,round(dest_rect.height()))))
+        painter.drawImage(dest_rect,image)
+        return
     props = transition.properties or {}
     easing_name = props.get("easing", "Ease In-Out")
     p = apply_easing(raw_progress, easing_name)

@@ -36,6 +36,19 @@ def run(output, project_path):
                     p95_ms=round(values[min(len(values)-1,int(len(values)*.95))],3) if values else 0,
                     max_ms=round(max(values,default=0),3))
     samples={}; paints=[]; pending=[None]; delivered=[]; errors=[]; presented=[]; audio_buffers=[]
+    gpu=getattr(window.preview,'gpu',None);timeline_gpu=getattr(timeline,'gpu',None)
+    if os.name=='nt' and os.environ.get('KINETIC_GPU_PREVIEW','1')!='0':assert gpu and timeline_gpu,'Native GPU surfaces failed to initialize; this is not a valid GPU performance run'
+    gpu_pending=[None]
+    if timeline_gpu:
+        if os.environ.get('KINETIC_DIAG_NO_RULER')=='1':timeline_gpu.root.setProperty('rulerTickCount',0)
+        root_set=timeline_gpu.root.setProperty
+        def root_property(name,value):return timed('qml_'+name,root_set)(name,value)
+        # The timed closure is resolved when the first native update runs.
+        timeline_gpu.root.setProperty=root_property
+        def gpu_painted():
+            if gpu_pending[0] is not None:
+                samples.setdefault('input_to_gpu_frame',[]).append((time.perf_counter()-gpu_pending[0])*1000);gpu_pending[0]=None
+        timeline_gpu.view.frameSwapped.connect(gpu_painted,Qt.QueuedConnection)
     hook=sys.excepthook
     def exception(kind,value,traceback):
         errors.append(str(value)); hook(kind,value,traceback)
@@ -84,11 +97,13 @@ def run(output, project_path):
         section=timeline._sections()['video']; anchor=QPointF((timeline.LABEL_WIDTH+timeline.viewport().width())/2,section.center().y())
         if mode.endswith('pan'):mouse(QEvent.MouseButtonPress,anchor,Qt.MiddleButton)
         samples.clear(); paints.clear(); delivered.clear(); presented.clear(); audio_buffers.clear(); pending[0]=None
+        gpu_pending[0]=None;gpu_start=gpu.gpu_frames if gpu else 0;timeline_start=timeline_gpu.frames if timeline_gpu else 0
         previous=[time.perf_counter()]; started=previous[0]; count=[0]
         audio_start={str(k):p.position() for k,(p,_,sink) in window.transport.decoders.items() if sink is None}
         def step():
             now=time.perf_counter(); samples.setdefault('input_interval',[]).append((now-previous[0])*1000); previous[0]=now
             pending[0]=pending[0] or now; count[0]+=1
+            if timeline_gpu:gpu_pending[0]=gpu_pending[0] or now
             if mode.endswith('zoom'):
                 direction=1 if (count[0]//8)%2==0 else -1
                 app.sendEvent(timeline.viewport(),QWheelEvent(anchor,QPointF(timeline.viewport().mapToGlobal(anchor.toPoint())),QPoint(),QPoint(0,120*direction),Qt.NoButton,Qt.AltModifier,Qt.NoScrollPhase,False))
@@ -105,6 +120,8 @@ def run(output, project_path):
                     audio_advance_ms={str(k):p.position()-audio_start.get(str(k),p.position()) for k,(p,_,sink) in window.transport.decoders.items() if sink is None},
                     metrics={k:stats(v) for k,v in samples.items()})
         result['metrics']['paint_interval']=stats([(b-a)*1000 for a,b in zip(paints,paints[1:])])
+        if gpu:result['gpu_source_frames']=gpu.gpu_frames-gpu_start
+        if timeline_gpu:result['timeline_gpu_frames']=timeline_gpu.frames-timeline_start
         report['runs'].append(result); print(json.dumps(result),flush=True)
         if os.environ.get('KINETIC_INTERACTION_PROFILE','1')=='1':
             with (out/(mode+'-profile.txt')).open('w') as stream:pstats.Stats(profile,stream=stream).sort_stats('cumtime').print_stats(65)
@@ -141,6 +158,33 @@ def run(output, project_path):
         window.undo(); assert content()==original,'Second Undo did not restore edit'
         workflow.append(dict(cycle=cycle,split_ms=round(split_ms,3),preview_pan_lock=True,preview_zoom=True,paused_pan=True,split_undo_redo=True))
     report['rapid_workflow']=workflow
+    if gpu and timeline_gpu:
+        timeline.set_zoom(35);wait(150)
+        # Exercise the actual native-window input bridge too, not only synthetic
+        # events delivered directly to the old QWidget viewport.
+        before=timeline.horizontalScrollBar().value()
+        pos=QPointF(timeline_gpu.view.width()/2,timeline_gpu.view.height()/2)
+        global_pos=QPointF(timeline_gpu.container.mapToGlobal(pos.toPoint()))
+        app.sendEvent(timeline_gpu.view,QMouseEvent(QEvent.MouseButtonPress,pos,global_pos,Qt.MiddleButton,Qt.MiddleButton,Qt.NoModifier))
+        app.sendEvent(timeline_gpu.view,QMouseEvent(QEvent.MouseMove,pos+QPointF(-40,0),global_pos,Qt.NoButton,Qt.MiddleButton,Qt.NoModifier))
+        app.sendEvent(timeline_gpu.view,QMouseEvent(QEvent.MouseButtonRelease,pos+QPointF(-40,0),global_pos,Qt.MiddleButton,Qt.NoButton,Qt.NoModifier))
+        wait(100);report['native_input_bridge']=timeline.horizontalScrollBar().value()!=before
+        gpu.view.grabWindow().save(str(out/'gpu-preview.png'));timeline_gpu.view.grabWindow().save(str(out/'gpu-timeline.png'))
+        report['preview_pipeline']=gpu.diagnostics();report['timeline_pipeline']=timeline_gpu.diagnostics()
+        renderer=gpu.worker;peer=getattr(gpu,'peer',None);window.close()
+        report['workers_finished']=QThreadPool.globalInstance().waitForDone(15000);wait(300)
+        deadline=time.monotonic()+8
+        while (window.isVisible() or peer and peer.active) and time.monotonic()<deadline:wait(30)
+        report['helpers_reaped']=(not renderer or not renderer.process or not renderer.process.is_alive()) and (peer is None or not peer.active)
+        report['editor_closed']=not window.isVisible()
+        report['project_unchanged']=before_hash=hashlib.sha256(source.read_bytes()).hexdigest()==report['sha256']
+        report['errors']=errors;sys.excepthook=hook
+        report['passed']=(not errors and before_hash and report['native_input_bridge'] and report['workers_finished'] and report['helpers_reaped'] and report['editor_closed']
+            and report['preview_pipeline']['graphics_backend']=='Direct3D11'
+            and all(r['timeline_gpu_frames']>5 and r['metrics'].get('input_to_gpu_frame',{}).get('count',0)>5 for r in report['runs'])
+            and all(r['gpu_source_frames']>20 and r['valid_audio_buffers']>0 for r in report['runs'] if r['mode'].startswith('playing')))
+        (out/'report.json').write_text(json.dumps(report,indent=2),encoding='utf-8');assert report['passed'],report
+        return 0
     # Compare the desktop helper against the GUI renderer, including real
     # system fonts. Offscreen-to-offscreen tests cannot detect missing native
     # font database glyphs in a helper process.

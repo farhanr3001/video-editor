@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch,Mock
 from PySide6.QtCore import QThreadPool
 from PySide6.QtGui import QImage, QColor
 from PySide6.QtGui import QPalette
@@ -11,6 +11,18 @@ from kinetic_cut.cache_manager import scan, clear, CacheManagerDialog
 
 
 class CacheManagerTests(unittest.TestCase):
+    def test_confirmed_cache_clear_invalidates_owned_preview_renderer(self):
+        from kinetic_cut.ui import MainWindow
+        from PySide6.QtWidgets import QMessageBox
+        window=MainWindow();window.autosave_timer.stop()
+        try:
+            dialog=CacheManagerDialog(window);check=dialog.rows['ai-enhance'][0];check.setEnabled(True);check.setChecked(True)
+            gpu=Mock()
+            with patch.object(window.preview,'gpu',gpu),patch('kinetic_cut.cache_manager.clear',return_value=(1,10)),patch.object(QMessageBox,'question',return_value=QMessageBox.Yes),patch.object(QMessageBox,'information'):
+                dialog.clear_selected();gpu.invalidate_caches.assert_called_once_with()
+            dialog.close()
+        finally:window.close()
+
     def test_ai_download_is_visible_and_removable_even_when_incomplete(self):
         from kinetic_cut.ui import MainWindow
         from kinetic_cut import feature_packs

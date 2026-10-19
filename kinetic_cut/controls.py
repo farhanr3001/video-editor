@@ -40,6 +40,16 @@ class _ValueScrub:
         self.scrubFinished.emit()
 
     def eventFilter(self, watched, event):
+        if self._typing and event.type()==QEvent.MouseButtonPress:
+            # Empty inspector space may not accept focus, so Qt emits no
+            # FocusOut. Treat a real outside click as completion nonetheless.
+            if not self.rect().contains(self.mapFromGlobal(event.globalPosition().toPoint())):
+                self._finish_keyboard_edit(commit_unchanged=False)
+        if watched in (self,self.lineEdit()) and event.type()==QEvent.FocusOut and self._typing:
+            # Qt gives the spin box focus; the line edit is its visual proxy.
+            # Finalize either target, without pulling focus back from the newly
+            # clicked control or committing twice through a nested FocusOut.
+            self._finish_keyboard_edit(clear_focus=False,commit_unchanged=False)
         # Native Qt routes spin-box keyboard input to the spin box itself,
         # although the embedded line edit displays the selection/caret.
         if watched in (self,self.lineEdit()) and event.type()==QEvent.KeyPress and event.key() in (Qt.Key_Return,Qt.Key_Enter):
@@ -51,7 +61,9 @@ class _ValueScrub:
             kind=event.type()
             if kind==QEvent.Wheel:self.wheelEvent(event); return True
             if kind==QEvent.MouseButtonDblClick and event.button()==Qt.LeftButton:
-                self._end_scrub(); self._typing=True; self.setKeyboardTracking(False); self.setFocusPolicy(Qt.StrongFocus); watched.setFocus(); watched.selectAll(); return True
+                self._end_scrub(); self._typing=True; self.setKeyboardTracking(False); self.setFocusPolicy(Qt.StrongFocus); watched.setFocus(); watched.selectAll()
+                watched.setModified(False)
+                QGuiApplication.instance().installEventFilter(self);return True
             if kind==QEvent.MouseButtonPress and event.button()==Qt.LeftButton and not self._typing and not self.isReadOnly():
                 self._drag_start=event.globalPosition().toPoint(); self._drag_value=float(self.value()); self._drag_time=time.perf_counter()
                 QGuiApplication.instance().installEventFilter(self)
@@ -74,17 +86,20 @@ class _ValueScrub:
                 if event.key()==Qt.Key_Escape and self._drag_start is not None:self._end_scrub(); return True
                 if event.key() in (Qt.Key_Return,Qt.Key_Enter) and self._typing:
                     self._finish_keyboard_edit(); return True
-            if kind==QEvent.FocusOut and self._typing:self._finish_keyboard_edit()
         return super().eventFilter(watched,event)
 
-    def _finish_keyboard_edit(self):
+    def _finish_keyboard_edit(self,clear_focus=True,commit_unchanged=True):
         if self._finishing_edit:return
-        self._finishing_edit=True; self._committing_typed_value=self._typing
+        self._finishing_edit=True; self._committing_typed_value=self._typing and (commit_unchanged or self.lineEdit().isModified())
         try:
+            QGuiApplication.instance().removeEventFilter(self)
             self.interpretText(); self._typing=False; self.setKeyboardTracking(True)
-            self.lineEdit().deselect(); self.lineEdit().clearFocus(); self.clearFocus(); self.setFocusPolicy(Qt.NoFocus)
+            self.lineEdit().deselect()
+            if clear_focus:self.lineEdit().clearFocus(); self.clearFocus()
+            self.setFocusPolicy(Qt.NoFocus)
             self.editingFinished.emit()
-            self.lineEdit().deselect(); self.lineEdit().clearFocus(); self.clearFocus()
+            self.lineEdit().deselect()
+            if clear_focus:self.lineEdit().clearFocus(); self.clearFocus()
         finally:self._finishing_edit=False; self._committing_typed_value=False
 
 

@@ -37,6 +37,15 @@ class TimelineMarquee(QObject):
         self.pos=QPointF(pos); self.press=QPointF(pos); self.anchor=self.point(pos,metric); self.moved=False
         self.anchor_padding=pos.y()-(metric[4]+self.anchor.y()-metric[2])
         self.endpoint=QPointF(self.anchor); self.endpoint_screen_y=pos.y(); self.timer.start()
+        # Link membership is immutable for the duration of a selection gesture.
+        # Build once; ordinary pointer moves query only the selected time range.
+        self.links={};self.item_links={}
+        self.caption_items={caption.id:caption for caption in self.view.project.captions}
+        if self.view.linked_selection:
+            for item in self.view.project.timeline:
+                key=item.group_id if item.link_id is None else item.link_id
+                if key:
+                    self.item_links[item.id]=key;self.links.setdefault(key,set()).add(item.id)
     def move(self,pos):
         self.pos=QPointF(pos); self.moved|=(self.pos-self.press).manhattanLength()>=QApplication.startDragDistance(); self.update()
     def stop(self):self.timer.stop(); self.anchor=None; self.active_section=''
@@ -83,9 +92,13 @@ class TimelineMarquee(QObject):
             base,origin=metrics[lanes[track][0]]
             logical=QRectF(t.time_for_x(rect.left()),base+rect.top()-origin,rect.width()/t.pixels_per_second,rect.height())
             return logical.intersects(r)
-        ids={i.id for i in t.project.timeline if i.track in lanes and lanes[i.track][0] in metrics and intersects(t.item_rect(i,lanes[i.track][1]),i.track)}
-        captions={c.id for c in t.project.captions if 'subtitle' in metrics and intersects(t.caption_rect(c,lanes['subtitle_1'][1]),'subtitle_1')}
-        ids=t.marquee_initial|t.expanded(ids); captions=t.marquee_caption_initial|captions
+        candidates=t.project.runtime_index.query('timeline',r.left(),r.right())
+        ids={i.id for i in candidates if i.track in lanes and lanes[i.track][0] in metrics and intersects(t.item_rect(i,lanes[i.track][1]),i.track)}
+        captions={c.id for c in t.project.runtime_index.query('captions',r.left(),r.right()) if 'subtitle' in metrics and intersects(t.caption_rect(c,lanes['subtitle_1'][1]),'subtitle_1')}
+        if t.linked_selection:
+            for key in {self.item_links.get(identifier) for identifier in ids}:
+                ids.update(self.links.get(key,()))
+        ids=t.marquee_initial|ids; captions=t.marquee_caption_initial|captions
         changed=ids!=t.selected_ids or captions!=t.selected_caption_ids
         changed_ids=ids^t.selected_ids; changed_captions=captions^t.selected_caption_ids
         t.selected_ids=ids; t.selected_id=t.selected_id if t.selected_id in ids else next(iter(ids),''); t.selected_caption_ids=captions; t.selected_caption=next(iter(captions),'')
@@ -95,10 +108,12 @@ class TimelineMarquee(QObject):
             t.selected_caption_ids=captions; t.selected_caption=next(iter(captions),'')
         if changed:
             damage=QRegion()
-            for item in t.project.timeline:
-                if item.id in changed_ids:damage|=QRegion(t.item_rect(item).toAlignedRect().adjusted(-3,-3,3,3))
-            for caption in t.project.captions:
-                if caption.id in changed_captions:damage|=QRegion(t.caption_rect(caption).toAlignedRect().adjusted(-3,-3,3,3))
+            for identifier in changed_ids:
+                item=t.project.item_by_id(identifier)
+                if item:damage|=QRegion(t.item_rect(item).toAlignedRect().adjusted(-3,-3,3,3))
+            for identifier in changed_captions:
+                caption=self.caption_items.get(identifier)
+                if caption:damage|=QRegion(t.caption_rect(caption).toAlignedRect().adjusted(-3,-3,3,3))
             t._content_damage|=damage
             t.viewport().update(damage)
         t.update_selection_overlay()

@@ -7,7 +7,7 @@ DIAGNOSTIC_CLEANUP = False
 def document_key(project):
     data = project.to_dict()
     def clean(body):
-        for field in ('modified_at', 'playhead', 'path'):
+        for field in ('modified_at', 'playhead', 'path', 'render_history'):
             body.pop(field, None)
         for media in body.get('media', []):
             media.pop('thumbnail', None)

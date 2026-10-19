@@ -4,6 +4,7 @@ import math
 from PySide6.QtCore import Qt, QRect, QSize
 from PySide6.QtGui import QImage, QPainter, QColor
 from .model import Crop
+from .creative_effects import NAMES as CREATIVE_NAMES, apply as apply_creative, clock as creative_clock, ANIMATED as CREATIVE_ANIMATED
 
 @dataclass
 class RasterContext:
@@ -31,7 +32,7 @@ class RasterContext:
                 or abs(item.contrast-1) > .001 or abs(item.saturation-1) > .001
                 or item.sharpen > .001 or active(item) or tracking_active(item) or enhance_active(item)
                 or any(e.get('enabled',True) and (e.get('name')=='Gaussian Blur'
-                       or e.get('name') in MATRICES or e.get('name') in NAMES) for e in item.effects))
+                       or e.get('name') in MATRICES or e.get('name') in NAMES or e.get('name') in CREATIVE_NAMES) for e in item.effects))
 
 def prepare_layer_image(self, item, layer_source, target, frame_rect):
     from .enhance import active as enhance_active
@@ -81,6 +82,8 @@ def prepare_layer_image(self, item, layer_source, target, frame_rect):
     source_time = item.source_time(self.project.playhead)
     media = self.project.media_by_id(item.media_id) if tracking else None
     effect_key = tracking_cache_key(item, media, source_time) if tracking else repr(item.effects)
+    if any(e.get("enabled",True) and e.get("name") in CREATIVE_ANIMATED for e in item.effects):
+        effect_key=(effect_key,self.project.playhead)
     follow = bool(follow_effect(item))
     if item.role == "background":
         from .chroma import apply_stack
@@ -108,6 +111,8 @@ def prepare_layer_image(self, item, layer_source, target, frame_rect):
         small = apply_stack(small, item)
         small = grade_image(small, item.grayscale, item.brightness, item.contrast, item.saturation, item.sharpen)
         for effect in item.effects:
+            if effect.get("enabled",True) and effect.get("name") in CREATIVE_NAMES:
+                small = apply_creative(small,effect,creative_clock(effect,item,self.project.playhead))
             if effect.get("enabled", True) and effect.get("name") == "Gaussian Blur":
                 small = blur_image(small, effect.get("horizontal", 12), effect.get("vertical", 12), effect.get("blend", 100) / 100, effect.get("border", "Reflect"), preview_fast=interactive)
             if effect.get("enabled", True) and effect.get("name") in MATRICES:
@@ -147,10 +152,19 @@ def prepare_layer_image(self, item, layer_source, target, frame_rect):
         if cached and cached[0] == cache_key:
             return cached[1]
         cropped = crop_source(layer_source, item, media, source_time) if follow else layer_source if item.crop.clamped() == Crop() else self._source_crop(layer_source, item.crop)
+        from .finishing_effects import CONTROLS as FINISHING_CONTROLS
+        finishing=any(e.get('enabled',True) and e.get('name') in FINISHING_CONTROLS for e in item.effects)
         max_w = max(self.project.settings.width, self.project.settings.height)
-        if cropped.width() > max_w or cropped.height() > max_w:
+        if not finishing and (cropped.width() > max_w or cropped.height() > max_w):
             cropped = cropped.scaled(max_w, max_w, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        if interactive:
+        if finishing:
+            # Procedural fields (grain/scanlines/halftone) must be evaluated at
+            # the same layer raster as the GPU, not generated on a small source
+            # and enlarged afterwards. This also preserves nonuniform scaling.
+            limit=2048 if interactive else 8192
+            size=QSize(max(2,min(limit,math.ceil(target.width()*raster_scale))),max(2,min(limit,math.ceil(target.height()*raster_scale))))
+            if cropped.size()!=size:cropped=cropped.scaled(size,Qt.IgnoreAspectRatio,Qt.SmoothTransformation)
+        elif interactive:
             scale = min(1., max(target.width()*raster_scale/max(1,cropped.width()),
                                 target.height()*raster_scale/max(1,cropped.height())))
             if scale < 1.:
@@ -164,6 +178,8 @@ def prepare_layer_image(self, item, layer_source, target, frame_rect):
         sx = cropped.width() / max(1.0, target.width() / frame_rect.width() * self.project.settings.width)
         sy = cropped.height() / max(1.0, target.height() / frame_rect.height() * self.project.settings.height)
         for effect in item.effects:
+            if effect.get("enabled",True) and effect.get("name") in CREATIVE_NAMES:
+                cropped = apply_creative(cropped,effect,creative_clock(effect,item,self.project.playhead))
             if effect.get("enabled", True) and effect.get("name") == "Gaussian Blur":
                 rx, ry = effect.get("horizontal", 12) * sx, effect.get("vertical", 12) * sy
                 region = None

@@ -35,6 +35,8 @@ assets/fonts/Geometos-license.pdf
 # Vendor phone binaries are versioned release packs, not source history.
 assets/phone-tools/
 assets/downloads/
+# Reproducible caption alignment weights; fetched with pinned SHA-256 by builder.
+assets/caption-alignment/model.onnx
 # Owner-supplied fonts stay local; the personal-transfer installer includes them.
 assets/fonts/KOMIKAX.ttf
 requirements-build.lock.txt

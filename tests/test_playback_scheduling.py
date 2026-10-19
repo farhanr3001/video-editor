@@ -168,8 +168,8 @@ class PlaybackSchedulingTests(unittest.TestCase):
     def test_rejected_mode_result_retries_same_frame_with_full_paused_cache(self):
         t=self.transport(); self.owner.transport=t
         key=('m',0,1,'video'); player=Mock(); sink=Mock(); sink._frame_stamp=None
-        frame=Mock(); frame.isValid.return_value=True; frame.startTime.return_value=0; frame.endTime.return_value=16667
-        frame.toImage.return_value=self.image; sink.videoFrame.return_value=frame
+        from kinetic_cut.video_worker import CpuFrame
+        frame=CpuFrame(self.image,0,.016667);sink.videoFrame.return_value=frame
         t.decoders[key]=(player,Mock(),sink); self.addCleanup(t.decoders.clear)
         t._frame_epochs[key]=3; t._pending_video_seeks[key]=0; t.playing=True
         self.canvas.active_frames[self.item.id]=key
@@ -204,6 +204,21 @@ class PlaybackSchedulingTests(unittest.TestCase):
         t._frame_jobs=[(key,0,n,Future()) for n in (1,2)]
         t.poll_frames(); frame.toImage.assert_not_called()
         t.decoders.clear()
+    def test_native_frame_readback_is_deferred_and_obeys_the_seek_generation(self):
+        from PySide6.QtMultimedia import QVideoFrame
+        t=self.transport();key=('m',0,1,'video');frame=QVideoFrame(self.image)
+        frame.setStartTime(0);frame.setEndTime(16667)
+        sink=Mock();sink._frame_stamp=None;sink.videoFrame.return_value=frame
+        t.decoders[key]=(Mock(),Mock(),sink);self.addCleanup(t.decoders.clear)
+        t._frame_epochs[key]=3
+        future=Future();executor=Mock();executor.submit.return_value=future;t._frame_executor=executor
+        t.poll_frames();self.assertNotIn(key,self.canvas.frames)
+        self.assertEqual(len(t._frame_jobs),1);self.assertEqual(sink._frame_stamp,(0,16667))
+        result=executor.submit.call_args.args[0]()
+        self.assertEqual(result[0].convertToFormat(QImage.Format_RGBA8888),self.image)
+        t._frame_epochs[key]=4;future.set_result(result)
+        with patch.object(t,'frame') as publish:t.publish_frames();publish.assert_not_called()
+        self.assertFalse(t._frame_jobs)
     def test_overlay_movement_reuses_tracks_and_cancellation_erases_box(self):
         t=TimelineWidget(); t.resize(1000,420); t.set_project(self.p); t.show(); self.app.processEvents()
         try:

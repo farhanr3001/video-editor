@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import copy
+import math
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Iterable
 from .transitions import Transition
+from .runtime_index import IndexedProject,IndexedRecord
 
 
 def uid() -> str:
@@ -51,7 +53,7 @@ class Transform:
 
 
 @dataclass
-class MediaItem:
+class MediaItem(IndexedRecord):
     id: str
     path: str
     kind: str
@@ -71,7 +73,7 @@ class MediaItem:
 
 
 @dataclass
-class TimelineItem:
+class TimelineItem(IndexedRecord):
     id: str
     media_id: str
     track: str
@@ -182,7 +184,7 @@ class CaptionStyle:
 
 
 @dataclass
-class Caption:
+class Caption(IndexedRecord):
     id: str
     start: float
     end: float
@@ -220,7 +222,7 @@ def default_audio_tracks() -> list[str]:
 
 
 @dataclass
-class Project:
+class Project(IndexedProject):
     name: str = "Untitled Short"
     path: str = ""
     portable_media: bool = False
@@ -235,6 +237,7 @@ class Project:
     audio_tracks: list[str] = field(default_factory=default_audio_tracks)
     track_names: dict[str, str] = field(default_factory=dict)
     transitions: list[Transition] = field(default_factory=list)
+    render_history: list[dict] = field(default_factory=list)
     mark_in: float = 0.0
     mark_out: float = 0.0
     playhead: float = 0.0
@@ -246,10 +249,7 @@ class Project:
 
     @property
     def duration(self) -> float:
-        ends = [i.start + i.duration for i in self.timeline]
-        ends.extend(c.end for c in self.captions)
-        ends.extend(t.start + t.duration for t in self.transitions)
-        return max(ends, default=0.0)
+        return self.runtime_index.duration
 
     def add_transition(self, transition: Transition) -> None:
         self.transitions = [t for t in self.transitions if t.id != transition.id]
@@ -274,13 +274,13 @@ class Project:
         return [t for t in self.transitions if t.left_item_id == item_id or t.right_item_id == item_id]
 
     def transition_at_time(self, track: str, t: float) -> Transition | None:
-        return next((tr for tr in self.transitions if tr.track == track and tr.contains_time(t)), None)
+        return next((tr for tr in self.runtime_index.active('transitions',t) if tr.track == track),None)
 
     def media_by_id(self, media_id: str) -> MediaItem | None:
-        return next((m for m in self.media if m.id == media_id), None)
+        return self.runtime_index.media.get(media_id)
 
     def item_by_id(self, item_id: str) -> TimelineItem | None:
-        return next((i for i in self.timeline if i.id == item_id), None)
+        return self.runtime_index.items.get(item_id)
 
     def add_media(self, media: MediaItem) -> None:
         if not any(Path(m.path) == Path(media.path) for m in self.media):
@@ -384,9 +384,13 @@ class Project:
     def overwrite(self, placed_ids: Iterable[str]) -> None:
         """Subtract placed intervals from other clips on their destination lanes."""
         placed=set(placed_ids); cutters=[i for i in self.timeline if i.id in placed]
+        if all(math.isfinite(c.start) and math.isfinite(c.duration) and c.duration>=0 for c in cutters):
+            affected={id(item) for cutter in cutters for item in self.runtime_index.query('timeline',cutter.start,cutter.start+cutter.duration)
+                      if item.track==cutter.track and item.id not in placed}
+        else:affected={id(item) for item in self.timeline if item.id not in placed}
         survivors=[]; fragments=[]; edge_replacements={}
         for original in self.timeline:
-            if original.id in placed or self.track_states.get(original.track,{}).get("locked"):
+            if id(original) not in affected or self.track_states.get(original.track,{}).get("locked"):
                 survivors.append(original); continue
             spans=[(original.start,original.start+original.duration)]
             for cutter in cutters:
@@ -523,18 +527,22 @@ class Project:
 
     def touch(self) -> None:
         self.modified_at = time.time()
+        self._edit_revision=self.__dict__.get('_edit_revision',0)+1
 
     def ensure_track_model(self) -> None:
         """Migrate older semantic-track projects to ordered generic NLE tracks."""
         legacy_map = {"background": ("video_1", "background"), "main": ("video_2", "content"),
                       "facecam": ("video_3", "facecam"), "overlay": ("video_4", "normal"),
                       "sfx": ("audio_1", "sfx"), "music": ("audio_2", "music")}
-        for item in self.timeline:
+        index=self.__dict__.get('_runtime_index')
+        candidates=self.timeline if index is None else [item for track in legacy_map for item in list(index.track_items.get(track,{}).values())]
+        for item in candidates:
             if item.track in legacy_map:
                 item.track, migrated_role = legacy_map[item.track]
                 if item.role == "normal": item.role = migrated_role
-        used_video = {i.track for i in self.timeline if i.track.startswith("video_")}
-        used_audio = {i.track for i in self.timeline if i.track.startswith("audio_")}
+        used_tracks={i.track for i in self.timeline} if index is None else set(index.track_items)
+        used_video = {track for track in used_tracks if track.startswith("video_")}
+        used_audio = {track for track in used_tracks if track.startswith("audio_")}
         for track in sorted(used_video, key=_track_number):
             if track not in self.video_tracks:self.video_tracks.append(track)
         for track in sorted(used_audio, key=_track_number):
@@ -587,13 +595,30 @@ class Project:
         if track=='subtitle_1':
             self.captions=[]; self.track_states.pop(track,None); self.track_names.pop(track,None); self.touch(); return True
         tracks = self.video_tracks if track in self.video_tracks else self.audio_tracks if track in self.audio_tracks else []
-        if len(tracks) <= 1:return False
+        if not tracks:return False
+        if len(tracks)==1:
+            # The final lane remains an empty default lane. Only its contents
+            # are removed; linked counterparts on other lanes are preserved.
+            default='video_1' if track in self.video_tracks else 'audio_1'
+            self.timeline=[i for i in self.timeline if i.track!=track]
+            self.transitions=[t for t in self.transitions if t.track!=track]
+            self.track_states.pop(track,None);self.track_names.pop(track,None)
+            tracks[0]=default
+            self.track_names[default]='Video 1' if default=='video_1' else 'Audio 1'
+            self.track_states[default]={'visible':True,'locked':False,'muted':False}
+            self.touch();return True
         tracks.remove(track); self.timeline=[i for i in self.timeline if i.track != track]
         self.transitions=[t for t in self.transitions if t.track != track]
         self.track_states.pop(track,None); self.track_names.pop(track,None); self.touch(); return True
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload=asdict(self)
+        # Runtime-observed lists are never part of the document/wire format.
+        # dataclasses.asdict preserves list subclasses, whose mutation hooks
+        # cannot be reconstructed by the composition process's unpickler.
+        for key in ('media','timeline','captions','transitions'):
+            payload[key]=list(payload[key])
+        return payload
 
     def save(self, path: str | Path | None = None) -> Path:
         destination = path or self.path
@@ -676,6 +701,8 @@ class Project:
     @classmethod
     def from_dict(cls, raw: dict) -> "Project":
         raw = copy.deepcopy(raw)
+        from .render_history import records
+        raw['render_history']=records(raw.get('render_history',[]))
         raw["settings"] = ProjectSettings(**_known(ProjectSettings, raw.get("settings", {})))
         raw["subtitle_style"] = CaptionStyle(**_known(CaptionStyle,raw.get("subtitle_style",{})))
         raw["media"] = [MediaItem(**_known(MediaItem, x)) for x in raw.get("media", [])]

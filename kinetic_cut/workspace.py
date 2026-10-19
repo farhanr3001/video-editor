@@ -831,7 +831,15 @@ class DeliveryPage:
         form.addRow("File Name",self.name); form.addRow("Location",self.location); form.addRow("",browse)
         self.codec=SafeComboBox(); self.codec.addItems(["H.264","H.265"]); self.resolution=SafeComboBox(); self.resolution.addItems(["1080 × 1920","720 × 1280"]); self.fps=SafeComboBox(); self.fps.addItems(["60","30"]); self.hardware=SafeComboBox(); self.hardware.addItems(["Auto","NVIDIA","Intel","AMD","CPU"])
         form.addRow("Format",QLabel("MP4")); form.addRow("Codec",self.codec); form.addRow("Encoder",self.hardware); form.addRow("Resolution",self.resolution); form.addRow("Frame Rate",self.fps)
-        self.bitrate=SafeDoubleSpinBox(); self.bitrate.setRange(1,80); self.bitrate.setValue(10); self.bitrate.setSuffix(" Mb/s"); form.addRow("Bitrate",self.bitrate)
+        self.quality=SafeComboBox(); self.quality.addItems(['Automatic quality (recommended)','Custom bitrate'])
+        self.quality.setToolTip('Automatic quality preserves detail and lets file size vary. Bitrate controls compression and file size; it is not a render-speed control.')
+        form.addRow('Quality',self.quality)
+        self.bitrate=SafeDoubleSpinBox(); self.bitrate.setRange(.1,200); self.bitrate.setValue(10); self.bitrate.setSuffix(" Mb/s"); form.addRow("Bitrate",self.bitrate)
+        self.bitrate.setEnabled(False);self.bitrate.setToolTip('Video data per second. Higher values usually mean larger files and less compression. Choose Custom bitrate to adjust.')
+        self.bitrate.resize(self.bitrate.sizeHint())
+        form.setRowVisible(self.bitrate,False)
+        self.quality.currentIndexChanged.connect(lambda index:self.bitrate.setEnabled(index==1))
+        self.quality.currentIndexChanged.connect(lambda index:form.setRowVisible(self.bitrate,index==1))
         self.burn=QCheckBox("Burn subtitles into video"); self.burn.setChecked(True); form.addRow("",self.burn)
         self.audio=QCheckBox("Export audio"); self.audio.setChecked(True); form.addRow("",self.audio)
         self.estimate=QLabel(); self.estimate.setWordWrap(True); self.estimate.setMinimumWidth(0); form.addRow("Estimate",self.estimate); self.settings_scroll=FixedFormScroll(body); root.addWidget(self.settings_scroll,1)
@@ -848,7 +856,43 @@ class DeliveryPage:
         self.progress.setValue(0); self.refresh()
         for widget in [self.codec,self.resolution,self.fps,self.hardware]:widget.currentTextChanged.connect(self.refresh_estimate)
         self.bitrate.valueChanged.connect(self.refresh_estimate)
-    def preset(self):return ExportPreset("Custom Export","h264" if self.codec.currentIndex()==0 else "h265",self.bitrate.value(),192,"Custom")
+        self.quality.currentIndexChanged.connect(self.refresh_estimate)
+    def activate_project(self,project):
+        import uuid
+        from .render_history import restore
+        self.context_id=uuid.uuid4().hex
+        active=[j for j in self.jobs if j['state']=='Rendering']
+        self.jobs=restore(project.render_history)+active;self.refresh()
+    def bind_job(self,job):
+        job.setdefault('owner_context',getattr(self,'context_id',''))
+        job.setdefault('owner_project',self.window.compounds.root())
+        return job
+    def history_owner(self,job):
+        current=self.window.compounds.root();owner=job.get('owner_project',current)
+        same_file=bool(current.path and owner.path and Path(current.path).resolve()==Path(owner.path).resolve() and current.created_at==owner.created_at)
+        return current if job.get('owner_context')==getattr(self,'context_id','') or same_file else owner
+    def remove_completed_record(self,job):
+        if job.get('history_id'):
+            from .render_history import remove
+            owner=self.history_owner(job);remove(owner,job['history_id'],publish=False);self.publish_history(owner)
+    def publish_history(self,owner):
+        from .render_history import issue_write,publish_write
+        from .ui import Worker
+        request=issue_write(owner)
+        if request is None:return
+        worker=Worker(publish_write,request)
+        def ready(success):
+            if not success and not self.window.transport.closed:self.window.statusBar().showMessage('Render history changed in this session but could not be written to its project.',7000)
+        worker.signals.result.connect(ready);self.window.start_worker(worker)
+    def preset(self):
+        from .exporter import automatic_bitrate
+        from types import SimpleNamespace
+        codec='h264' if self.codec.currentIndex()==0 else 'h265'
+        automatic=self.quality.currentIndex()==0
+        settings=self.window.project.settings;size=self.resolution.currentData() or (settings.width,settings.height)
+        target=SimpleNamespace(width=size[0],height=size[1],fps=float(self.fps.currentText() or settings.fps))
+        rate=automatic_bitrate(target,codec) if automatic else self.bitrate.value()
+        return ExportPreset('Custom Export',codec,rate,192,'Custom','auto' if automatic else 'bitrate')
     def sync_project_settings(self):
         settings=self.window.project.settings; key=(settings.width,settings.height,settings.fps)
         if getattr(self,"_project_format",None)==key:return
@@ -856,7 +900,7 @@ class DeliveryPage:
         self.resolution.clear(); self.resolution.addItem(f"Project · {settings.width} × {settings.height}",(settings.width,settings.height))
         smaller=(max(64,round(settings.width/3)*2),max(64,round(settings.height/3)*2))
         self.resolution.addItem(f"Smaller · {smaller[0]} × {smaller[1]}",smaller)
-        self.fps.clear(); self.fps.addItems([str(v) for v in sorted({24,25,30,50,60,settings.fps},reverse=True)]); self.fps.setCurrentText(str(settings.fps))
+        self.fps.clear(); self.fps.addItems([str(v) for v in sorted({24,25,30,50,60,90,120,144,240,settings.fps},reverse=True)]); self.fps.setCurrentText(str(settings.fps))
         self.resolution.blockSignals(False); self.fps.blockSignals(False); self.refresh_estimate()
 
     def output_project(self):
@@ -872,7 +916,7 @@ class DeliveryPage:
                     for attr in ("size","line_spacing","kerning","outline_width","shadow_x","shadow_y","shadow_blur","background_outline_width","glow_radius"):
                         setattr(style,attr,getattr(style,attr)*factor)
             project.settings.width,project.settings.height=size
-        project.settings.fps=int(self.fps.currentText()); return project
+        project.settings.fps=float(self.fps.currentText()); return project
     def browse(self):
         path=QFileDialog.getExistingDirectory(self.window,"Export Location",self.location.text())
         if path:self.location.setText(path)
@@ -883,7 +927,8 @@ class DeliveryPage:
         if not subtitles:self.burn.setChecked(False)
         elif not getattr(self,"_had_subtitles",True):self.burn.setChecked(True)
         self._had_subtitles=subtitles
-        size,_=estimate(p,self.preset(),self.hardware.currentText()!="CPU"); self.estimate.setText(f"≈ {size/1024/1024:.1f} MB · render time depends on layers/effects")
+        size,_=estimate(p,self.preset(),self.hardware.currentText()!="CPU")
+        self.estimate.setText('Variable file size · automatic quality adapts compression to the video' if self.quality.currentIndex()==0 else f'≈ {size/1024/1024:.1f} MB · render time depends on layers/effects')
     def add_job(self):
         if not self.window.project.timeline:return
         name=self.name.text().strip()
@@ -892,7 +937,7 @@ class DeliveryPage:
         if output.exists() and QMessageBox.question(self.window,"Replace output?",f"Replace {output} when this job renders?")!=QMessageBox.Yes:return
         if any(j["output"]==str(output) and j["state"]!="Complete" for j in self.jobs):return QMessageBox.warning(self.window,"Duplicate output","Choose a different file name for this queued job.")
         p=self.output_project()
-        self.jobs.append(dict(project=p,output=str(output),preset=self.preset(),hardware=self.hardware.currentText(),burn=self.burn.isChecked(),audio=self.audio.isChecked(),state="Queued",elapsed=0.)); self.refresh()
+        self.jobs.append(self.bind_job(dict(project=p,output=str(output),preset=self.preset(),hardware=self.hardware.currentText(),burn=self.burn.isChecked(),audio=self.audio.isChecked(),state="Queued",elapsed=0.))); self.refresh()
     def refresh(self):
         selected=self.list.currentRow(); self.list.clear()
         for index,job in enumerate(self.jobs):
@@ -925,10 +970,10 @@ class DeliveryPage:
         box.exec()
     def remove_job(self):
         index=self.list.currentRow()
-        if 0<=index<len(self.jobs) and self.jobs[index]["state"]!="Rendering":self.jobs.pop(index); self.refresh()
+        if 0<=index<len(self.jobs) and self.jobs[index]["state"]!="Rendering":self.remove_completed_record(self.jobs[index]); self.jobs.pop(index); self.refresh()
     def remove_specific_job(self,job):
         index=next((n for n,value in enumerate(self.jobs) if value is job),None)
-        if index is not None and job['state']!='Rendering':self.jobs.pop(index); self.refresh()
+        if index is not None and job['state']!='Rendering':self.remove_completed_record(job); self.jobs.pop(index); self.refresh()
     def queue_context(self,point):
         item=self.list.itemAt(point)
         if not item:return
@@ -954,6 +999,7 @@ class DeliveryPage:
     def next_job(self):
         job=next((j for j in self.jobs if j["state"]=="Queued"),None)
         if not job:self.running=False; self.clock.stop(); self.refresh(); return
+        self.bind_job(job)
         from .ui import Worker
         import threading
         self.render_cancel=threading.Event(); self.cancel_render.setEnabled(True)
@@ -979,8 +1025,12 @@ class DeliveryPage:
         job["state"]=state; job["error"]=error
         if state=="Complete":
             self.progress.setValue(100)
+            from .render_history import add
+            owner=self.history_owner(job);add(owner,job,publish=False);self.publish_history(owner)
             try:self.location.remember(Path(job['output']).parent,self.window.settings)
             except OSError:self.window.statusBar().showMessage('Export completed; recent folders could not be saved.',5000)
+        if job.get('owner_context',getattr(self,'context_id',''))!=getattr(self,'context_id','') and self.history_owner(job) is not self.window.compounds.root():
+            self.jobs=[value for value in self.jobs if value is not job]
         if not self.running:self.clock.stop()
         self.refresh()
         if self.running:self.next_job()
@@ -1049,6 +1099,7 @@ def build_workspace(w):
     w.monitor_control=MonitorControl(w); bar.addWidget(w.monitor_control); layout.addLayout(bar)
     w.timeline=TimelineWidget(); w.timeline.itemSelected.connect(w.select_item); w.timeline.playheadChanged.connect(w.seek); w.timeline.scrubFinished.connect(w.finish_scrub); w.timeline.itemChanged.connect(lambda _:w.model_changed()); w.timeline.mediaDropped.connect(w.add_media_to_track); w.timeline.mediaBatchDropped.connect(w.add_media_batch); w.timeline.titleDropped.connect(w.add_title_object); w.timeline.commandRequested.connect(w.timeline_command); w.timeline.bladeRequested.connect(w.split_at); w.timeline.captionBladeRequested.connect(w.split_caption_at); w.timeline.effectDropped.connect(lambda name,id:w.apply_effect_to(name,id)); w.timeline.captionSelected.connect(w.select_caption); w.timeline.transitionSelected.connect(w.select_transition)
     w.timeline.setMinimumHeight(140); tl.setMinimumHeight(185)
+    w.timeline.textEditRequested.connect(w.focus_timeline_text)
     for signal in (w.timeline.itemSelected,w.timeline.selectionChanged,w.timeline.captionSelected,w.timeline.transitionSelected):signal.connect(w.retime_button.update_state)
     w.timeline.power_bin_target=w.media_panel.power_bin_target; w.timeline.power_bin_drag_handler=w.media_panel.begin_timeline_drag
     w.timeline.media_resolver=w.media_panel.resolve_media

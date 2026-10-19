@@ -8,6 +8,18 @@ from kinetic_cut.effects import TITLES,GRAPHICS
 
 
 class EffectNewLayerDropTests(unittest.TestCase):
+    def test_effect_hover_only_resolves_nearby_clip_geometry(self):
+        from unittest.mock import patch
+        from kinetic_cut.model import MediaItem
+        p=Project(media=[MediaItem('media','fixture.mp4','video','Fixture',10000,320,180)])
+        p.timeline=[TimelineItem(str(n),'media','video_1',n*3,2) for n in range(3000)]
+        self.w.set_project(p);self.app.processEvents();t=self.w.timeline
+        item=p.timeline[1500];t.horizontalScrollBar().setValue(round((item.start-.5)*t.pixels_per_second));self.app.processEvents()
+        pos=t.visible_item_rect(item).center();self.assertFalse(t.visible_item_rect(item).isEmpty())
+        with patch.object(t,'visible_item_rect',wraps=t.visible_item_rect) as geometry:
+            target=t.effect_target('Gaussian Blur',pos)
+            self.assertEqual(target[1],item.id);self.assertLessEqual(geometry.call_count,4)
+
     def setUp(self):
         self.app=QApplication.instance();self.w=MainWindow();self.w.resize(1480,900);self.w.show();self.w.autosave_timer.stop();self.app.processEvents()
     def tearDown(self):

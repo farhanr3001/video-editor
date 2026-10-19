@@ -13,9 +13,12 @@ try {
   $env:PATH = "$PWD\.venv\Scripts;$buildPythonBase;$env:SystemRoot\System32;$env:SystemRoot"
   & $python scripts/build_icon.py
   if ($LASTEXITCODE -ne 0) { throw "Application icon generation failed" }
+  & $python scripts/prepare_caption_alignment.py --assets $assetPath
+  if ($LASTEXITCODE -ne 0) { throw "Caption alignment model verification failed" }
   & $python scripts/build_app.py --noconfirm --clean --windowed --name KineticCut --icon assets/kinetic-cut.ico --distpath $distPath `
     --runtime-hook scripts/runtime_hidden.py --version-file assets/windows-version.txt `
     --hidden-import PySide6.QtMultimedia --hidden-import PySide6.QtMultimediaWidgets `
+    --hidden-import PySide6.QtQuick --hidden-import PySide6.QtQml `
     --hidden-import kinetic_cut.phone_removal_diagnostics `
     --collect-data faster_whisper --collect-all edge_tts --collect-submodules fontTools.ttLib.tables --collect-submodules yt_dlp `
     --copy-metadata fonttools --copy-metadata uharfbuzz --add-data "$assetPath;assets" `

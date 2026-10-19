@@ -26,6 +26,7 @@ class TimelineWidget(BaseTimeline):
     filesDropped=Signal(object,str,float)
     scrubFinished=Signal()
     transitionSelected=Signal(str)
+    textEditRequested=Signal(str,str)
 
     def __init__(self):
         self.move_preview=[]; self.provisional_track=""; self.provisional_scroll=None
@@ -51,6 +52,7 @@ class TimelineWidget(BaseTimeline):
         self._timeline_raster_source=None; self._timeline_raster_failed=False
         self._content_damage=QRegion()
         self._audio_levels={}; self._meter_damage=QRegion()
+        self.gpu=None
         super().__init__()
         self._vfx_flash_timer = QTimer(self)
         self._vfx_flash_timer.setSingleShot(True)
@@ -232,10 +234,26 @@ class TimelineWidget(BaseTimeline):
         if self.drag_mode not in {"","move","playhead","marquee"}:
             for id,original in self.snapshots.items():
                 item=self.project.item_by_id(id)
-                if item:item.__dict__.update(copy.deepcopy(original.__dict__))
+                if item:item.restore_edit_state(original)
         self.move_preview=[]; self.set_provisional(""); self.drag_mode=""; self.alt_drag=False; self.marquee=None; self.snap_guide=None; self.scrub_timer.stop(); self.viewport().update()
         from .caption_gestures import clear
         clear(self)
+
+    def mouseDoubleClickEvent(self,event):
+        if (not self.read_only and event.button()==Qt.LeftButton
+                and event.position().x()>=self.LABEL_WIDTH and event.position().y()>=self.RULER_HEIGHT):
+            item,caption=self._fast_hit_at(event.position())
+            if caption or item and item.role=='title':
+                self.cancel_drag()
+                if caption:
+                    self.select_captions({caption.id},caption.id)
+                    self.textEditRequested.emit('caption',caption.id)
+                else:
+                    self.select_ids({item.id},item.id)
+                    self.textEditRequested.emit('title',item.id)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
 
     def keyPressEvent(self,event):
         if event.key()==Qt.Key_Escape and self.drag_mode:self.cancel_drag(); event.accept(); return
@@ -458,15 +476,14 @@ class TimelineWidget(BaseTimeline):
         if self.project.track_states.get(track, {}).get("locked", False):
             return None
 
+        cursor_t = self.time_for_x(pos.x())
+        snap_thresh_sec = 28.0 / max(1.0, self.pixels_per_second)
         track_items = sorted(
-            [i for i in self.project.timeline if i.track == track and not getattr(i, "_drag_ghost", False)],
+            [i for i in self.project.runtime_index.query('timeline',cursor_t-snap_thresh_sec,cursor_t+snap_thresh_sec) if i.track == track and not getattr(i, "_drag_ghost", False)],
             key=lambda i: i.start
         )
         if not track_items:
             return None
-
-        cursor_t = self.time_for_x(pos.x())
-        snap_thresh_sec = 28.0 / max(1.0, self.pixels_per_second)
 
         # 1. Edit cut between two touching/adjacent clips
         for idx in range(len(track_items) - 1):
@@ -502,13 +519,13 @@ class TimelineWidget(BaseTimeline):
         if sub_sec and sub_sec.contains(pos) and self.has_subtitles():
             t=self.time_for_x(pos.x())
             margin=15.0/max(1.0,self.pixels_per_second)
-            cap=next((c for c in reversed(self.project.captions) if (c.start-margin<=t<=c.end+margin) and self.visible_caption_rect(c).contains(pos)),None)
+            cap=next((c for c in reversed(self.project.runtime_index.query('captions',t-margin,t+margin)) if self.visible_caption_rect(c).contains(pos)),None)
             return None,cap
         track=self.track_at(pos)
         if not track:return None,None
         t=self.time_for_x(pos.x())
         margin=15.0/max(1.0,self.pixels_per_second)
-        hit=next((i for i in reversed(self.project.timeline) if i.track==track and (i.start-margin<=t<=i.start+i.duration+margin) and self.visible_item_rect(i).contains(pos)),None)
+        hit=next((i for i in reversed(self.project.runtime_index.query('timeline',t-margin,t+margin)) if i.track==track and self.visible_item_rect(i).contains(pos)),None)
         return hit,None
 
     def _audio_top(self):return self.track_rect(self.project.audio_tracks[0]).top() if self.project.audio_tracks else 0
@@ -531,6 +548,15 @@ class TimelineWidget(BaseTimeline):
         pix=QPixmap(28,28); pix.fill(Qt.transparent); painter=QPainter(pix)
         painter.drawPixmap(1,1,lucide_icon("razor","#111318",26).pixmap(26,26)); painter.drawPixmap(0,0,lucide_icon("razor","#ffffff",26).pixmap(26,26)); painter.end()
         return QCursor(pix,13,13)
+
+    @staticmethod
+    def _trim_edge(rect,x):
+        # Keep an eight-pixel selection/move target when the two normal trim
+        # zones would overlap. Extremely narrow items require zooming to trim.
+        edge=min(8.,max(0.,(rect.width()-8.)/2))
+        if x-rect.left()<edge:return 'left'
+        if rect.right()-x<edge:return 'right'
+        return ''
 
     @staticmethod
     def _trim_cursor(direction="right"):
@@ -609,17 +635,36 @@ class TimelineWidget(BaseTimeline):
         self.snap_guide=None
         if self.property("snapping"):
             playhead=self.project.playhead
-            # Wider acquisition at the playhead; hold until the pointer moves
-            # deliberately away. Media and subtitle blades share this path.
+            # A wider nearest-edge plateau adds hold without a release latch.
+            # Overlapping plateaus hand over at their midpoint: a previous cut
+            # can never hide a closer cut on another layer as the pointer moves.
+            radius=12/self.pixels_per_second
+            points=[]
             distance=18 if getattr(self,'_blade_snap',None)==playhead else 12
-            if hit.start<playhead<end and abs(value-playhead)*self.pixels_per_second<=distance:
-                self._blade_snap=playhead; self.snap_guide=playhead; return playhead
-            points=[edge for item in self.project.timeline for edge in (item.start,item.start+item.duration)]+[edge for cap in self.project.captions for edge in (cap.start,cap.end)]
+            if hit.start<playhead<end and abs(value-playhead)*self.pixels_per_second<=distance:points.append(playhead)
+            video_edges=[]
+            for item in self.project.runtime_index.query('timeline',value-radius,value+radius):
+                edges=[edge for edge in (item.start,item.start+item.duration) if hit.start<edge<end and abs(edge-value)<=radius]
+                points.extend(edges)
+                if item.track in self.project.video_tracks:video_edges.extend(edges)
+            for caption in self.project.runtime_index.query('captions',value-radius,value+radius):
+                for edge in (caption.start,caption.end):
+                    if not hit.start<edge<end or abs(edge-value)>radius:continue
+                    # While cutting media, visually indistinguishable subtitle
+                    # edges defer to a nearby video cut. Zooming separates them
+                    # naturally. Direct caption editing keeps nearest-edge mode.
+                    if hasattr(hit,'track') and any(abs(edge-video)*self.pixels_per_second<=5 for video in video_edges):continue
+                    points.append(edge)
             if points:
-                nearest=min(points,key=lambda edge:abs(edge-value))
-                if hit.start<nearest<end and abs(nearest-value)<=8/self.pixels_per_second:value=nearest; self.snap_guide=nearest
+                target=min(points,key=lambda edge:abs(edge-value))
+                self._blade_snap=playhead if target==playhead else None
+                self.snap_guide=target;return target
         self._blade_snap=None
         return max(hit.start,min(end,round(value*fps)/fps))
+
+    def set_tool(self,tool):
+        self._blade_snap=None
+        super().set_tool(tool)
 
     def item_rect(self,item,track_rect=None):
         tr=self.track_rect(item.track) if track_rect is None else track_rect
@@ -705,6 +750,10 @@ class TimelineWidget(BaseTimeline):
         return f"{hour:02d}:{minute:02d}:{second:02d}:{frame:02d}"
 
     def paintEvent(self,event):
+        if self.gpu and not self.gpu.closed:
+            self.gpu.paint_underlay(event,self._palette().get('timeline_track_bg','#202126'))
+            self.gpu.schedule()
+            return
         if self.project is None:
             painter=QPainter(self.viewport())
             painter.fillRect(self.viewport().rect(),QColor(self._palette().get('timeline_track_bg','#202126')))
@@ -736,10 +785,11 @@ class TimelineWidget(BaseTimeline):
         # Ordinary expose/layout damage can arrive after a navigation paint.
         # Validate actual content, rather than rebuilding the same scene a
         # second time or assuming that every full update means an edit.
-        scene=(tuple((i.id,i.media_id,i.track,i.start,i.duration,i.role,i.graphic_type,i.title_text,
+        visible_candidates=self.project.runtime_index.query('timeline',self.time_for_x(self.LABEL_WIDTH-262),self.time_for_x(viewport.width()+262))
+        scene=(self.project.__dict__.get('_edit_revision',0),tuple((i.id,i.media_id,i.track,i.start,i.duration,i.role,i.graphic_type,i.title_text,
                       i.in_point,i.speed,i.gain_db,i.fade_in,i.fade_out,i.group_id,i.link_id,
-                      i.source_mismatch,repr(i.effects)) for i in self.project.timeline),
-               tuple((c.id,c.start,c.end,c.text) for c in self.project.captions),
+                      i.source_mismatch,repr(i.effects)) for i in visible_candidates),
+               tuple((c.id,c.start,c.end,c.text) for c in self.project.runtime_index.query('captions',self.time_for_x(self.LABEL_WIDTH-262),self.time_for_x(viewport.width()+262))),
                tuple((m.id,m.path,m.kind,m.name,m.thumbnail) for m in self.project.media),
                repr(self.project.track_states),repr(self.project.track_names),
                tuple(self.project.video_tracks),tuple(self.project.audio_tracks),repr(self.project.transitions),
@@ -770,13 +820,11 @@ class TimelineWidget(BaseTimeline):
             from .missing_media import unavailable
             overscan=not any(unavailable(m) or m.compound or m.timeline_preset for m in self.project.media)
         skeleton=False
-        pending=self._timeline_raster_latest
-        if (len(self.project.timeline)>=100 and scale==round(scale) and self.drag_mode in {'','pan'}
-                and not self.effect_hover and not self.transition_hover and not self.roll_hover
-                and not self.provisional_track and self.tool=='select'
-                and (overscan or (pending and pending[:2]==(view,bucket)))):
-            skeleton=self._queue_navigation_raster(view,bucket,pal)
-            if skeleton:overscan=False
+        # Never replace existing media pixels with placeholders while navigating.
+        # Native scene-graph navigation keeps the same textures at every zoom.
+        # CPU compatibility still warms its exact retained raster in the helper,
+        # while drawing complete content until that result is ready.
+        asynchronous=bool(overscan and len(self.project.timeline)>=100 and self._queue_navigation_raster(view,bucket,pal))
         render_width=viewport.width()+256 if overscan else viewport.width()
         self._paint_x_offset=offset-bucket if overscan else 0
         self._overscanning=overscan
@@ -805,10 +853,7 @@ class TimelineWidget(BaseTimeline):
         for rect in self._frame_sec_rects.values():rect.setWidth(render_width)
         self._frame_track_rects={t:self.track_rect(t) for t in self.tracks()}
         for rect in self._frame_track_rects.values():rect.setWidth(render_width)
-        link_counts={}
-        for candidate in self.project.timeline:
-            k=candidate.group_id if candidate.link_id is None else candidate.link_id
-            if k:link_counts[k]=link_counts.get(k,0)+1
+        link_counts=self.project.runtime_index.link_counts
         try:
             w=render_width; h=self.viewport().height()
             # Keep nested content clips inside the fixed track/section bounds.
@@ -829,7 +874,7 @@ class TimelineWidget(BaseTimeline):
             # Clip names, thumbnails, fades and captions alike so horizontal zoom or
             # scrolling can never paint over the fixed track controls.
             p.setClipRect(QRectF(self.LABEL_WIDTH+1,self.RULER_HEIGHT,max(0,w-self.LABEL_WIDTH-1),h-self.RULER_HEIGHT),Qt.IntersectClip)
-            painted=self.project.timeline
+            painted=visible_candidates
             damage=dirty.intersected(QRegion(QRect(self.LABEL_WIDTH,self.RULER_HEIGHT,w-self.LABEL_WIDTH,h-self.RULER_HEIGHT))).boundingRect()
             visible_start=self.time_for_x(max(self.LABEL_WIDTH-6,damage.left()-6)); visible_end=self.time_for_x(min(w+6,damage.right()+6))
             damaged_times=[(self.time_for_x(max(self.LABEL_WIDTH-6,part.left()-6)),
@@ -897,14 +942,15 @@ class TimelineWidget(BaseTimeline):
                         self._clip_surfaces.put(key,tile)
                     else:self._paint_clip(p,item,r,item_clip,pal,link_counts,ghost,dirty,w)
                 if tile is not None:p.drawImage(bounds.topLeft(),tile)
-            for caption in self.caption_painted if self.caption_painted is not None else self.project.captions:
+            for caption in self.caption_painted if self.caption_painted is not None else self.project.runtime_index.query('captions',visible_start,visible_end):
                 if caption.end<visible_start or caption.start>visible_end:continue
                 r=self.caption_rect(caption)
                 if not dirty.intersects(r.toAlignedRect().adjusted(-2,-2,2,2)):continue
                 p.save(); p.setClipRect(self._sections()["subtitle"],Qt.IntersectClip)
                 shape=QPainterPath(); shape.addRoundedRect(r,3,3); p.setClipPath(shape,Qt.IntersectClip)
-                base=QColor("#b8aa7c"); p.fillRect(r,base.lighter(112) if caption.id in self.selected_caption_ids else base); p.setPen(QPen(QColor("#08090b"),1)); p.setBrush(Qt.NoBrush); p.drawRoundedRect(r.adjusted(.5,.5,-.5,-.5),3,3)
-                if r.width()>=26:p.setPen(QColor("#151617")); p.drawText(r.adjusted(5,0,-5,0),Qt.AlignVCenter|Qt.TextSingleLine,QFontMetrics(p.font()).elidedText(caption.text,Qt.ElideRight,max(0,round(r.width()-10))))
+                from .timeline_style import CAPTION_COLOR,paint_caption
+                base=QColor(CAPTION_COLOR); p.fillRect(r,base.lighter(112) if caption.id in self.selected_caption_ids else base); p.setPen(QPen(QColor("#08090b"),1)); p.setBrush(Qt.NoBrush); p.drawRoundedRect(r.adjusted(.5,.5,-.5,-.5),3,3)
+                paint_caption(p,r,caption.text)
                 if (caption.id in self.selected_caption_ids or any(c.id==caption.id for c in self.caption_preview)) and not self.read_only:p.setBrush(Qt.NoBrush); p.setPen(QPen(QColor("#ef5b50"),2)); p.drawRoundedRect(r.adjusted(1,1,-1,-1),3,3)
                 p.restore()
             if self.tool=="blade" and self.blade_hover_id and self.blade_hover_time is not None:
@@ -922,74 +968,7 @@ class TimelineWidget(BaseTimeline):
             if self.effect_hover and self.effect_hover[2]:
                 name,_,track,start=self.effect_hover; rect=self.track_rect(track); rect.setLeft(self.x_for_time(start)); rect.setWidth(5*self.pixels_per_second)
                 p.save(); p.setClipRect(self.section_rect(track),Qt.IntersectClip); p.fillRect(rect,QColor(196,181,136,90)); p.setPen(QPen(QColor("#dfd4b2"),2,Qt.DashLine)); p.setBrush(Qt.NoBrush); p.drawRect(rect.adjusted(2,2,-2,-2)); p.drawText(rect.adjusted(8,0,-4,0),Qt.AlignVCenter,"+ "+name); p.restore()
-            # Paint DaVinci Resolve-style video transition clampers
-            for trans in self.project.transitions:
-                if trans.track not in self.project.video_tracks:continue
-                if not self.project.track_states.get(trans.track,{}).get("visible",True):continue
-                if trans.start+trans.duration<visible_start or trans.start>visible_end:continue
-                r_trans=self.transition_rect(trans)
-                if r_trans.isEmpty() or not dirty.intersects(r_trans.toAlignedRect().adjusted(-2,-2,2,2)):continue
-                item_clip=self.section_rect(trans.track).intersected(QRectF(self.LABEL_WIDTH+1,self.RULER_HEIGHT,max(0,w-self.LABEL_WIDTH-1),h-self.RULER_HEIGHT))
-                if not r_trans.intersects(item_clip):continue
-                p.save(); p.setClipRect(item_clip,Qt.IntersectClip)
-                is_selected=(trans.id==self.selected_transition_id)
-                # Frosted glass translucent white clamper box
-                clamper_bg=QColor(255,255,255,68 if is_selected else 44)
-                p.fillRect(r_trans,clamper_bg)
-                # Clamper border
-                p.setBrush(Qt.NoBrush)
-                if is_selected:
-                    p.setPen(QPen(QColor("#f05a50"),2.0))
-                    p.drawRect(r_trans.adjusted(.5,.5,-.5,-.5))
-                else:
-                    p.setPen(QPen(QColor(255,255,255,140),1.0))
-                    p.drawRect(r_trans.adjusted(.5,.5,-.5,-.5))
-                # Left and right vertical grip handles
-                handle_w=min(5.0,max(2.0,r_trans.width()/4.0))
-                p.fillRect(QRectF(r_trans.left(),r_trans.top()+1,handle_w,r_trans.height()-2),QColor(255,255,255,190 if is_selected else 140))
-                p.fillRect(QRectF(r_trans.right()-handle_w,r_trans.top()+1,handle_w,r_trans.height()-2),QColor(255,255,255,190 if is_selected else 140))
-                # Center cut indicator line
-                if trans.alignment=="center":
-                    cut_x=self.x_for_time(trans.start+trans.duration/2.0)
-                    p.setPen(QPen(QColor(255,255,255,160),1.0,Qt.DashLine))
-                    p.drawLine(round(cut_x),round(r_trans.top()),round(cut_x),round(r_trans.bottom()))
-                # Centered icon and transition name
-                if r_trans.width()>=24:
-                    icon_name=TRANSITION_ICONS.get(trans.name,"droplet")
-                    icon_pix=lucide_icon(icon_name,"@on_dark",13).pixmap(13,13)
-                    if r_trans.width()>=82:
-                        badge_w=min(r_trans.width()-14,136.0)
-                        badge_rect=QRectF(r_trans.center().x()-badge_w/2.0,r_trans.center().y()-10,badge_w,20)
-                        p.fillRect(badge_rect,QColor(15,17,23,205))
-                        p.setPen(QPen(QColor(255,255,255,70),1))
-                        p.setBrush(Qt.NoBrush)
-                        p.drawRoundedRect(badge_rect,2,2)
-                        p.drawPixmap(round(badge_rect.left()+4),round(badge_rect.center().y()-6),icon_pix)
-                        p.setPen(QColor("#ffffff"))
-                        font=p.font(); font.setPointSize(8); font.setBold(True); p.setFont(font)
-                        p.drawText(badge_rect.adjusted(22,0,-4,0),Qt.AlignVCenter|Qt.AlignLeft,QFontMetrics(font).elidedText(trans.name,Qt.ElideRight,int(badge_w-26)))
-                    else:
-                        p.drawPixmap(round(r_trans.center().x()-6),round(r_trans.center().y()-6),icon_pix)
-                p.restore()
-            # Snapping ghost clamper during transition drag
-            if self.transition_hover:
-                t_kind,t_name,t_track,t_cut,t_left,t_right=self.transition_hover
-                tr_rect=self.track_rect(t_track)
-                ghost_dur=0.80
-                if t_kind=="transition_cut":ghost_start=t_cut-ghost_dur/2.0
-                elif t_kind=="transition_start":ghost_start=t_cut
-                else:ghost_start=t_cut-ghost_dur
-                gx1=self.x_for_time(ghost_start); gx2=self.x_for_time(ghost_start+ghost_dur)
-                ghost_clamper=QRectF(gx1,tr_rect.top()+2,max(12.0,gx2-gx1),tr_rect.height()-4)
-                p.save(); p.setClipRect(self.section_rect(t_track),Qt.IntersectClip)
-                p.fillRect(ghost_clamper,QColor(94,194,248,70))
-                p.setPen(QPen(QColor("#5ec2f8"),2,Qt.DashLine)); p.setBrush(Qt.NoBrush)
-                p.drawRect(ghost_clamper.adjusted(1,1,-1,-1))
-                p.fillRect(QRectF(ghost_clamper.left(),ghost_clamper.center().y()-10,ghost_clamper.width(),20),QColor(20,24,34,215))
-                p.setPen(QColor("#ffffff"))
-                font=p.font(); font.setBold(True); p.setFont(font)
-                p.drawText(ghost_clamper,Qt.AlignCenter,f"+ {t_name}")
-                p.restore()
+            self._paint_transition_overlays(p,visible_start,visible_end,dirty,w,h)
             if self.snap_guide is not None and self.tool!="blade":
                 sx=self.x_for_time(self.snap_guide); p.setPen(QPen(QColor("#f3d45f"),1,Qt.DashLine)); p.drawLine(round(sx),self.RULER_HEIGHT,round(sx),h)
             p.restore()
@@ -1026,9 +1005,10 @@ class TimelineWidget(BaseTimeline):
             commit.drawPixmap(0,0,backing); commit.end(); backing=merged
         self._paint_x_offset=0; self._overscanning=False
         if overscan:
-            self._view_rasters[(view,bucket)]=QPixmap(backing)
-            self._view_rasters.move_to_end((view,bucket))
-            self._bound_navigation_rasters()
+            if not asynchronous:
+                self._view_rasters[(view,bucket)]=QPixmap(backing)
+                self._view_rasters.move_to_end((view,bucket))
+                self._bound_navigation_rasters()
             backing=self._navigation_raster(backing,offset-bucket,viewport.size(),scale)
         self._timeline_backing=backing
         self._backing_view=(view,offset)
@@ -1043,7 +1023,7 @@ class TimelineWidget(BaseTimeline):
     def _paint_navigation_placeholder(self,p,item,r,clip,pal):
         """Immediate editable geometry while detailed thumbnails/peaks render."""
         media=self.project.media_by_id(item.media_id);audio=item.track in self.project.audio_tracks
-        base=QColor('#326951' if audio else '#6d4a8e' if item.role=='graphic' else '#b8aa7c' if item.role=='title' else '#3c6c90')
+        base=QColor('#326951' if audio else '#6d4a8e' if item.role=='graphic' else '#b9b097' if item.role=='title' else '#3c6c90')
         selected=item.id in self.selected_ids and not self.read_only
         p.save();p.setClipRect(clip);p.setBrush(base.lighter(112) if selected else base)
         p.setPen(QPen(QColor('#f05a50' if selected else '#08090b'),2 if selected else 1));p.drawRoundedRect(r.adjusted(.5,.5,-.5,-.5),3,3)
@@ -1119,7 +1099,7 @@ class TimelineWidget(BaseTimeline):
         audio=self._section_name(item.track)=="audio"; media=(self.incoming_plan if getattr(item,"_incoming",False) else self.project).media_by_id(item.media_id)
         from .missing_media import unavailable,label,offline_icon
         offline=unavailable(media,item)
-        base=QColor("#326951" if audio else "#6d4a8e" if item.role=="graphic" else "#b8aa7c" if item.role=="title" else "#3c6c90"); selected=item.id in self.selected_ids and not self.read_only and not ghost
+        base=QColor("#326951" if audio else "#6d4a8e" if item.role=="graphic" else "#b9b097" if item.role=="title" else "#3c6c90"); selected=item.id in self.selected_ids and not self.read_only and not ghost
         if offline:base=QColor('#510b0e')
         p.fillRect(r,base.lighter(112) if selected else base)
         p.setPen(QPen(QColor("#08090b"),1)); p.setBrush(Qt.NoBrush); p.drawRoundedRect(r.adjusted(.5,.5,-.5,-.5),3,3)
@@ -1200,10 +1180,14 @@ class TimelineWidget(BaseTimeline):
             for mode,x in (("fade_in",r.left()+max(5,fi)),("fade_out",r.right()-max(5,fo))):
                 if r.width()<34:continue
                 active=self.drag_mode==mode and item.id==self.selected_id
-                p.save(); p.setRenderHint(QPainter.Antialiasing); p.setPen(QPen(QColor(0,0,0,160),1)); p.setBrush(QColor("#ef6657" if active else "#f3ead1")); p.drawEllipse(QPointF(x,r.top()+5),4,4); p.restore()
+                from .timeline_style import fade_tab
+                fade_tab(p,x,r.top(),active)
         k=item.group_id if item.link_id is None else item.link_id
         is_linked=bool(k and link_counts.get(k,0)>1)
-        if text_r.width()>=44:
+        if item.role=='title' and not offline:
+            from .timeline_style import paint_caption
+            paint_caption(p,r.adjusted(0,10,0,0),item.title_text)
+        elif text_r.width()>=44:
             name=(f"Graphic · {item.graphic_type or 'Shape'}" if item.role=="graphic" else getattr(item,"title_text","") if item.role=="title" else (media.name if media else "Offline"))
             if offline:name=label(media,item)
             reserve=22 if is_linked and r.width()>=110 else 0
@@ -1223,6 +1207,21 @@ class TimelineWidget(BaseTimeline):
             # full Resolve-style red perimeter remains visible over thumbs,
             # waveforms, titles, fades and linked-selection decoration.
             p.setBrush(Qt.NoBrush); p.setPen(QPen(QColor("#f05a50"),2)); p.drawRoundedRect(r.adjusted(1,1,-1,-1),3,3)
+        self._paint_vfx_overlays(p,item,r,selected)
+        if item.effects and r.width()>70 and not getattr(self,"_overscanning",False):
+            badge=QRectF(max(r.left()+5,self.LABEL_WIDTH+5),r.top()+12,22,15)
+            p.fillRect(badge,QColor("#202833")); p.setPen(QColor("#afc6e1")); p.setFont(QFont("Segoe UI",8,QFont.DemiBold)); p.drawText(badge,Qt.AlignCenter,"fx"); p.setFont(QFont("Segoe UI",9))
+        if self.effect_hover and self.effect_hover[1]==item.id:
+            p.fillRect(r,QColor(172,181,194,115)); p.setPen(QPen(QColor("#dfe8f5"),2)); p.setBrush(Qt.NoBrush); p.drawRoundedRect(r.adjusted(1,1,-1,-1),3,3)
+            label=r.intersected(item_clip).adjusted(5,3,-5,-3)
+            if label.width()>60:
+                p.fillRect(QRectF(label.left(),label.center().y()-10,label.width(),20),QColor(28,33,40,225)); p.setPen(QColor("white"))
+                p.drawText(label,Qt.AlignCenter,QFontMetrics(p.font()).elidedText("+ "+self.effect_hover[0],Qt.ElideRight,int(label.width())))
+        if ghost:
+            p.fillRect(r,QColor(173,180,192,130)); p.setBrush(Qt.NoBrush); p.setPen(QPen(QColor("#e0e5ed"),1,Qt.DashLine)); p.drawRoundedRect(r.adjusted(1,1,-1,-1),3,3)
+        p.restore()
+
+    def _paint_vfx_overlays(self,p,item,r,selected):
         # Visual FX Duration Clamper Overlay along the top edge of the media clip (Image 3 mockup)
         vfx_effects = [e for e in getattr(item, "effects", []) if e.get("category") == "Visual FX" and e.get("enabled", True)]
         is_flashing = (self._vfx_flash_item_id == item.id)
@@ -1302,18 +1301,76 @@ class TimelineWidget(BaseTimeline):
                 p.setBrush(QColor("#50df74"))
                 p.drawEllipse(QPointF(x1, bar_y + bar_h / 2.0), 2.8, 2.8)
                 p.drawEllipse(QPointF(x2, bar_y + bar_h / 2.0), 2.8, 2.8)
-        if item.effects and r.width()>70 and not getattr(self,"_overscanning",False):
-            badge=QRectF(max(r.left()+5,self.LABEL_WIDTH+5),r.top()+12,22,15)
-            p.fillRect(badge,QColor("#202833")); p.setPen(QColor("#afc6e1")); p.setFont(QFont("Segoe UI",8,QFont.DemiBold)); p.drawText(badge,Qt.AlignCenter,"fx"); p.setFont(QFont("Segoe UI",9))
-        if self.effect_hover and self.effect_hover[1]==item.id:
-            p.fillRect(r,QColor(172,181,194,115)); p.setPen(QPen(QColor("#dfe8f5"),2)); p.setBrush(Qt.NoBrush); p.drawRoundedRect(r.adjusted(1,1,-1,-1),3,3)
-            label=r.intersected(item_clip).adjusted(5,3,-5,-3)
-            if label.width()>60:
-                p.fillRect(QRectF(label.left(),label.center().y()-10,label.width(),20),QColor(28,33,40,225)); p.setPen(QColor("white"))
-                p.drawText(label,Qt.AlignCenter,QFontMetrics(p.font()).elidedText("+ "+self.effect_hover[0],Qt.ElideRight,int(label.width())))
-        if ghost:
-            p.fillRect(r,QColor(173,180,192,130)); p.setBrush(Qt.NoBrush); p.setPen(QPen(QColor("#e0e5ed"),1,Qt.DashLine)); p.drawRoundedRect(r.adjusted(1,1,-1,-1),3,3)
-        p.restore()
+
+    def _paint_transition_overlays(self,p,visible_start,visible_end,dirty,w,h):
+        # Paint DaVinci Resolve-style video transition clampers
+        for trans in self.project.runtime_index.query('transitions',visible_start,visible_end):
+            if trans.track not in self.project.video_tracks:continue
+            if not self.project.track_states.get(trans.track,{}).get("visible",True):continue
+            if trans.start+trans.duration<visible_start or trans.start>visible_end:continue
+            r_trans=self.transition_rect(trans)
+            if r_trans.isEmpty() or not dirty.intersects(r_trans.toAlignedRect().adjusted(-2,-2,2,2)):continue
+            item_clip=self.section_rect(trans.track).intersected(QRectF(self.LABEL_WIDTH+1,self.RULER_HEIGHT,max(0,w-self.LABEL_WIDTH-1),h-self.RULER_HEIGHT))
+            if not r_trans.intersects(item_clip):continue
+            p.save(); p.setClipRect(item_clip,Qt.IntersectClip)
+            is_selected=(trans.id==self.selected_transition_id)
+            # Frosted glass translucent white clamper box
+            clamper_bg=QColor(255,255,255,68 if is_selected else 44)
+            p.fillRect(r_trans,clamper_bg)
+            # Clamper border
+            p.setBrush(Qt.NoBrush)
+            if is_selected:
+                p.setPen(QPen(QColor("#f05a50"),2.0))
+                p.drawRect(r_trans.adjusted(.5,.5,-.5,-.5))
+            else:
+                p.setPen(QPen(QColor(255,255,255,140),1.0))
+                p.drawRect(r_trans.adjusted(.5,.5,-.5,-.5))
+            # Left and right vertical grip handles
+            handle_w=min(5.0,max(2.0,r_trans.width()/4.0))
+            p.fillRect(QRectF(r_trans.left(),r_trans.top()+1,handle_w,r_trans.height()-2),QColor(255,255,255,190 if is_selected else 140))
+            p.fillRect(QRectF(r_trans.right()-handle_w,r_trans.top()+1,handle_w,r_trans.height()-2),QColor(255,255,255,190 if is_selected else 140))
+            # Center cut indicator line
+            if trans.alignment=="center":
+                cut_x=self.x_for_time(trans.start+trans.duration/2.0)
+                p.setPen(QPen(QColor(255,255,255,160),1.0,Qt.DashLine))
+                p.drawLine(round(cut_x),round(r_trans.top()),round(cut_x),round(r_trans.bottom()))
+            # Centered icon and transition name
+            if r_trans.width()>=24:
+                icon_name=TRANSITION_ICONS.get(trans.name,"droplet")
+                icon_pix=lucide_icon(icon_name,"@on_dark",13).pixmap(13,13)
+                if r_trans.width()>=82:
+                    badge_w=min(r_trans.width()-14,136.0)
+                    badge_rect=QRectF(r_trans.center().x()-badge_w/2.0,r_trans.center().y()-10,badge_w,20)
+                    p.fillRect(badge_rect,QColor(15,17,23,205))
+                    p.setPen(QPen(QColor(255,255,255,70),1))
+                    p.setBrush(Qt.NoBrush)
+                    p.drawRoundedRect(badge_rect,2,2)
+                    p.drawPixmap(round(badge_rect.left()+4),round(badge_rect.center().y()-6),icon_pix)
+                    p.setPen(QColor("#ffffff"))
+                    font=p.font(); font.setPointSize(8); font.setBold(True); p.setFont(font)
+                    p.drawText(badge_rect.adjusted(22,0,-4,0),Qt.AlignVCenter|Qt.AlignLeft,QFontMetrics(font).elidedText(trans.name,Qt.ElideRight,int(badge_w-26)))
+                else:
+                    p.drawPixmap(round(r_trans.center().x()-6),round(r_trans.center().y()-6),icon_pix)
+            p.restore()
+        # Snapping ghost clamper during transition drag
+        if self.transition_hover:
+            t_kind,t_name,t_track,t_cut,t_left,t_right=self.transition_hover
+            tr_rect=self.track_rect(t_track)
+            ghost_dur=0.80
+            if t_kind=="transition_cut":ghost_start=t_cut-ghost_dur/2.0
+            elif t_kind=="transition_start":ghost_start=t_cut
+            else:ghost_start=t_cut-ghost_dur
+            gx1=self.x_for_time(ghost_start); gx2=self.x_for_time(ghost_start+ghost_dur)
+            ghost_clamper=QRectF(gx1,tr_rect.top()+2,max(12.0,gx2-gx1),tr_rect.height()-4)
+            p.save(); p.setClipRect(self.section_rect(t_track),Qt.IntersectClip)
+            p.fillRect(ghost_clamper,QColor(94,194,248,70))
+            p.setPen(QPen(QColor("#5ec2f8"),2,Qt.DashLine)); p.setBrush(Qt.NoBrush)
+            p.drawRect(ghost_clamper.adjusted(1,1,-1,-1))
+            p.fillRect(QRectF(ghost_clamper.left(),ghost_clamper.center().y()-10,ghost_clamper.width(),20),QColor(20,24,34,215))
+            p.setPen(QColor("#ffffff"))
+            font=p.font(); font.setBold(True); p.setFont(font)
+            p.drawText(ghost_clamper,Qt.AlignCenter,f"+ {t_name}")
+            p.restore()
 
     def _paint_selection_overlay(self,p):
         # Keep one continuous box above all sections, but OUT of the static cache.
@@ -1330,6 +1387,9 @@ class TimelineWidget(BaseTimeline):
         p.setPen(QColor(pal.get('timeline_text','#eef0f3')))
         p.setFont(QFont('Segoe UI',13,QFont.DemiBold))
         p.drawText(QRectF(8,0,self.LABEL_WIDTH-16,self.RULER_HEIGHT),Qt.AlignCenter,self._timecode(self.project.playhead))
+        self._paint_playhead(p)
+
+    def _paint_playhead(self,p):
         x=self.x_for_time(self.project.playhead); self._painted_playhead_x=round(x)
         if x>=self.LABEL_WIDTH:
             p.setPen(QPen(QColor(0,0,0,175),4)); p.drawLine(round(x),0,round(x),self.viewport().height())
@@ -1421,9 +1481,10 @@ class TimelineWidget(BaseTimeline):
             else:self.select_captions(self.selected_caption_ids if cap.id in self.selected_caption_ids else {cap.id},cap.id,cap.id in self.selected_caption_ids)
             if modifiers&(Qt.ControlModifier|Qt.ShiftModifier):self.drag_mode=""; return
             r=self.caption_rect(cap)
-            if pos.x()-r.left()<8:self.drag_mode="caption_left"; self.viewport().setCursor(self._trim_cursor("left"))
-            elif r.right()-pos.x()<8:self.drag_mode="caption_right"; self.viewport().setCursor(self._trim_cursor("right"))
-            else:self.drag_mode="caption_move"
+            edge=self._trim_edge(r,pos.x())
+            if edge=='left':self.drag_mode="caption_left"; self.viewport().setCursor(self._trim_cursor("left"))
+            elif edge=='right':self.drag_mode="caption_right"; self.viewport().setCursor(self._trim_cursor("right"))
+            else:self.drag_mode="caption_move"; self.viewport().setCursor(Qt.ArrowCursor)
             if self.drag_mode=='caption_move' and self.selected_ids:
                 from .mixed_move import begin
                 begin(self,pos,'subtitle',modifiers); return
@@ -1456,7 +1517,7 @@ class TimelineWidget(BaseTimeline):
         r=self.item_rect(hit)
         if hit.id in self.retime_ids and r.bottom()-pos.y()<21 and pos.x()-r.left()>8 and r.right()-pos.x()>8:
             self.speed_menu(hit,event.globalPosition().toPoint()); self.drag_mode=""; return
-        if hit.id in self.retime_ids and pos.y()-r.top()<17 and 8<pos.x()-r.left()<18:
+        if hit.id in self.retime_ids and r.width()>=36 and pos.y()-r.top()<17 and 8<pos.x()-r.left()<18:
             self.retime_ids.difference_update(self.expanded({hit.id})); self.viewport().update(); return
         self.snapshots={i.id:copy.deepcopy(i) for i in self.selected_items() if not self._state(i.track).get("locked",False)}
         if len(self.snapshots)!=len(self.selected_items()):
@@ -1465,18 +1526,19 @@ class TimelineWidget(BaseTimeline):
         self.alt_drag=bool(event.modifiers()&Qt.AltModifier)
         self._move_snap=None
         fi=r.left()+max(5,hit.fade_in*self.pixels_per_second); fo=r.right()-max(5,hit.fade_out*self.pixels_per_second)
-        if hit.id in self.retime_ids and min(pos.x()-r.left(),r.right()-pos.x())<8:
-            self.drag_mode="retime_left" if pos.x()-r.left()<8 else "retime_right"
+        edge=self._trim_edge(r,pos.x())
+        if hit.id in self.retime_ids and edge:
+            self.drag_mode="retime_"+edge
             self.viewport().setCursor(self._trim_cursor("left" if self.drag_mode=="retime_left" else "right"))
-        elif hit.id not in self.retime_ids and pos.y()-r.top()<12 and min(abs(pos.x()-fi),abs(pos.x()-fo))<7:
+        elif hit.id not in self.retime_ids and r.width()>=24 and pos.y()-r.top()<12 and min(abs(pos.x()-fi),abs(pos.x()-fo))<7:
             self.drag_mode="fade_in" if abs(pos.x()-fi)<abs(pos.x()-fo) else "fade_out"
             endpoint=r.left()+hit.fade_in*self.pixels_per_second if self.drag_mode=='fade_in' else r.right()-hit.fade_out*self.pixels_per_second
             self._fade_drag_offset=pos.x()-endpoint; self.viewport().setCursor(Qt.SizeHorCursor)
-        elif pos.x()-r.left()<8 and 12<=pos.y()-r.top()<=r.height()-12:
+        elif edge=='left' and 12<=pos.y()-r.top()<=r.height()-12:
             self.drag_mode="trim_left"; self.viewport().setCursor(self._trim_cursor("left"))
-        elif r.right()-pos.x()<8 and 12<=pos.y()-r.top()<=r.height()-12:
+        elif edge=='right' and 12<=pos.y()-r.top()<=r.height()-12:
             self.drag_mode="trim_right"; self.viewport().setCursor(self._trim_cursor("right"))
-        else:self.drag_mode="move"
+        else:self.drag_mode="move"; self.viewport().setCursor(Qt.ArrowCursor)
         if self.drag_mode=='move' and self.selected_caption_ids:
             from .mixed_move import begin
             begin(self,pos,self._section_name(hit.track),event.modifiers()); return
@@ -1517,6 +1579,7 @@ class TimelineWidget(BaseTimeline):
                 new_blade_id=hit.id if hit else ""
                 new_blade_cap=cap.id if cap else ""
                 new_blade_time=self._blade_time(cap or hit,event.position().x()) if (cap or hit) else None
+                if not (cap or hit):self._blade_snap=None
                 changed=(self.hover_id!=new_hover_id or self.blade_hover_id!=new_blade_id or self.blade_hover_caption!=new_blade_cap or self.blade_hover_time!=new_blade_time)
                 self.hover_id=new_hover_id; self.blade_hover_id=new_blade_id; self.blade_hover_caption=new_blade_cap; self.blade_hover_time=new_blade_time
                 self.viewport().setCursor(self._razor_cursor() if (hit or cap) else Qt.ArrowCursor)
@@ -1532,8 +1595,8 @@ class TimelineWidget(BaseTimeline):
                 x=event.position().x()
                 if hit and not 12<=event.position().y()-r.top()<=r.height()-12:
                     self.viewport().setCursor(Qt.ArrowCursor); return
-                if x-r.left()<8:self.viewport().setCursor(self._trim_cursor("left")); return
-                elif r.right()-x<8:self.viewport().setCursor(self._trim_cursor("right")); return
+                edge=self._trim_edge(r,x)
+                if edge:self.viewport().setCursor(self._trim_cursor(edge)); return
             self.viewport().setCursor(Qt.ArrowCursor)
             return
         if self.drag_mode in {"trans_resize_left", "trans_resize_right"}:
@@ -1673,7 +1736,7 @@ class TimelineWidget(BaseTimeline):
             old=self.snapshots[hit.id]; edge=old.start if self.drag_mode.endswith("left") else old.start+old.duration
             delta=self.snap_edge(edge+delta,self.snapshots)-edge
             for item in self.selected_items():
-                if item.id in self.snapshots:item.__dict__.update(copy.deepcopy(self.snapshots[item.id].__dict__))
+                if item.id in self.snapshots:item.restore_edit_state(self.snapshots[item.id])
             if self.drag_mode.startswith("retime_"):
                 old=self.snapshots[hit.id]; length=max(.05,old.duration+(-delta if self.drag_mode=="retime_left" else delta))
                 self.project.retime_items(self.snapshots,old.source_duration/length,"right" if self.drag_mode=="retime_left" else "left")
@@ -1698,7 +1761,11 @@ class TimelineWidget(BaseTimeline):
         if self.drag_mode=='mixed_move':
             from .mixed_move import finish
             finish(self); self.drag_mode=''; self.snap_guide=None; self._range(); self.viewport().update(); return
+        marquee_finished=self.drag_mode=='marquee'
         changed=self.drag_mode not in {"","marquee","playhead","divider_av","divider_subtitle"}
+        # A press/release that never crossed the move threshold only selected
+        # the clip. Do not rebuild the model/history or interrupt its decoder.
+        if self.drag_mode=='move' and not self.move_preview:changed=False
         if self.drag_mode=="marquee" and self.marquee is not None and self.marquee.width()<3 and self.marquee.height()<3:
             if self.marquee_initial:self.select_ids(self.marquee_initial)
             elif self.marquee_caption_initial:self.select_captions(self.marquee_caption_initial)
@@ -1742,6 +1809,11 @@ class TimelineWidget(BaseTimeline):
             return
         QToolTip.hideText()
         self.marquee=None; self.snap_guide=None; self.drag_mode=""; self.divider_original=None; self.viewport().unsetCursor(); self._range(); self.viewport().update()
+        if marquee_finished:
+            # Live clip/caption highlights are immediate; populate the expensive
+            # inspector only once, with the completed selection.
+            if self.selected_id:self.itemSelected.emit(self.selected_id)
+            else:self.captionSelected.emit(self.selected_caption)
         if changed:self.itemChanged.emit(self.selected_id)
 
     @edit_only
@@ -1812,6 +1884,7 @@ class TimelineWidget(BaseTimeline):
         else:self.horizontalScrollBar().setValue(self.horizontalScrollBar().value()-event.angleDelta().x()); event.accept()
 
     def leaveEvent(self,event):
+        self._blade_snap=None
         if not self.drag_mode:self.hover_id=""; self.blade_hover_id=""; self.blade_hover_caption=""; self.blade_hover_time=None; self.snap_guide=None; self.viewport().update()
         super().leaveEvent(event)
 
@@ -1879,7 +1952,7 @@ class TimelineWidget(BaseTimeline):
                 return (name,'','__new_video',self.time_for_x(pos.x()))
         if self.project.track_states.get(track,{}).get("locked",False):return None
         if (name in TITLES or name in GRAPHICS) and track in self.project.video_tracks:return (name,"",track,self.time_for_x(pos.x()))
-        hit=next((i for i in reversed(self.project.timeline) if self.visible_item_rect(i).contains(pos)),None)
+        hit,_=self._fast_hit_at(pos)
         return (name,hit.id,"",0) if compatible(name,hit,self.project) else None
 
     def dragMoveEvent(self,event):
@@ -2021,7 +2094,7 @@ class TimelineWidget(BaseTimeline):
             menu.popup(event.globalPos())
             self._menu = menu
             return
-        hit=next((i for i in reversed(self.project.timeline) if self.visible_item_rect(i).contains(event.pos())),None)
+        hit,_=self._fast_hit_at(QPointF(event.pos()))
         if hit:
             if hit.id not in self.selected_ids:self.select_ids(self.expanded({hit.id}),hit.id)
             menu=QMenu(self); items=self.selected_items()

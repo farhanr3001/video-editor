@@ -185,12 +185,25 @@ class Storage(QObject):
         if self.final_started:return False
         self.final_started=True;self.start(True);return True
 
+def history_has_enhancement(history):
+    # Only immutable Undo snapshots may cache this answer. Live projects can
+    # receive nested effect edits without replacing their timeline records.
+    for project in history:
+        immutable=project.__dict__.get('_history_snapshot',False)
+        known=project.__dict__.get('_enhance_present') if immutable else None
+        if known is None:
+            known=any(e.get('name')=='AI Enhance' for item in project.timeline for e in item.effects)
+            if immutable:object.__setattr__(project,'_enhance_present',known)
+        if known:return True
+    return False
+
+
 def observe(window):
     if not hasattr(window,"_history") or not hasattr(window,"compounds"):return
     manager=getattr(window,'_enhance_storage',None)
     if manager is None:
         from .config import CACHE_DIR
-        if not (CACHE_DIR/'ai-enhance/.sessions').exists() and not any(e.get('name')=='AI Enhance' for project in window._history for item in project.timeline for e in item.effects):return
+        if not (CACHE_DIR/'ai-enhance/.sessions').exists() and not history_has_enhancement(window._history):return
         manager=Storage(window);window._enhance_storage=manager
     manager.observe()
 

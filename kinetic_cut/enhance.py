@@ -1,4 +1,5 @@
 """Non-destructive temporal restoration caches; no inference on the UI thread."""
+from .creative_effects import NAMES as CREATIVE_NAMES, apply as apply_creative, clock_offset
 import copy,hashlib,json,math,os,tempfile,threading
 from pathlib import Path
 from fractions import Fraction
@@ -175,6 +176,8 @@ def render_frame(project,item,source,at,stop=None,strict=False):
             if result.isNull():
                 if strict and (range_at(project,media,item,index,at) or not ranges(project,media,item,index)):raise RuntimeError('An enhanced frame is missing. Prepare this effect again.')
             else:image=result
+        elif name in CREATIVE_NAMES:
+            image=apply_creative(image,effect,(at-item.in_point)/max(.01,item.speed)+clock_offset(effect,item))
         elif name=='Gaussian Blur':image=blur_image(image,effect.get('horizontal',12),effect.get('vertical',12),effect.get('blend',100)/100,effect.get('border','Reflect'))
         elif name in MATRICES:image=apply_color_effect(image,effect)
         elif name in NAMES:

@@ -1,4 +1,5 @@
-import unittest,copy,tempfile,threading,zipfile
+import unittest,copy,tempfile,threading,zipfile,time
+import shiboken6
 from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -74,8 +75,18 @@ class CurrentUITests(unittest.TestCase):
     def wait(self,ms=40):
         loop=QEventLoop(); QTimer.singleShot(ms,loop.quit); loop.exec()
     def tearDown(self):
-        QThreadPool.globalInstance().waitForDone(10000); self.wait(); self.app.clipboard().clear()
-        for widget in self.app.topLevelWidgets():widget.close(); widget.deleteLater()
+        # Close first: the retained shutdown owns terminal worker callbacks.
+        # Deleting immediately after close() can retire TimelineWidget while
+        # queued waveform completion still needs it.
+        widgets=list(self.app.topLevelWidgets())
+        for widget in widgets:
+            if shiboken6.isValid(widget):widget.close()
+        deadline=time.monotonic()+10
+        while any(shiboken6.isValid(w) and getattr(w,'_closing',False) and w.isVisible() for w in widgets) and time.monotonic()<deadline:self.wait(10)
+        self.assertFalse(any(shiboken6.isValid(w) and getattr(w,'_closing',False) and w.isVisible() for w in widgets),'Fixture window must finish retained shutdown')
+        self.assertTrue(QThreadPool.globalInstance().waitForDone(10000));self.wait();self.app.clipboard().clear()
+        for widget in widgets:
+            if shiboken6.isValid(widget):widget.deleteLater()
         self.app.sendPostedEvents(None,QEvent.DeferredDelete); self.wait(); self.temp.cleanup()
     def window(self):
         from kinetic_cut.ui import MainWindow

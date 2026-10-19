@@ -468,6 +468,9 @@ class EditorAPI:
             selected_transition_id=getattr(w.timeline,'selected_transition_id',''),
             background_tasks=sum(not getattr(job,'maintenance',False) for job in w._workers),page={0:'Edit',1:'Deliver'}.get(w.current_page,'Edit'),jobs=self.call_get_jobs())
         if section!='summary':result['project']=w.project.to_dict()
+        if getattr(w,'event_monitor',None):
+            from .playback_diagnostics_ui import snapshot
+            result['playback_diagnostics']=snapshot(w)
         return result
     def call_get_capabilities(self):
         from .effects import CATALOG
@@ -895,7 +898,10 @@ class EditorAPI:
     def call_get_preview(self,area='preview',max_width=1280):
         if area not in {'preview','workspace'}:raise ValueError('Unknown preview area')
         widget=self.w if area=='workspace' else self.w.preview
-        pixels=widget.grab().toImage(); max_width=max(160,min(1920,int(max_width)))
+        from .ui_capture import capture
+        surfaces=[getattr(self.w.preview,'gpu',None)]
+        if area=='workspace':surfaces.append(getattr(self.w.timeline,'gpu',None))
+        pixels=capture(widget,surfaces); max_width=max(160,min(1920,int(max_width)))
         if pixels.width()>max_width:pixels=pixels.scaledToWidth(max_width,Qt.SmoothTransformation)
         buffer=QBuffer(); buffer.open(QIODevice.WriteOnly); pixels.save(buffer,'PNG')
         return {'_mcp_content':[dict(type='text',text=json.dumps(dict(playhead=self.w.project.playhead,area=area,note='Current displayed frame; seek decoding is asynchronous.'))),dict(type='image',data=bytes(buffer.data().toBase64()).decode(),mimeType='image/png')]}

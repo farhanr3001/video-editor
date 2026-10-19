@@ -58,6 +58,10 @@ def mapped_image(data,mappings):
 
 
 def child(connection):
+    import faulthandler,sys
+    # A windowed frozen app normally has no stderr. Optional fault reporting
+    # must never prevent its compositor worker from starting.
+    if sys.stderr is not None:faulthandler.enable()
     from .process import install_desktop_process_policy
     install_desktop_process_policy()
     from PySide6.QtGui import QGuiApplication
@@ -72,7 +76,7 @@ def child(connection):
             try:payload=connection.recv()
             except EOFError:break
             try:
-                project,frames,active,fallback,interactive,raster,rect,size,scale,output,draw_captions=payload
+                project,frames,active,fallback,interactive,raster,rect,size,scale,output,draw_captions,*options=payload
                 # Retain read-only scene assets and filter caches between frames.
                 # Reconstructing the project and reloading stills on every tick
                 # defeats worker composition on image-heavy motion scenes.
@@ -88,6 +92,7 @@ def child(connection):
                     context=SceneContext(Project.from_dict(project),{}, {}, {},interactive,raster,draw_captions)
                     previous=signature
                 context.project.playhead=at
+                context.transparent=bool(options and options[0])
                 # Mapped pixels are read-only during this single-flight render.
                 # Clear cached views before replacing/reusing any source slot.
                 context.frames={}; context.fallback_frames={}
@@ -150,7 +155,7 @@ class RendererProcess:
                 frames={k:pack(v) for k,v in context.frames.items()}
                 fallback={k:pack(v) for k,v in context.fallback_frames.items()}
             payload=(context.project.to_dict(),frames,context.active_frames,fallback,
-                     context.interactive,context.raster_scale,(rect.x(),rect.y(),rect.width(),rect.height()),size,scale,output,context.draw_captions)
+                     context.interactive,context.raster_scale,(rect.x(),rect.y(),rect.width(),rect.height()),size,scale,output,context.draw_captions,getattr(context,'transparent',False))
             self.connection.send(payload)
             # Bounded wait with an explicit failure rather than a permanently
             # stale preview if a device/library becomes unresponsive.

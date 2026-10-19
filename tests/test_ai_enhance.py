@@ -245,4 +245,16 @@ class EnhanceUI(unittest.TestCase):
             self.w.set_project(Project()); self.w.transport.sync(); QTest.qWait(50)
             self.assertTrue(self.w.transport.video_pool.waitForDone(10000))
             QTest.qWait(50)
+            # Media-pool thumbnail extraction also reads this fake video PNG.
+            # The normal window close drains all owned readers; this inner
+            # TemporaryDirectory ends before tearDown can perform that drain.
+            from PySide6.QtCore import QThreadPool
+            deadline=time.monotonic()+10
+            while QThreadPool.globalInstance().activeThreadCount() and time.monotonic()<deadline:QTest.qWait(10)
+            self.assertEqual(QThreadPool.globalInstance().activeThreadCount(),0)
+            # qWait/processEvents does not guarantee DeferredDelete delivery
+            # outside app.exec(). Retired Qt players own the shared source
+            # device until that event, so release it before TemporaryDirectory.
+            from PySide6.QtCore import QEvent,QCoreApplication
+            QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
 

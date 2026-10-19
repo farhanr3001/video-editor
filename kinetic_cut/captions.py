@@ -96,8 +96,6 @@ def transcribe(path: str, settings: dict, offset: float = 0.0,
         _check_cancel(cancel_check)
         from .caption_runtime import model_arguments
         model_name, model_options = model_arguments(settings.get("whisper_model", "small.en"))
-        model = WhisperModel(model_name, device="cpu", compute_type="int8", **model_options)
-        _check_cancel(cancel_check)
         # Never concatenate distant speech islands. Restoring timestamps after
         # VAD concatenation can attach the first word after a pause to the
         # previous island (e.g. "feels" arriving four seconds too early).
@@ -107,24 +105,65 @@ def transcribe(path: str, settings: dict, offset: float = 0.0,
         _check_cancel(cancel_check)
         regions=get_speech_timestamps(audio,VadOptions(min_silence_duration_ms=700,speech_pad_ms=200))
         _check_cancel(cancel_check)
-        data=[]
-        for region in regions:
+        from .caption_alignment import WordAligner,preserve_fillers,usable_words
+        aligner=None
+        if settings.get('caption_language','en')=='en' and settings.get('caption_alignment',True):
+            try:aligner=WordAligner()
+            except Exception as error:
+                import logging
+                logging.info('Word alignment unavailable; retaining Whisper timestamps: %s',error)
+        speech=[]
+        if aligner:
+            speech=[(r['start']/16000,r['end']/16000) for r in get_speech_timestamps(audio,VadOptions(min_speech_duration_ms=50,min_silence_duration_ms=80,speech_pad_ms=0))]
+        from .caption_runtime import device_options
+        devices=device_options(settings)
+        for attempt,(device,compute,handles) in enumerate(devices):
             _check_cancel(cancel_check)
-            origin=region["start"]/16000
-            segments,_=model.transcribe(audio[region["start"]:region["end"]],
-                language=settings.get("caption_language","en"),vad_filter=False,
-                word_timestamps=True,condition_on_previous_text=False)
-            for segment in segments:
+            data=[];model=None
+            try:
+                if progress:progress('Loading local Whisper model…')
+                model=WhisperModel(model_name,device=device,compute_type=compute,**model_options)
                 _check_cancel(cancel_check)
-                if progress:progress((45+round(45*min(1,(origin+segment.end)/max(.01,len(audio)/16000))),f"Transcribing… {origin+segment.end:.1f}s / {len(audio)/16000:.1f}s"))
+                if progress:progress((45,f'Transcribing… 0.0s / {len(audio)/16000:.1f}s'))
+                for region in regions:
+                    _check_cancel(cancel_check)
+                    origin=region['start']/16000
+                    options=dict(language=settings.get('caption_language','en'),vad_filter=False,
+                        word_timestamps=True,condition_on_previous_text=False)
+                    if settings.get('caption_vocabulary'):options['hotwords']=str(settings['caption_vocabulary'])[:1000]
+                    segments,_=model.transcribe(audio[region['start']:region['end']],**options)
+                    for segment in segments:
+                        _check_cancel(cancel_check)
+                        words=[dict(start=origin+w.start,end=origin+w.end,text=w.word,
+                            confidence=getattr(w,'probability',1.),_recognizer_start=origin+w.start)
+                            for w in (getattr(segment,'words',None) or []) if str(getattr(w,'word','')).strip()]
+                        if not words and require_word_timestamps:
+                            raise CaptionBackendError('The recognizer returned no word-level timestamps; audio was not changed.')
+                        if aligner and words:
+                            try:aligner.align(audio,words,origin+segment.start,origin+segment.end,cancel_check)
+                            except CaptionCancelled:raise
+                            except Exception as error:
+                                import logging
+                                logging.warning('Word alignment failed; retaining Whisper timestamps: %s',error)
+                            preserve_fillers(words,speech)
+                        words=usable_words(words,origin+segment.start,origin+segment.end,require_word_timestamps)
+                        data.append(dict(start=origin+segment.start,end=max(origin+segment.end,max((w['end'] for w in words),default=0)),text=segment.text,words=words))
+                        if progress:progress((45+round(45*min(1,(origin+segment.end)/max(.01,len(audio)/16000))),f'Transcribing… {origin+segment.end:.1f}s / {len(audio)/16000:.1f}s'))
                 _check_cancel(cancel_check)
-                words=[word for word in (getattr(segment,"words",None) or []) if str(getattr(word,"word","")).strip() and word.end>word.start]
-                if not words and require_word_timestamps:
-                    raise CaptionBackendError("The recognizer returned no word-level timestamps; audio was not changed.")
-                data.append({"start":origin+segment.start,"end":origin+segment.end,"text":segment.text,
-                    "words":[{"start":origin+word.start,"end":origin+word.end,"text":word.word,"confidence":getattr(word,'probability',1.)} for word in words]})
-        _check_cancel(cancel_check)
-        return _from_segments(data,offset,words_per_caption=words_per_caption,hold_seconds=hold_seconds), "faster-whisper"
+                usable_words([w for segment in data for w in segment['words']],0,len(audio)/16000,require_word_timestamps)
+                result=_from_segments(data,offset,words_per_caption=words_per_caption,hold_seconds=hold_seconds)
+                return result,'faster-whisper ('+('GPU' if device=='cuda' else 'CPU')+(' + word alignment)' if aligner else ')')
+            except CaptionCancelled:raise
+            except Exception:
+                if device!='cuda' or attempt+1>=len(devices):raise
+                if progress:progress('Retrying with a compatible speech engine…')
+            finally:
+                # Release GPU memory on success, failure and cancellation.
+                engine=getattr(model,'model',None)
+                if engine is not None:
+                    try:engine.unload_model()
+                    except Exception:pass
+                del model
     except CaptionCancelled:raise
     except Exception as error:
         # A model may not be downloaded yet or a machine may lack a compatible

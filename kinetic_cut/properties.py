@@ -277,6 +277,9 @@ class PropertiesPanel(QWidget):
         from .voice_ui import VoiceControls
         self.voice_panel=VoiceControls(self); root.addWidget(self.voice_panel)
 
+        from .creative_ui import CreativeControls
+        self.creative_panel=CreativeControls(self);root.addWidget(self.creative_panel)
+
         # Visual FX dedicated controls
         self.vfx_panel=QWidget(); vfx_root=QVBoxLayout(self.vfx_panel); vfx_root.setContentsMargins(0,0,0,0); vfx_root.setSpacing(6)
         
@@ -407,7 +410,17 @@ class PropertiesPanel(QWidget):
         self.changed.emit()
 
     def targets(self,audio=None):
-        p=self.window.project; ids=self.window.timeline.selected_ids or {self.item_id}; items=[i for i in p.timeline if i.id in ids]
+        p=self.window.project; ids=self.window.timeline.selected_ids or {self.item_id}
+        if len(ids)==1:
+            item=p.item_by_id(next(iter(ids)));items=[item] if item else []
+        else:
+            # Controls ask for this selection many times during one refresh.
+            # Preserve document order, but never rescan the document per control.
+            key=(id(p),id(p.timeline),p.__dict__.get('_edit_revision',0))
+            if key!=getattr(self,'_target_order_key',None):
+                self._target_order={item.id:n for n,item in enumerate(p.timeline)};self._target_order_key=key
+            items=[item for identifier in sorted(ids,key=lambda identifier:self._target_order.get(identifier,len(p.timeline)))
+                   if (item:=p.item_by_id(identifier)) is not None]
         primary=p.item_by_id(self.item_id)
         def kind(item):return 'title' if item.role=='title' else 'audio' if item.track in p.audio_tracks else 'video'
         return [i for i in items if not p.track_states.get(i.track,{}).get('locked') and (audio is None or (i.track in p.audio_tracks)==audio) and (not primary or kind(i)==kind(primary))]
@@ -548,12 +561,18 @@ class PropertiesPanel(QWidget):
         effect=self.effect()
         self.enhance_panel.refresh(effect)
         self.voice_panel.refresh(effect)
+        self.creative_panel.refresh(effect)
         tracking=bool(effect and effect.get('name')=='Object Tracking')
         self.tracking_panel.setVisible(tracking)
         self.vision_reanalyse.hide()
         self.vision_customize.hide()
         if not effect:
             self.vfx_panel.hide(); return
+        from .creative_effects import NAMES as CREATIVE_NAMES
+        if effect.get('name') in CREATIVE_NAMES:
+            self.vfx_panel.hide();self.effect_detail.hide();self.key_panel.hide();self.effect_amount_panel.hide();self.effect_note.hide()
+            previous=self.updating;self.updating=True
+            self.effect_enabled.setText(effect['name']);self.effect_enabled.setChecked(effect.get('enabled',True));self.updating=previous;return
         if effect.get('name')=='AI Enhance':
             self.vfx_panel.hide();self.effect_detail.hide();self.key_panel.hide();self.effect_amount_panel.hide();self.effect_note.hide()
             self.updating=True;self.effect_enabled.setText('AI Enhance');self.effect_enabled.setChecked(effect.get('enabled',True));self.updating=False;return
@@ -2061,6 +2080,11 @@ class PropertiesPanel(QWidget):
 
         self.sec_trans_param = InspectorSection("Parameters", param_body, reset_callback=self.reset_trans_properties)
         root.addWidget(self.sec_trans_param)
+        self.animated_trans_body=QWidget();self.animated_trans_form=QFormLayout(self.animated_trans_body)
+        self.animated_trans_form.setContentsMargins(4,4,4,8)
+        self.animated_trans_rows={};self.animated_trans_name=None
+        self.sec_animated_trans=InspectorSection("Transition Controls",self.animated_trans_body,reset_callback=self.reset_trans_properties)
+        self.sec_animated_trans.hide();root.addWidget(self.sec_animated_trans)
 
         # Actions
         actions_box = QWidget()
@@ -2108,6 +2132,22 @@ class PropertiesPanel(QWidget):
         has_glitch = "Glitch" in name
         has_rgb = "RGB" in name
         has_intensity = "Flash" in name or "Color" in name or "Black" in name or "Flare" in name
+        from .animated_transitions import NAMES as animated_names,CONTROLS,values
+        animated=name in animated_names
+        if animated:
+            has_color=has_blur=has_feather=has_dir=has_motion=has_zoom=has_glitch=has_rgb=has_intensity=False
+        self.sec_animated_trans.setVisible(animated)
+        if animated:
+            if self.animated_trans_name!=name:
+                while self.animated_trans_form.rowCount():self.animated_trans_form.removeRow(0)
+                self.animated_trans_rows={};self.animated_trans_name=name
+                for key,label,lo,hi,default,step in CONTROLS[name]:
+                    row=ValueRow(lo,hi,default,step,True)
+                    row.edited.connect(lambda v,d,key=key:self.edit_trans_prop(key,v))
+                    self.animated_trans_form.addRow(label,row);self.animated_trans_rows[key]=row
+            from .animated_transitions import BASE
+            bounded=dict(zip((r[0] for r in BASE),values(props)))
+            for key,row in self.animated_trans_rows.items():row.set_values([bounded[key]])
 
         self.tf_trans_param.setRowVisible(self.trans_color_btn, has_color)
         if has_color:

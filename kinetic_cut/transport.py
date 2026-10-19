@@ -67,7 +67,7 @@ class TimelineTransport(QObject):
                           for item in (p.item_by_id(id) for id in mapped))
         if not mapped:
             changed_lanes=any(item.track in p.video_tracks and item.start<=self.position<item.start+item.duration
-                              and not item.muted for item in p.timeline)
+                              and not item.muted for item in p.runtime_index.active('timeline',self.position))
         if changed_lanes or now-self._last_scrub_sync>=0.025:
             self._scrub_timer.stop(); self._last_scrub_sync=now; self._scrub_pending_pos=None
             self.sync(True)
@@ -108,6 +108,8 @@ class TimelineTransport(QObject):
         for player,_,_ in self.decoders.values():player.pause()
         self._meter_display={}; self.levelsChanged.emit(self._idle_levels())
         self.stateChanged.emit(False)
+        gpu=getattr(self.window.preview,'gpu',None)
+        if getattr(gpu,'remote',False):gpu.sync_transport()
 
     def _idle_levels(self):
         return {track:(0.,0.,True) for track in self._meter_clip}
@@ -128,11 +130,18 @@ class TimelineTransport(QObject):
         if self.closed:return
         from .missing_media import unavailable
         p=self.window.project; t=self.position; active=set(); preview=self.window.preview
+        remote=getattr(getattr(preview,'gpu',None),'remote',False)
+        video_only=getattr(self,'video_only',False)
         from .motion_audio import playback_view
         p,self._motion_audio_view=playback_view(p,getattr(self,'_motion_audio_view',None))
+        index=p.runtime_index
+        nearby,active_transitions,_=index.playback(t)
         interval=max(8,round(1000/max(1,p.settings.fps)))
         if self.timer.interval()!=interval:self.timer.setInterval(interval)
-        sources={m.id:m.path for m in p.media}
+        source_revision=(id(p),p.__dict__.get('_edit_revision',0))
+        sources=(self._media_source_paths if getattr(self,'_source_revision',None)==source_revision
+                 else {m.id:m.path for m in p.media})
+        self._source_revision=source_revision
         previous=getattr(self,'_media_source_paths',{})
         changed={id for id,path in sources.items() if id in previous and previous[id]!=path}
         for key in list(self.decoders):
@@ -140,9 +149,9 @@ class TimelineTransport(QObject):
         if changed:
             self._worker_failed_media.difference_update(changed)
             self.previous_video.clear(); self.boundary_holds.clear()
-            for id in changed:
-                self.window.proxies.pop(id,None)
-                if hasattr(self.window,'preview_quality'):self.window.preview_quality.ready.pop(id,None)
+            for media_id in changed:
+                self.window.proxies.pop(media_id,None)
+                if hasattr(self.window,'preview_quality'):self.window.preview_quality.ready.pop(media_id,None)
         self._media_source_paths=sources
         caption_focus=getattr(preview,'caption_focus',False)
         is_different_project = (self._project is None or 
@@ -160,10 +169,10 @@ class TimelineTransport(QObject):
         # media without reopening the file. Protect every simultaneous active
         # clock and the already-warmed neighbours before choosing a candidate.
         self._required_video_keys=set(); self._protected_warm_video_keys=set()
-        transition_items={item_id for trans in (() if caption_focus else p.transitions) if trans.contains_time(t)
+        transition_items={item_id for trans in (() if caption_focus else active_transitions)
                           for item_id in (trans.left_item_id,trans.right_item_id) if item_id}
         if not caption_focus:
-            for item in p.timeline:
+            for item in nearby:
                 if item.track not in p.video_tracks or item.muted:continue
                 present=item.start<=t<item.start+item.duration or item.id in transition_items
                 neighbour=t<item.start<=t+.75 or t-.75<=item.start+item.duration<=t
@@ -181,7 +190,7 @@ class TimelineTransport(QObject):
         # active lane waits forever. Capacity is bounded by current clocks plus
         # the existing eight-neighbour warm limit, rather than timeline length.
         self.video_pool.setMaxThreadCount(max(12,len(self._required_video_keys)+8))
-        for item in p.timeline:
+        for item in nearby:
             if caption_focus and item.track not in p.audio_tracks:continue
             if item.muted or not item.start<=t<item.start+item.duration:continue
             state=p.track_states.get(item.track,{})
@@ -192,6 +201,10 @@ class TimelineTransport(QObject):
                 from pathlib import Path
                 if not Path(media.path).is_file():continue
             video=item.track in p.video_tracks
+            if video_only and not video:continue
+            if remote and video:
+                preview.active_frames[item.id]=(media.id,round(item.in_point-item.start*item.speed,4),item.speed,'video')
+                continue
             if not video and not (media.has_audio or media.kind=="audio"):continue
             quality=getattr(self.window,'preview_quality',None)
             if video and quality and self.needs_compatible(media):
@@ -206,6 +219,7 @@ class TimelineTransport(QObject):
             audio_path=self.processed_audio(item,media) if not video else ""
             key=(media.id,round(item.in_point-item.start*item.speed,4),item.speed,"video" if video else "audio:"+item.track+audio_path)
             active.add(key); desired=round(((t-item.start) if audio_path else item.source_time(t))*1000)
+            if video:self.ensure_video_backend(key,media)
             created=key not in self.decoders; reused=False
             if created:
                 if not video:self._meter_tracks[key]=item.track
@@ -246,7 +260,7 @@ class TimelineTransport(QObject):
             else:
                 elapsed=t-item.start; fade=min(1.,elapsed/item.fade_in) if item.fade_in else 1.
                 if item.fade_out:fade*=min(1.,max(0.,item.duration-elapsed)/item.fade_out)
-                duck=10**(p.settings.duck_amount_db/20) if item.role=="music" and p.settings.auto_duck and any(i.role=="source_audio" and not i.muted and i.start<=t<i.start+i.duration for i in p.timeline) else 1.
+                duck=10**(p.settings.duck_amount_db/20) if item.role=="music" and p.settings.auto_duck and any(i.role=="source_audio" and not i.muted and i.start<=t<i.start+i.duration for i in nearby) else 1.
                 output.setProperty('monitor_base_gain',0. if self.scrubbing else min(1.,10**(item.gain_db/20))*fade*duck)
                 output.setVolume(output.property('monitor_base_gain')*self.monitor_gain)
             # Aligned layout copies share a decoder. Native controls must share
@@ -262,7 +276,7 @@ class TimelineTransport(QObject):
                 player.play()
             elif not self.playing and key not in self._pending_video_seeks and player.playbackState()==QMediaPlayer.PlayingState:player.pause()
         # Keep decoders primed for clips in active transitions
-        for trans in (() if caption_focus else getattr(p, "transitions", [])):
+        for trans in (() if caption_focus else active_transitions):
             if trans.contains_time(t):
                 for item_id, is_outgoing in ((trans.left_item_id, True), (trans.right_item_id, False)):
                     item = p.item_by_id(item_id)
@@ -284,12 +298,16 @@ class TimelineTransport(QObject):
                     quality=getattr(self.window,'preview_quality',None)
                     if quality and self.needs_compatible(media):continue
                     key = (media.id, round(item.in_point - item.start * item.speed, 4), item.speed, "video")
+                    if remote:
+                        preview.active_frames[item.id]=key
+                        continue
                     active.add(key)
                     if is_outgoing:
                         desired_t = min(item.start + item.duration - 0.001, max(item.start, t))
                     else:
                         desired_t = max(item.start, min(item.start + item.duration - 0.001, t))
                     desired = round(item.source_time(desired_t) * 1000)
+                    self.ensure_video_backend(key,media)
                     created = key not in self.decoders
                     if created:
                         self.create_decoder(key, media, video, "")
@@ -310,7 +328,7 @@ class TimelineTransport(QObject):
         warm=set()
         if not self.scrubbing:
             lanes=set(); candidates=[]
-            for item in p.timeline:
+            for item in nearby:
                 if caption_focus and item.track not in p.audio_tracks:continue
                 if t<item.start<=t+.75:candidates.append((item.start-t,1,item,item.in_point))
                 elif t-.75<=item.start+item.duration<=t:candidates.append((t-item.start-item.duration,-1,item,item.source_time(item.start+item.duration)-item.speed/max(1,p.settings.fps)))
@@ -321,6 +339,7 @@ class TimelineTransport(QObject):
                 if item.muted or not state.get('visible',True) or state.get('muted',False):continue
                 media=p.media_by_id(item.media_id)
                 video=item.track in p.video_tracks
+                if remote and video or video_only and not video:continue
                 if not media or unavailable(media,item) or (media.kind!='video' if video else not (media.has_audio or media.kind=='audio')):continue
                 quality=getattr(self.window,'preview_quality',None)
                 if video and quality and self.needs_compatible(media):continue
@@ -332,6 +351,7 @@ class TimelineTransport(QObject):
                 if key in active or key in warm:continue
                 if len(warm)>=8:break
                 warm.add(key)
+                if video:self.ensure_video_backend(key,media)
                 created=key not in self.decoders
                 if created:
                     if not video:self._meter_tracks[key]=item.track
@@ -356,22 +376,39 @@ class TimelineTransport(QObject):
             if not self.frame_timer.isActive():self.frame_timer.start()
         else:self.frame_timer.stop()
         self.window.preview.update()
+        if remote:preview.gpu.sync_transport(force)
+
+    def ensure_video_backend(self,key,media):
+        gpu=getattr(self.window.preview,'gpu',None);decoder=self.decoders.get(key)
+        if not gpu or not decoder:return
+        texture=bool(getattr(decoder[2],'_kinetic_gpu_texture',False))
+        if texture==gpu.cpu_media(media.id):self.retire_decoder(key)
 
     def create_decoder(self,key,media,video,audio_path):
-        if video and not self.playing and self._reuse_video_decoder(key):return True
+        gpu=getattr(self.window.preview,'gpu',None)
+        if video and not gpu and not self.playing and self._reuse_video_decoder(key):return True
         from .video_worker import enabled_for, WorkerVideoPlayer
-        if video and enabled_for(self.window,media.id):
+        cpu_required=bool(video and gpu and gpu.cpu_media(media.id))
+        if video and media.id not in self._worker_failed_media and (cpu_required if gpu else enabled_for(self.window,media.id)):
             player=WorkerVideoPlayer(self,self.window.proxies.get(media.id,media.path))
             output=QAudioOutput(player)
             self.decoders[key]=(player,output,player); player._transport_key=key
             player.mediaStatusChanged.connect(lambda status,p=player:self.decoder_loaded(p._transport_key,p,status))
             return
+        if video and gpu and not cpu_required:
+            from .qt_native import LIB,NativeVideoPlayer
+            if LIB:
+                sink=gpu.create_source(key,media)
+                player=NativeVideoPlayer(self,sink,self.window.proxies.get(media.id,media.path));output=QAudioOutput(player)
+                self.decoders[key]=(player,output,sink);player._transport_key=key
+                player.mediaStatusChanged.connect(lambda status,p=player:self.decoder_loaded(p._transport_key,p,status))
+                return
         player=QMediaPlayer(self); output=QAudioOutput(player); player.setAudioOutput(output)
         if not video:
             buffer_output=QAudioBufferOutput(player)
             player.setAudioBufferOutput(buffer_output)
             buffer_output.audioBufferReceived.connect(lambda buffer,k=key:self.receive_audio_buffer(k,buffer),Qt.QueuedConnection)
-        sink=QVideoSink(player) if video else None
+        sink=(gpu.create_source(key,media) if gpu and not cpu_required else QVideoSink(player)) if video else None
         if sink:player.setVideoSink(sink); sink._frame_stamp=None
         self.decoders[key]=(player,output,sink)
         player._transport_key=key
@@ -436,6 +473,8 @@ class TimelineTransport(QObject):
     def position_decoder(self,key,milliseconds):
         player,_,sink=self.decoders[key]
         if sink:
+            gpu=getattr(self.window.preview,'gpu',None)
+            if gpu:gpu.freeze(key)
             self._frame_epoch+=1; self._frame_epochs[key]=self._frame_epoch
             sink._frame_stamp=None
             # setPosition during LoadingMedia may be ignored by Qt. Do not
@@ -508,6 +547,8 @@ class TimelineTransport(QObject):
             decoders=decoders[offset:]+decoders[:offset]; self._frame_cursor+=1
         for key,(player,_,sink) in decoders:
             if not sink:continue
+            from .qt_native import NativeVideoPlayer
+            if isinstance(player,NativeVideoPlayer):player.poll()
             from .video_worker import WorkerVideoPlayer
             if isinstance(player,WorkerVideoPlayer) and player.engine.error:
                 import logging
@@ -538,6 +579,12 @@ class TimelineTransport(QObject):
                 if self.playing and key not in self.warm_keys:
                     ceiling=max(floor,round((self.position*key[2]+key[1])*1_000_000))
                 if key in self._pending_video_seeks and stamp[0]>ceiling+350000:continue
+            gpu=getattr(self.window.preview,'gpu',None)
+            if gpu and getattr(sink,'_kinetic_gpu_texture',False):
+                if (not self.playing or key in self.warm_keys) and player.playbackState()==QMediaPlayer.PlayingState:player.pause()
+                gpu.admit(key,frame,self._video_seek_started.get(key))
+                sink._frame_stamp=stamp;self._seek_frame_ready(key)
+                continue
             # Backpressure precedes readback: no unbounded queue or wasted GPU
             # downloads while pixel processing is still busy. Native frames
             # remain entirely on their owning thread (including conversion).
@@ -548,14 +595,29 @@ class TimelineTransport(QObject):
             if (not self.playing or key in self.warm_keys) and player.playbackState()==QMediaPlayer.PlayingState:
                 player.pause()
             from .video_worker import CpuFrame
-            image=frame.toImage() if isinstance(frame,CpuFrame) else frame.toImage().copy()
+            if not isinstance(frame,CpuFrame):
+                # The rare Qt/software compatibility path may require a GPU
+                # download. Keep it single-flight/bounded and off the GUI just
+                # like pixel preparation, with the same seek-generation gate.
+                from PySide6.QtMultimedia import QVideoFrame
+                from concurrent.futures import ThreadPoolExecutor
+                if self._frame_executor is None:self._frame_executor=ThreadPoolExecutor(max_workers=2,thread_name_prefix='preview-pixels')
+                retained=QVideoFrame(frame)
+                def readback(retained=retained):return retained.toImage().copy(),{}
+                future=self._frame_executor.submit(readback)
+                future._kinetic_interactive=bool(self.playing or self.scrubbing)
+                self._frame_sequence+=1
+                self._frame_jobs.append((key,self._frame_epochs.get(key,0),self._frame_sequence,future));sink._frame_stamp=stamp
+                if not self.result_timer.isActive():self.result_timer.start()
+                continue
+            image=frame.toImage()
             if image.isNull():continue
             self._frame_sequence+=1; sequence=self._frame_sequence
             prepare=getattr(self.window.preview,'frame_work',None)
             composed=(isinstance(player,WorkerVideoPlayer) and self.playing
                       and not self.window.preview.transform_controls_visible
                       and not self.window.preview.composition_cache.closed)
-            work=prepare(key,image) if prepare and key not in self._cpu_frame_fallback and not composed else None
+            work=prepare(key,image) if not gpu and prepare and key not in self._cpu_frame_fallback and not composed else None
             if work:
                 from .preview_raster import prepare_frame
                 if self._frame_executor is None:
@@ -586,6 +648,8 @@ class TimelineTransport(QObject):
             except Exception:
                 self._cpu_frame_fallback.add(key); self.decoders[key][2]._frame_stamp=None
                 continue
+            if image.isNull():
+                self.decoders[key][2]._frame_stamp=None;continue
             self._published_sequences[key]=sequence; self._seek_frame_ready(key)
             self.window.preview.effect_cache.update(cache)
             while len(self.window.preview.effect_cache)>16:
@@ -607,6 +671,11 @@ class TimelineTransport(QObject):
         self.window.preview.frames.pop(key,None)
         if not decoder:return
         player,output,sink=decoder
+        gpu=getattr(self.window.preview,'gpu',None)
+        if gpu and getattr(sink,'_kinetic_gpu_texture',False):
+            from .qt_native import NativeVideoPlayer
+            if isinstance(player,NativeVideoPlayer):player.stop();gpu.retire(key,player.engine)
+            else:player.setVideoSink(None);gpu.retire(key)
         # Unpublish before stopping: backend notifications may arrive in cleanup.
         output.setMuted(True)
         # Invoke the C++ slots from Qt's event loop, outside the Python edit
@@ -653,6 +722,8 @@ class TimelineTransport(QObject):
     def frame(self,key,image):
         if key not in self.decoders or image.isNull():return
         self.window.preview.frames[key]=image
+        gpu=getattr(self.window.preview,'gpu',None)
+        if gpu:gpu.cpu_frame(key,image)
         if key not in self.warm_keys:
             self.window.preview.set_frame(image); self.boundary_holds.pop(key,None)
             self._seek_holds={hold_key:value for hold_key,value in self._seek_holds.items() if hold_key[0]!=key}
@@ -678,3 +749,14 @@ class TimelineTransport(QObject):
         self._scrub_decoder_targets.clear(); self._seek_holds.clear()
         self.warm_keys.clear(); self.previous_video.clear(); self.boundary_holds.clear(); self.window.preview.fallback_frames={}
         for key in list(self.decoders):self.retire_decoder(key)
+        gpu=getattr(self.window.preview,'gpu',None)
+        if gpu:
+            from .qt_native import active
+            gpu.suspend()
+            if not active():gpu.close()
+        timeline_gpu=getattr(getattr(self.window,'timeline',None),'gpu',None)
+        if timeline_gpu:timeline_gpu.close()
+
+    def finish_gpu_shutdown(self):
+        gpu=getattr(self.window.preview,'gpu',None)
+        if gpu:gpu.close()

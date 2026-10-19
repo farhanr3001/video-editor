@@ -10,6 +10,39 @@ from kinetic_cut.ui import MainWindow
 
 
 class HistorySafetyTests(unittest.TestCase):
+    def test_large_commit_compares_once_and_captures_nested_edits_without_touch(self):
+        project=Project(timeline=[TimelineItem(str(n),'missing','video_1',n,1) for n in range(1000)])
+        self.w.set_project(project);before=self.w._history[-1];calls=[];equal=TimelineItem.__eq__
+        project.timeline[-1].transform.scale=2
+        def counted(a,b):calls.append(1);return equal(a,b)
+        with patch.object(TimelineItem,'__eq__',counted):self.w.commit_history()
+        self.assertLess(len(calls),1500)
+        self.assertEqual(before.timeline[-1].transform.scale,1)
+        self.assertEqual(self.w._history[-1].timeline[-1].transform.scale,2)
+        self.assertIs(before.settings,self.w._history[-1].settings)
+        count=len(self.w._history);project.playhead=10;project.touch();self.w.commit_history()
+        self.assertEqual(len(self.w._history),count)
+        project.timeline[-1].effects.append({'name':'Gaussian Blur','horizontal':12})
+        self.w.commit_history();self.assertEqual(len(self.w._history),count+1)
+        self.assertEqual(self.w._history[-2].timeline[-1].effects,[])
+        project.timeline.reverse();self.w.commit_history();self.assertEqual(self.w._history[-1].timeline[0].id,'999')
+        self.w.undo();self.assertEqual(self.w.project.timeline[0].id,'0')
+
+    def test_shared_undo_records_do_not_accumulate_live_index_observers(self):
+        project=Project(timeline=[TimelineItem(str(n),'missing','video_1',n,1) for n in range(2000)])
+        self.w.set_project(project)
+        for n in range(12):
+            project.timeline[0].gain_db=-n-1;self.w.commit_history()
+        unchanged=self.w._history[-1].timeline[500]
+        self.assertIs(unchanged,self.w._history[0].timeline[500])
+        self.assertLessEqual(sum(ref() is not None for ref in unchanged.__dict__.get('_index_owners',())),1)
+        self.assertTrue(self.w._history[-1].__dict__['_history_snapshot'])
+        self.w.undo();live=self.w.project;live.runtime_index
+        self.assertNotIn('_history_snapshot',live.__dict__)
+        live.timeline[500].duration=5000
+        self.assertEqual(live.duration,5500);self.assertEqual(unchanged.duration,1)
+        self.assertNotIn('_history_snapshot',self.w._history[-1].to_dict())
+
     def setUp(self):
         self.w = MainWindow()
         self.w.autosave_timer.stop()

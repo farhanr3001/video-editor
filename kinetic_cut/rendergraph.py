@@ -39,6 +39,8 @@ def audio_filters(item):
 
 
 def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffmpeg",ass_path=None,export_audio=True,prepared=None,window=None,transparent=False):
+    from .animated_transitions import NAMES as paired_names
+    if any(t.name in paired_names and t.track in project.video_tracks and project.track_states.get(t.track,{}).get('visible',True) for t in project.transitions):raise ValueError('Paired transitions require exact export preparation')
     from .motion_audio import expanded
     project=expanded(project)
     from .exporter import _crop_filter,_target_size,_flip_filter,_encoder,_escape_ass_path
@@ -117,6 +119,57 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
                 names=[f'shared{n}_{k}' for k in range(source_counts[shared])]
                 filters.append(f'[{source}]split={len(names)}'+''.join(f'[{name}]' for name in names))
                 source=names.pop(0); shared_sources[shared]=names
+        pixels_baked=False
+        from .finishing_effects import CONTROLS as FINISHING_CONTROLS
+        finishing=not enhanced and item.role!='background' and any(e.get('enabled',True) and e.get('name') in FINISHING_CONTROLS for e in item.effects)
+        lw,lh=_target_size(item,media,width,.92 if item.role=="facecam" else 1.,height)
+        def pixel_stack(label,effect_clock):
+            for en,effect in enumerate(item.effects):
+                if enhanced:continue
+                if not effect.get("enabled",True):continue
+                from .effects import MATRICES, color_filter
+                if effect.get("name") in MATRICES:
+                    out=f"fx{n}_{en}"; filters.append(f"[{label}]{color_filter(effect)}[{out}]"); label=out; continue
+                from .creative_effects import NAMES as CREATIVE_NAMES, filter_string as creative_filter, clock_offset
+                if effect.get("name") in CREATIVE_NAMES:
+                    out=f"fx{n}_{en}"; clock=f"({effect_clock})+{clock_offset(effect,item):.10f}"
+                    filters.append(f"[{label}]{creative_filter(effect,clock)}[{out}]");label=out;continue
+                if effect.get("name")!="Gaussian Blur":continue
+                blurx=max(.01,effect.get("horizontal",12)); blury=max(.01,effect.get("vertical",12)); blend=effect.get("blend",100)/100
+                out=f"fx{n}_{en}"
+                border="reflect" if effect.get("border","Reflect")=="Reflect" else "smear"
+                padding=max(2,min(64,round(max(blurx,blury)*2)))
+                # Broad Gaussian kernels contain little high-frequency detail. Work
+                # at a reduced resolution, then reconstruct; keep small kernels exact.
+                factor=min(4,max(1,int(min(blurx,blury)/12)))
+                if abs(item.transform.rotation)>.01 or animated:factor=1
+                blur=f"pad=iw+{padding*2}:ih+{padding*2}:{padding}:{padding},fillborders=left={padding}:right={padding}:top={padding}:bottom={padding}:mode={border}"
+                if factor>1:
+                    # Both dimensions are known before rotation. A split feeding
+                    # scale2ref can deadlock at EOF when its blur branch buffers
+                    # frames. A single-input chain has no cyclic framesync wait.
+                    padded_w=(width if item.role=='background' else lw)+padding*2
+                    padded_h=(height if item.role=='background' else lh)+padding*2
+                    blur+=f",scale={max(2,padded_w//factor)}:{max(2,padded_h//factor)}:flags=area,gblur=sigma={blurx/factor:.4f}:sigmaV={blury/factor:.4f},scale={padded_w}:{padded_h}:flags=bilinear,"
+                else:blur+=f",gblur=sigma={blurx:.4f}:sigmaV={blury:.4f},"
+                blur+=f"crop=iw-{padding*2}:ih-{padding*2}:{padding}:{padding}"
+                if blend>=.999:filters.append(f"[{label}]{blur}[{out}]")
+                else:
+                    filters.append(f"[{label}]split[fxorig{n}_{en}][fxin{n}_{en}]"); filters.append(f"[fxin{n}_{en}]{blur}[fxblur{n}_{en}]")
+                    filters.append(f"[fxorig{n}_{en}][fxblur{n}_{en}]blend=all_expr='A*(1-{blend:.4f})+B*{blend:.4f}'[{out}]")
+                label=out
+            return label
+        if finishing:
+            prefix=('null' if processed else _crop_filter(item))+f',scale={lw}:{lh},format=rgba,setpts=PTS-STARTPTS'
+            from .chroma import NAMES as KEY_NAMES,filter_string as key_filter
+            keys=[key_filter(e) for e in item.effects if e.get('enabled',True) and e.get('name') in KEY_NAMES]
+            if keys:prefix=','.join(keys)+','+prefix
+            if item.grayscale:prefix+=',hue=s=0'
+            if abs(item.brightness)>.0001 or abs(item.contrast-1)>.0001 or abs(item.saturation-1)>.0001:prefix+=f',eq=brightness={item.brightness:.5f}:contrast={item.contrast:.5f}:saturation={item.saturation:.5f}'
+            if item.sharpen>.0001:prefix+=f',unsharp=5:5:{min(5,max(0,item.sharpen*2)):.4f}:5:5:0'
+            label=f'finishingSource{n}';filters.append(f'[{source}]{prefix}[{label}]')
+            source=pixel_stack(label,f'T/{item.speed:.10f}+{elapsed:.10f}')
+            pixels_baked=True
         if item.role=="background":
             chain=f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},gblur=sigma={max(.01,project.settings.blur):.3f},eq=brightness={project.settings.background_brightness-1:.3f}:contrast={project.settings.background_contrast:.3f},format=rgba"
             if animated:
@@ -129,12 +182,12 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
             lw,lh=_target_size(item,media,width,.92 if item.role=="facecam" else 1.,height)
             # Never shrink static geometry: that changes framing relative to the
             # viewer. Large ordinary layers sample only their visible source ROI.
-            chain=f"{'null' if processed else _crop_filter(item)},scale={lw}:{lh}{_flip_filter(item)},format={pixel_format}"
+            chain=f"{'null' if processed or pixels_baked else _crop_filter(item)},scale={lw}:{lh}{_flip_filter(item)},format={pixel_format}"
             if animated:
                 crop=item.crop.clamped(); factor=max(width/max(1,media.width),height/max(1,media.height))*(.92 if item.role=='facecam' else 1.)
                 sx=f'max(32,min(8192,round({media.width*crop.width*factor:.10g}*({curve("scale")})/2)*2))'
                 sy=f'max(32,min(8192,round({media.height*crop.height*factor:.10g}*({curve("scale_y")})/2)*2))'
-                chain=f'setpts=(PTS-STARTPTS)/{item.speed:.8f}+{elapsed:.8f}/TB,'+('null' if processed else _crop_filter(item))+f",scale=w='{sx}':h='{sy}':eval=frame{_flip_filter(item)},format=rgba"
+                chain=f'setpts=(PTS-STARTPTS)/{item.speed:.8f}+{elapsed:.8f}/TB,'+('null' if processed or pixels_baked else _crop_filter(item))+f",scale=w='{sx}':h='{sy}':eval=frame{_flip_filter(item)},format=rgba"
                 chain+=stable_canvas(media.width*crop.width*factor,media.height*crop.height*factor)
             if animated:
                 aw=f'{media.width*crop.width*factor:.10g}*({curve("scale","T")})'; ah=f'{media.height*crop.height*factor:.10g}*({curve("scale_y","T")})'
@@ -168,11 +221,11 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
                     rx,ry,rw,rh,lw,lh,ox,oy=region
                     chain=f"null{_flip_filter(item)},crop={rw}:{rh}:{rx}:{ry},scale={lw}:{lh},format={pixel_format}"
         from .chroma import NAMES,filter_string
-        keys=[filter_string(effect) for effect in item.effects if not enhanced and effect.get("enabled",True) and effect.get("name") in NAMES]
+        keys=[filter_string(effect) for effect in item.effects if not enhanced and not pixels_baked and effect.get("enabled",True) and effect.get("name") in NAMES]
         if keys:chain=",".join(keys)+","+chain
-        if item.grayscale and not enhanced:chain+=",hue=s=0"
-        if not enhanced and (abs(item.brightness)>.0001 or abs(item.contrast-1)>.0001 or abs(item.saturation-1)>.0001):chain+=f",eq=brightness={item.brightness:.5f}:contrast={item.contrast:.5f}:saturation={item.saturation:.5f}"
-        if item.sharpen>.0001 and not enhanced:
+        if item.grayscale and not enhanced and not pixels_baked:chain+=",hue=s=0"
+        if not enhanced and not pixels_baked and (abs(item.brightness)>.0001 or abs(item.contrast-1)>.0001 or abs(item.saturation-1)>.0001):chain+=f",eq=brightness={item.brightness:.5f}:contrast={item.contrast:.5f}:saturation={item.saturation:.5f}"
+        if item.sharpen>.0001 and not enhanced and not pixels_baked:
             amount=min(5,max(0,item.sharpen*2)); chain+=f",unsharp=5:5:{amount:.4f}:5:5:0"
         if not animated:
             chain+=f",setpts=(PTS-STARTPTS)/{item.speed:.8f}"
@@ -194,36 +247,7 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
         elif not opaque:chain+=f",colorchannelmixer=aa={max(0,min(1,item.opacity/100)):.6f}"
         chain+=f",setpts=PTS+{item.start-origin:.6f}/TB"
         label=f"layer{n}"; filters.append(f"[{source}]{chain}[{label}]")
-        for en,effect in enumerate(item.effects):
-            if enhanced:continue
-            if not effect.get("enabled",True):continue
-            from .effects import MATRICES, color_filter
-            if effect.get("name") in MATRICES:
-                out=f"fx{n}_{en}"; filters.append(f"[{label}]{color_filter(effect)}[{out}]"); label=out; continue
-            if effect.get("name")!="Gaussian Blur":continue
-            blurx=max(.01,effect.get("horizontal",12)); blury=max(.01,effect.get("vertical",12)); blend=effect.get("blend",100)/100
-            out=f"fx{n}_{en}"
-            border="reflect" if effect.get("border","Reflect")=="Reflect" else "smear"
-            padding=max(2,min(64,round(max(blurx,blury)*2)))
-            # Broad Gaussian kernels contain little high-frequency detail. Work
-            # at a reduced resolution, then reconstruct; keep small kernels exact.
-            factor=min(4,max(1,int(min(blurx,blury)/12)))
-            if abs(item.transform.rotation)>.01 or animated:factor=1
-            blur=f"pad=iw+{padding*2}:ih+{padding*2}:{padding}:{padding},fillborders=left={padding}:right={padding}:top={padding}:bottom={padding}:mode={border}"
-            if factor>1:
-                # Both dimensions are known before rotation. A split feeding
-                # scale2ref can deadlock at EOF when its blur branch buffers
-                # frames. A single-input chain has no cyclic framesync wait.
-                padded_w=(width if item.role=='background' else lw)+padding*2
-                padded_h=(height if item.role=='background' else lh)+padding*2
-                blur+=f",scale={max(2,padded_w//factor)}:{max(2,padded_h//factor)}:flags=area,gblur=sigma={blurx/factor:.4f}:sigmaV={blury/factor:.4f},scale={padded_w}:{padded_h}:flags=bilinear,"
-            else:blur+=f",gblur=sigma={blurx:.4f}:sigmaV={blury:.4f},"
-            blur+=f"crop=iw-{padding*2}:ih-{padding*2}:{padding}:{padding}"
-            if blend>=.999:filters.append(f"[{label}]{blur}[{out}]")
-            else:
-                filters.append(f"[{label}]split[fxorig{n}_{en}][fxin{n}_{en}]"); filters.append(f"[fxin{n}_{en}]{blur}[fxblur{n}_{en}]")
-                filters.append(f"[fxorig{n}_{en}][fxblur{n}_{en}]blend=all_expr='A*(1-{blend:.4f})+B*{blend:.4f}'[{out}]")
-            label=out
+        if not pixels_baked:label=pixel_stack(label,f"T+{origin-item.start:.10f}")
         out=f"video{n}"
         start_enable = item.start
         end_enable = item.start + item.duration
@@ -233,6 +257,8 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
             if trans.left_item_id == item.id:
                 end_enable = max(end_enable, trans.start + trans.duration)
         enable=f"gte(t,{start_enable-origin:.6f})*lt(t,{end_enable-origin:.6f})"
+        for lo,hi in getattr(project,'_transition_exclusions',{}).get(item.id,[]):
+            enable+=f"*not(gte(t,{lo-origin:.9f})*lt(t,{hi-origin:.9f}))"
         repeatlast="1" if media.kind=="image" else "0"
         xpos=f'{ox:.4f}'; ypos=f'{oy:.4f}'
         if animated:
@@ -257,29 +283,33 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
         fonts=_escape_ass_path(str(resource_path('assets','fonts')))
         filters.append(f"[{current}]ass='{_escape_ass_path(ass_path)}':fontsdir='{fonts}'{':alpha=1' if transparent else ''}[captions]"); current="captions"
     filters.append(f"[{current}]fps={fps},format={'rgba' if transparent else 'yuv420p'}[vout]")
-    labels=[]
-    if export_audio:
-        for n,item in enumerate(i for i in project.timeline if i.track in project.audio_tracks and not i.muted and project.track_states.get(i.track,{}).get("visible",True) and not project.track_states.get(i.track,{}).get("muted",False)):
-            media=project.media_by_id(item.media_id)
-            if not media or not (media.has_audio or media.kind=="audio"):continue
-            args += ["-ss",f"{item.in_point:.6f}","-t",f"{item.source_duration:.6f}","-i",media.path]
-            chain=audio_filters(item)
-            if project.settings.noise_reduction:chain+=",afftdn=nf=-25"
-            chain+=f",adelay={round(item.start*1000)}:all=1"; label=f"audio{n}"; filters.append(f"[{index}:a]{chain}[{label}]"); index+=1; labels.append((label,item.role))
-        filters.append(f"anullsrc=r=48000:cl=stereo:d={duration:.6f}[silence]")
-        speech=[label for label,role in labels if role!="music"]; music=[label for label,role in labels if role=="music"]
-        filters.append("[silence]"+"".join(f"[{label}]" for label in speech)+f"amix=inputs={len(speech)+1}:duration=first:normalize=0[speechmix]")
-        if music:
-            filters.append("".join(f"[{label}]" for label in music)+f"amix=inputs={len(music)}:duration=longest:normalize=0[musicmix]")
-            if project.settings.auto_duck and speech:
-                filters.append("[speechmix]asplit[speechmain][sidechain]"); filters.append("[musicmix][sidechain]sidechaincompress=threshold=0.045:ratio=6:attack=15:release=280[ducked]")
-                filters.append("[speechmain][ducked]amix=inputs=2:duration=first:normalize=0[audiomix]")
-            else:filters.append("[speechmix][musicmix]amix=inputs=2:duration=first:normalize=0[audiomix]")
-        else:filters.append("[speechmix]anull[audiomix]")
-        final="audiomix"
-        if project.settings.normalize_audio:filters.append("[audiomix]loudnorm=I=-14:TP=-1.5:LRA=11[normalized]"); final="normalized"
+    final=append_audio(project,args,filters,index,duration) if export_audio else None
     args += ["-filter_complex_threads","2","-filter_complex",";".join(filters),"-map","[vout]"]
     if export_audio:args += ["-map",f"[{final}]","-c:a","aac","-b:a",f"{preset.audio_kbps}k"]
-    encoder,_=_encoder(preset.codec,"CPU" if hardware=="Auto" else hardware)
-    args += encoder+["-b:v",f"{preset.bitrate_mbps:g}M","-maxrate",f"{preset.bitrate_mbps*1.3:g}M","-bufsize",f"{preset.bitrate_mbps*2:g}M","-movflags","+faststart","-t",f"{duration:.6f}","-progress","pipe:1","-nostats",output]
+    from .exporter import encoding_options
+    args += encoding_options(preset,"CPU" if hardware=="Auto" else hardware)+["-movflags","+faststart","-t",f"{duration:.6f}","-progress","pipe:1","-nostats",output]
     return args
+
+
+def append_audio(project,args,filters,index,duration):
+    labels=[]
+    for n,item in enumerate(i for i in project.timeline if i.track in project.audio_tracks and not i.muted and project.track_states.get(i.track,{}).get("visible",True) and not project.track_states.get(i.track,{}).get("muted",False)):
+        media=project.media_by_id(item.media_id)
+        if not media or not (media.has_audio or media.kind=="audio"):continue
+        args += ["-ss",f"{item.in_point:.6f}","-t",f"{item.source_duration:.6f}","-i",media.path]
+        chain=audio_filters(item)
+        if project.settings.noise_reduction:chain+=",afftdn=nf=-25"
+        chain+=f",adelay={round(item.start*1000)}:all=1"; label=f"audio{n}"; filters.append(f"[{index}:a]{chain}[{label}]"); index+=1; labels.append((label,item.role))
+    filters.append(f"anullsrc=r=48000:cl=stereo:d={duration:.6f}[silence]")
+    speech=[label for label,role in labels if role!="music"]; music=[label for label,role in labels if role=="music"]
+    filters.append("[silence]"+"".join(f"[{label}]" for label in speech)+f"amix=inputs={len(speech)+1}:duration=first:normalize=0[speechmix]")
+    if music:
+        filters.append("".join(f"[{label}]" for label in music)+f"amix=inputs={len(music)}:duration=longest:normalize=0[musicmix]")
+        if project.settings.auto_duck and speech:
+            filters.append("[speechmix]asplit[speechmain][sidechain]"); filters.append("[musicmix][sidechain]sidechaincompress=threshold=0.045:ratio=6:attack=15:release=280[ducked]")
+            filters.append("[speechmain][ducked]amix=inputs=2:duration=first:normalize=0[audiomix]")
+        else:filters.append("[speechmix][musicmix]amix=inputs=2:duration=first:normalize=0[audiomix]")
+    else:filters.append("[speechmix]anull[audiomix]")
+    final="audiomix"
+    if project.settings.normalize_audio:filters.append("[audiomix]loudnorm=I=-14:TP=-1.5:LRA=11[normalized]"); final="normalized"
+    return final

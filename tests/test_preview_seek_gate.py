@@ -11,13 +11,14 @@ class PreviewSeekGateTests(unittest.TestCase):
     def setUp(self):
         self.w=MainWindow(); self.w.autosave_timer.stop(); self.t=self.w.transport
         self.key=('source',30.,1.,'video'); self.player=Mock(); self.sink=Mock(); self.sink._frame_stamp=None
-        self.frame=Mock(); self.frame.isValid.return_value=True
-        image=QImage(8,8,QImage.Format_RGB32); image.fill(Qt.blue); self.frame.toImage.return_value=image
+        from kinetic_cut.video_worker import CpuFrame
+        image=QImage(8,8,QImage.Format_RGB32);image.fill(Qt.blue)
+        self.frame=CpuFrame(image);self.frame.toImage=Mock(wraps=self.frame.toImage)
         self.sink.videoFrame.return_value=self.frame; self.t.decoders[self.key]=(self.player,Mock(),self.sink)
     def tearDown(self):
         with patch('kinetic_cut.transport.QMetaObject.invokeMethod'):self.w.close()
         self.w.deleteLater()
-    def stamp(self,start,end):self.frame.startTime.return_value=start; self.frame.endTime.return_value=end
+    def stamp(self,start,end):self.frame.start=start;self.frame.end=end
     def test_loading_source_zero_never_published_or_paused(self):
         self.player.mediaStatus.return_value=QMediaPlayer.LoadingMedia
         self.t.position_decoder(self.key,31102); self.stamp(83000,100000)

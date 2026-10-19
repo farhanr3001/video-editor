@@ -84,6 +84,8 @@ def expanded(project):
 
 
 def playback_view(project,previous=None):
+    revision=(id(project),project.__dict__.get('_edit_revision',0),repr(project.track_states))
+    if previous and previous[0]==revision:return previous[1],previous
     signature=[]
     for item in project.timeline:
         scene=item.graphic_data.get('scene',{}) if item.role=='graphic' else {}
@@ -91,11 +93,9 @@ def playback_view(project,previous=None):
         signature.append((item.id,item.start,item.duration,item.in_point,item.speed,item.muted,
                           repr(project.track_states.get(item.track,{})),repr(scene['sound_cues']),
                           repr([(n['id'],n.get('start'),n.get('end'),n.get('keyframes')) for n in scene.get('nodes',[])])))
-    if not signature:return project,None
-    key=(id(project),tuple(signature))
-    if previous and previous[0]==key:return previous[1],previous
+    if not signature:return project,(revision,project)
     view=expanded(project)
-    return view,(key,view)
+    return view,(revision,view)
 
 
 def rebase(scene,base,relative=False):

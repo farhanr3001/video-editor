@@ -22,6 +22,7 @@ class ExportPreset:
     bitrate_mbps: float
     audio_kbps: int
     description: str
+    quality: str = 'bitrate'
 
 
 PRESETS = {
@@ -72,6 +73,21 @@ def _encoder(codec: str, hardware: str) -> tuple[list[str], str]:
     if hardware == "AMD":
         return (["-c:v", "hevc_amf" if codec == "h265" else "h264_amf", "-quality", "balanced"], "amf")
     return (["-c:v", "libx265" if codec == "h265" else "libx264", "-preset", "veryfast"], "cpu")
+
+
+def automatic_bitrate(settings,codec='h264'):
+    """Planning estimate/cap only; automatic export uses constant quality."""
+    return max(2.,min(150.,settings.width*settings.height*settings.fps*(.075 if codec=='h265' else .12)/1_000_000))
+
+
+def encoding_options(preset,hardware):
+    encoder,backend=_encoder(preset.codec,hardware)
+    rate=preset.bitrate_mbps
+    if preset.quality!='auto':return encoder+['-b:v',f'{rate:g}M','-maxrate',f'{rate*1.3:g}M','-bufsize',f'{rate*2:g}M']
+    if backend=='nvenc':return encoder+['-cq','19','-b:v','0','-maxrate',f'{rate*2:g}M','-bufsize',f'{rate*4:g}M','-spatial-aq','1','-aq-strength','8']
+    if backend=='qsv':return encoder+['-global_quality','20']
+    if backend=='amf':return encoder+['-rc','cqp','-qp_i','19','-qp_p','21']
+    return encoder+['-crf','22' if preset.codec=='h265' else '19','-maxrate',f'{rate*2:g}M','-bufsize',f'{rate*4:g}M']
 
 
 @lru_cache(maxsize=12)
@@ -136,6 +152,34 @@ def _export_prepared(project,output,preset,burn_captions,hardware,ffmpeg,progres
     from .vision_effects import prepare_export
     prepared=prepare_export(project,ffmpeg,progress,cancel)
     with tempfile.TemporaryDirectory(prefix=".kinetic-export-",dir=str(Path(output).parent)) as directory:
+        if os.name=='nt' and hardware=='NVIDIA' and not lossless:
+            from .gpu_export import prepare_recipe,render_native,mux_command,Unsupported
+            from .icons import resource_path
+            if resource_path('assets','native','gpu_export.dll').is_file():
+                try:gpu_job=prepare_recipe(project,preset,directory,burn_captions,prepared,ffmpeg,progress,cancel)
+                except Unsupported as reason:
+                    if progress:progress(0,'Compatibility rendering required · '+str(reason))
+                else:
+                    try:
+                        render_native(gpu_job,directory,progress,cancel)
+                        pending=str(Path(directory)/'render.mp4')
+                        from .export_process import render
+                        final_progress=(lambda value,text:progress(.9+.1*value,'Finalising audio · '+text)) if progress else None
+                        code,tail=render(mux_command(project,gpu_job,pending,preset,ffmpeg,export_audio),project.duration,final_progress,cancel)
+                        if code:raise RuntimeError('GPU export mux failed:\n'+'\n'.join(tail)[-3000:])
+                        if cancel and cancel.is_set():raise RuntimeError('Export cancelled. Previous output is unchanged.')
+                        os.replace(pending,output)
+                        if progress:progress(1.,'Export complete · Direct3D11 composition / NVENC')
+                        return
+                    except RuntimeError as error:
+                        if cancel and cancel.is_set():raise
+                        from .config import CACHE_DIR
+                        import json
+                        logs=CACHE_DIR/'render-logs';logs.mkdir(parents=True,exist_ok=True)
+                        (logs/(str(time.time_ns())+'-gpu-fallback.json')).write_text(json.dumps(dict(error=str(error),encoder=hardware,composition='CPU compatibility fallback'),indent=2),encoding='utf-8')
+                        if progress:progress(0,'Native GPU path unavailable; using compatibility rendering with '+hardware+' encoding…')
+        from .transition_export import prepare as prepare_transitions
+        project=prepare_transitions(project,directory,preset,ffmpeg,prepared,progress,cancel)
         from .render_batches import needed,prepare
         batched=needed(project)
         render_project=prepare(project,directory,preset,ffmpeg,prepared,progress,cancel,transparent=lossless) if batched else project

@@ -39,7 +39,7 @@ def render(context, rect, size, scale):
     painter=QPainter(image)
     painter.setRenderHints(QPainter.Antialiasing|QPainter.SmoothPixmapTransform)
     try:
-        painter.fillRect(rect,Qt.black)
+        if not getattr(context,'transparent',False):painter.fillRect(rect,Qt.black)
         _,notice=context._paint_scene(painter,rect)
     finally: painter.end()
     return image,context.text_rects,notice

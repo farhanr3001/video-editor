@@ -128,3 +128,23 @@ Source: https://github.com/xinntao/Real-ESRGAN/blob/master/realesrgan/archs/srvg
 Modifications: standalone architecture without BasicSR registration; bounded inference,
 small-crop whole-frame execution, motion-checked finishing and GPU duty scheduling.
 Official compact general/weak-denoise weights are optional explicit downloads.
+
+
+## Native GPU export interface
+
+The native exporter uses NVIDIA's NVENC API declaration header from
+FFmpeg/nv-codec-headers n12.1.14.0 (native/third_party/nvEncodeAPI.h).
+Copyright (c) 2010-2023 NVIDIA Corporation. The complete permissive license
+is retained in that header. NVIDIA's driver supplies nvEncodeAPI64.dll;
+no NVIDIA driver binary is redistributed by this project.
+Upstream: https://github.com/FFmpeg/nv-codec-headers/tree/n12.1.14.0
+
+## English caption word alignment
+
+Wav2Vec2 Base 960h, Meta / Facebook AI Research, Apache-2.0.
+Upstream: https://huggingface.co/facebook/wav2vec2-base-960h
+Quantized ONNX conversion: https://huggingface.co/Xenova/wav2vec2-base-960h
+Revision a19f851b3d42865797e410752b4c570c871e4825, model_quantized.onnx.
+The build pins the complete model SHA-256 in assets/caption-alignment/source.json.
+Full Apache-2.0 text: assets/licenses/AI-Enhance-Apache-2.0.txt.
+Used locally for forced alignment of recognized words; no cloud transcription.

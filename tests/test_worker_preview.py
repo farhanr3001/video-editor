@@ -138,6 +138,15 @@ class WorkerDecodeTests(unittest.TestCase):
 
 
 class WorkerCompositionTests(unittest.TestCase):
+    def test_windowed_worker_starts_without_a_console_error_stream(self):
+        from unittest.mock import Mock
+        from kinetic_cut.preview_process import child
+        connection=Mock();connection.recv.side_effect=EOFError
+        app=Mock()
+        with patch('sys.stderr',None),patch('faulthandler.enable') as faults,patch('PySide6.QtGui.QGuiApplication',return_value=app),patch('kinetic_cut.caption_fonts.load_fonts'):
+            child(connection)
+        faults.assert_not_called();connection.close.assert_called_once();app.quit.assert_called_once()
+
     def setUp(self):
         self.app=QApplication.instance() or QApplication([])
         self.canvas=PreviewCanvas(); self.canvas.resize(320,480)

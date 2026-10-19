@@ -94,6 +94,7 @@ class PreviewCanvas(QWidget):
     def __init__(self):
         super().__init__()
         self.project: Project | None = None
+        self.gpu=None
         self.frame = QImage()
         self.frames = {}; self.active_frames = {}
         self.view_zoom=1.; self.view_pan=QPointF(); self.pan_origin=None
@@ -133,6 +134,11 @@ class PreviewCanvas(QWidget):
     def set_tool(self, tool: str):
         self.tool = tool
         self.setCursor(Qt.CrossCursor if tool == "crop" else Qt.ArrowCursor)
+
+    def update(self,*args):
+        gpu=getattr(self,'gpu',None)
+        if gpu and not gpu.closed:gpu.schedule()
+        super().update(*args)
 
     def set_transform_controls_visible(self, visible: bool):
         self.transform_controls_visible = bool(visible)
@@ -201,13 +207,21 @@ class PreviewCanvas(QWidget):
             return None
         if not self.project.track_states.get(track,{}).get("visible",True):return None
         t = self.project.playhead
-        return next((i for i in reversed(self.project.timeline)
+        return next((i for i in reversed(self.project.runtime_index.playback(t)[0])
                      if i.track == track and i.start <= t < i.start + i.duration and not i.muted), None)
 
     def _visible_items(self) -> list[tuple[TimelineItem, QImage, QRectF]]:
         if getattr(self,'caption_focus',False):return []
         if not self.project:
             return []
+        gpu=getattr(self,'gpu',None)
+        if gpu and not gpu.closed:
+            visible=list(gpu.targets)
+            frame=self.composition_rect()
+            for track in self.project.video_tracks:
+                item=self._active(track)
+                if item and item.role=='graphic':visible.append((item,QImage(),self._graphic_rect(item,frame)))
+            return visible
         frame_rect = self.composition_rect()
         visible: list[tuple[TimelineItem, QImage, QRectF]] = []
         for track in self.project.video_tracks:
@@ -477,13 +491,16 @@ class PreviewCanvas(QWidget):
         if item_b and unavailable(self.project.media_by_id(item_b.media_id),item_b):item_b=None
 
         from .native_animation import required,frame as native_frame
-        if any(i and required(i) for i in (item_a,item_b)):
+        from .animated_transitions import NAMES as animated_names
+        if trans.name in animated_names or any(i and required(i) for i in (item_a,item_b)):
             def raster(item):
                 if not item:return None
                 t=min(item.duration-1/self.project.settings.fps,max(0,self.project.playhead-item.start))
                 if required(item):return native_frame(self.project,item,max(0,t),(max(2,round(frame_rect.width())),max(2,round(frame_rect.height()))))
                 from .keyframes import evaluated
                 item=evaluated(item,max(0,t)); media=self.project.media_by_id(item.media_id)
+                if trans.name in animated_names:
+                    item=copy.copy(item);item.start=self.project.playhead-max(0,t)
                 raw=self.still_cache.load(media.path) if media and media.kind=='image' else self.frames.get(self.active_frames.get(item.id),getattr(self,'fallback_frames',{}).get(item.id,QImage()))
                 if raw.isNull():return None
                 image=QImage(max(2,round(frame_rect.width())),max(2,round(frame_rect.height())),QImage.Format_RGBA8888); image.fill(Qt.transparent)
@@ -617,6 +634,10 @@ class PreviewCanvas(QWidget):
         self.update()
 
     def paintEvent(self, _):
+        if self.gpu and not self.gpu.closed and not getattr(self,'caption_focus',False):
+            self.gpu.paint_underlay(_,getattr(self,'_viewer_bg','#191a1d'))
+            self.gpu.schedule();return
+        if self.gpu and getattr(self,'caption_focus',False):self.gpu.container.hide()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
@@ -689,6 +710,14 @@ class PreviewCanvas(QWidget):
             elif selected:self._draw_text_box(painter,selected)
         if vision_notice:
             painter.setPen(QColor('#ffdd88')); painter.setFont(QFont('Segoe UI',9)); painter.drawText(self.rect().adjusted(12,8,-12,-8),Qt.AlignBottom|Qt.AlignHCenter,vision_notice)
+        self._draw_effect_center(painter,frame_rect)
+        from pathlib import Path
+        pending=next((self.project.media_by_id(i.media_id) for i in self.project.timeline if i.start<=self.project.playhead<i.start+i.duration and self.project.media_by_id(i.media_id) and self.project.media_by_id(i.media_id).compound and not Path(self.project.media_by_id(i.media_id).path).is_file()),None)
+        if pending:
+            message='Compound preview unavailable — right-click clip to retry' if pending.path in getattr(self,'compound_failures',set()) else 'Compound preview is preparing · '+pending.name
+            painter.setPen(QColor('#ffdd88')); painter.setFont(QFont('Segoe UI',9)); painter.drawText(frame_rect.adjusted(8,8,-8,-8),Qt.AlignBottom|Qt.AlignHCenter|Qt.TextWordWrap,message)
+
+    def _draw_effect_center(self,painter,frame_rect):
         win = self.window()
         transport = getattr(win, "transport", None)
         is_paused = transport is None or not getattr(transport, "playing", False)
@@ -715,11 +744,6 @@ class PreviewCanvas(QWidget):
                     painter.drawLine(QPointF(cx-8,cy),QPointF(cx+8,cy))
                     painter.drawLine(QPointF(cx,cy-8),QPointF(cx,cy+8))
                     painter.restore()
-        from pathlib import Path
-        pending=next((self.project.media_by_id(i.media_id) for i in self.project.timeline if i.start<=self.project.playhead<i.start+i.duration and self.project.media_by_id(i.media_id) and self.project.media_by_id(i.media_id).compound and not Path(self.project.media_by_id(i.media_id).path).is_file()),None)
-        if pending:
-            message='Compound preview unavailable — right-click clip to retry' if pending.path in getattr(self,'compound_failures',set()) else 'Compound preview is preparing · '+pending.name
-            painter.setPen(QColor('#ffdd88')); painter.setFont(QFont('Segoe UI',9)); painter.drawText(frame_rect.adjusted(8,8,-8,-8),Qt.AlignBottom|Qt.AlignHCenter|Qt.TextWordWrap,message)
 
     def _paint_scene(self,painter,frame_rect):
         source = self.frame; self.text_rects={}; overlay=None; vision_notice=''

@@ -15,7 +15,7 @@ MAX_BYTES = 128 * 1024 * 1024
 def identity(media, settings):
     path = Path(media.path).resolve()
     stat = path.stat()
-    return dict(version=1, path=os.path.normcase(str(path)), size=stat.st_size,
+    return dict(version=2, path=os.path.normcase(str(path)), size=stat.st_size,
                 mtime=stat.st_mtime_ns, ctime=stat.st_ctime_ns,
                 model=settings.get('whisper_model', 'small.en'),
                 language=settings.get('caption_language', 'en'))

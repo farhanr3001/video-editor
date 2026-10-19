@@ -28,7 +28,8 @@ class EditAssistanceUITests(unittest.TestCase):
             audio=MediaItem('cash',str(source),'audio','Cash cue',2,has_audio=True)
             self.w.project=Project(media=[audio,MediaItem('offline',str(source)+'missing','audio','Offline',2)])
             panel=self.w.media_panel; old=panel.power.data
-            panel.power.data={'folders':['Master','Master/Sounds','Master/Sounds/Cash'],'media':[{'folder':'Master/Sounds/Cash','media':vars(audio)}]}
+            from dataclasses import asdict
+            panel.power.data={'folders':['Master','Master/Sounds','Master/Sounds/Cash'],'media':[{'folder':'Master/Sounds/Cash','media':asdict(audio)}]}
             before=copy.deepcopy(panel.power.data); project=self.w.project.to_dict()
             dialog=SoundBinPicker(self.w)
             try:
@@ -92,6 +93,16 @@ class EditAssistanceUITests(unittest.TestCase):
             self.assertEqual(revision(p),before)
             self.w.timeline.select_ids(set()); self.w.inspector.select('')
             self.assertTrue(self.w.inspector.tabs.isTabEnabled(1)); self.assertEqual(panel.source.count(),1)
+            # The fixture owns a real source file. Retire its metadata/waveform
+            # readers before TemporaryDirectory deletes it, rather than waiting
+            # until tearDown (which runs after this with-block has already left).
+            import time
+            from PySide6.QtCore import QThreadPool,QEvent
+            self.w.close();deadline=time.monotonic()+10
+            while (self.w._workers or self.w.isVisible()) and time.monotonic()<deadline:self.settle(10)
+            self.assertFalse(self.w._workers);self.assertFalse(self.w.isVisible())
+            self.assertTrue(QThreadPool.globalInstance().waitForDone(10000))
+            self.app.sendPostedEvents(None,QEvent.DeferredDelete);self.app.processEvents()
     def test_tools_discovery_and_atomic_caption_anchoring_guards(self):
         api=EditorAPI(self.w)
         names={t['name'] for t in TOOLS}

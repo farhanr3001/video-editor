@@ -27,6 +27,11 @@ class CaptionFocus(QObject):
         enabled=bool(enabled) and getattr(self.w,'current_page',0)==0
         if self.active==enabled:return
         self.active=enabled; v=self.w.preview; v.caption_focus=enabled
+        gpu=getattr(v,'gpu',None)
+        if gpu:
+            gpu.epoch+=1;gpu.signature=None;gpu.mailbox.take()
+            if enabled:gpu.container.hide()
+            else:gpu.schedule()
         self.button.setText('Return to Video' if enabled else 'Caption Focus')
         self.button.setToolTip('Caption Focus is on — click to restore video playback' if enabled else 'Edit captions with audio only')
         set_ui_style(self.button, 'QPushButton { border-bottom: 2px solid @accent; color: @danger; }' if enabled else '')

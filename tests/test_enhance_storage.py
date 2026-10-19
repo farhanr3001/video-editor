@@ -6,6 +6,22 @@ from kinetic_cut import enhance
 from kinetic_cut.enhance_storage import State,families
 
 class StorageTests(unittest.TestCase):
+ def test_absent_effect_detection_caches_only_immutable_history(self):
+  from kinetic_cut.enhance_storage import history_has_enhancement
+  from kinetic_cut.runtime_index import IndexedList
+  class Counted(IndexedList):
+   scans=0
+   def __iter__(self):self.scans+=1;return super().__iter__()
+  snapshot=Project(timeline=[TimelineItem(str(n),'m','video_1',n,1) for n in range(1000)])
+  values=Counted(snapshot.timeline,snapshot,'timeline');object.__setattr__(snapshot,'timeline',values)
+  object.__setattr__(snapshot,'_history_snapshot',True)
+  self.assertFalse(history_has_enhancement([snapshot]));scans=values.scans
+  for _ in range(100):self.assertFalse(history_has_enhancement([snapshot]))
+  self.assertEqual(values.scans,scans)
+  live=copy.deepcopy(snapshot);self.assertNotIn('_enhance_present',live.__dict__)
+  self.assertFalse(history_has_enhancement([live]));live.timeline[0].effects.append(enhance.default_effect())
+  self.assertTrue(history_has_enhancement([snapshot,live]));self.assertNotIn('_enhance_present',live.__dict__)
+
  def setUp(self):
   self.temp=tempfile.TemporaryDirectory();self.base=Path(self.temp.name);self.cache=self.base/'cache';self.source=self.base/'source.mp4';self.source.write_bytes(b'owner source')
   self.patch=patch('kinetic_cut.config.CACHE_DIR',self.cache);self.patch.start()

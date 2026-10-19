@@ -51,5 +51,9 @@ class BlurFilterTests(unittest.TestCase):
                     expected=reference(image,5.27,5.27,blend,border)
                     actual=blur_image(image,5.27,5.27,blend,border,preview_fast=True,region=region)
                     x,y,right,bottom=region
-                    self.assertEqual(bytes(actual.copy(x,y,right-x,bottom-y).constBits()),bytes(expected.copy(x,y,right-x,bottom-y).constBits()))
+                    # constBits borrows QImage storage. Keep both crop owners
+                    # alive while comparing, rather than reading freed temporaries.
+                    actual_region=actual.copy(x,y,right-x,bottom-y)
+                    expected_region=expected.copy(x,y,right-x,bottom-y)
+                    self.assertEqual(bytes(actual_region.constBits()),bytes(expected_region.constBits()))
                     self.assertEqual(actual.size(),image.size())
