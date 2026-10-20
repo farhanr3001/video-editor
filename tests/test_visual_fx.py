@@ -305,7 +305,8 @@ class VisualFXUITests(unittest.TestCase):
         self.assertEqual(header_items, [], f"All Effects must not have subsection headers: {header_items}")
         
         # Select 'Visual FX'
-        w.effects_panel.categories.setCurrentRow(1)
+        names=[w.effects_panel.categories.item(i).text() for i in range(w.effects_panel.categories.count())]
+        w.effects_panel.categories.setCurrentRow(names.index("Visual FX"))
         self.assertEqual(w.effects_panel.categories.currentItem().text(), "Visual FX")
         
         # In Visual FX, should have exactly 3 clean subsection headers
