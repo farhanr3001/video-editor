@@ -119,6 +119,17 @@ def caption_emoji_rect(bounds,word_box,scale=1.):
     return QRectF(center.x()-size/2,center.y()-size/2,size,size)
 
 
+def caption_emoji_runs(bounds,word_boxes,selected,scale=1.):
+    """One centred composition for a caption, shared by preview and export."""
+    selected=[(index,emoji) for index,emoji in selected[:2] if 0<=index<len(word_boxes)]
+    if not selected:return []
+    size=max(caption_emoji_rect(bounds,word_boxes[index],scale).width() for index,_ in selected)
+    if len(selected)>1:size*=.88
+    gap=6*scale; width=len(selected)*size+(len(selected)-1)*gap
+    left=bounds.center().x()-width/2;top=bounds.top()-size*1.05-6*scale
+    return [(emoji,QRectF(left+n*(size+gap),top,size,size)) for n,(_,emoji) in enumerate(selected)]
+
+
 def draw_caption(painter,project,caption,frame):
     if project.caption_style(caption).box_style=="headline":
         from .headline import draw
@@ -128,6 +139,9 @@ def draw_caption(painter,project,caption,frame):
     path,emojis,bounds,word_boxes,word_glyphs,x,y=caption_geometry(project,caption,frame)
     inherited_opacity=painter.opacity(); painter.save(); painter.setClipRect(frame); painter.setOpacity(inherited_opacity*style.opacity/100)
     elapsed=project.playhead-caption.start
+    if style.animation=='smart highlight' and 0<=elapsed<.18:
+        factor=.86+elapsed/.10*.18 if elapsed<.10 else 1.04-(elapsed-.10)/.08*.04
+        painter.translate(x,y);painter.scale(factor,factor);painter.translate(-x,-y)
     if style.animation=="fade":painter.setOpacity(inherited_opacity*style.opacity/100*min(1,max(0,elapsed/.1))*min(1,max(0,(caption.end-project.playhead)/.1)))
     if style.animation in ('pop','punch') and elapsed<.22:
         factor=.72+min(1,elapsed/.13)*.36 if elapsed<.13 else 1.08-(elapsed-.13)/.09*.08
@@ -154,6 +168,11 @@ def draw_caption(painter,project,caption,frame):
             opacity=max(0,min(1,(project.playhead-onset)/.12))*max(0,min(1,(caption.end-project.playhead)/.1)) if style.animation=='fade every word' else float(project.playhead>=onset)
             painter.setOpacity(painter.opacity()*opacity)
             draw_caption_glyphs(painter,shape,runs,style,scale); painter.restore()
+    elif style.animation=='smart highlight':
+        for index,(shape,runs) in enumerate(word_glyphs):
+            word_style=copy.copy(style)
+            if index in caption.highlighted_words:word_style.color=style.highlight
+            draw_caption_glyphs(painter,shape,runs,word_style,scale)
     elif style.animation in ('karaoke','emoji pop','double emoji'):
         from .caption_emphasis import single_word_emphasized
         single=len(word_glyphs)==1
@@ -169,35 +188,12 @@ def draw_caption(painter,project,caption,frame):
             draw_caption_glyphs(painter,shape,runs,word_style,scale)
         if style.animation in ('emoji pop','double emoji') and word_boxes:
             from .caption_emojis import emojis_for_caption
-            max_e = 2 if style.animation == 'double emoji' else 1
-            emoji_active=0 if single else active_word(caption,project.playhead)
-            caption_emojis = [(index,emoji) for index,emoji in emojis_for_caption(project,caption,max_e) if index==emoji_active]
-            if caption_emojis:
-                target_idx = caption_emojis[0][0]
-                target_idx = min(max(0, target_idx), len(word_boxes) - 1)
-                box = word_boxes[target_idx]
-                onset = times[target_idx][0] if not single and target_idx < len(times) else caption.start
-                elapsed_word = project.playhead - onset
-                if elapsed_word >= 0:
-                    pop_factor = 0.2 + (elapsed_word / 0.12) * 1.1 if elapsed_word < 0.12 else 1.30 - ((elapsed_word - 0.12) / 0.08) * 0.30 if elapsed_word < 0.20 else 1.0
-                    emoji_rect=caption_emoji_rect(bounds,box,scale)
-                    emoji_size=emoji_rect.width(); center_x=emoji_rect.center().x(); center_y=emoji_rect.center().y()
-                    e_list = [e for _, e in caption_emojis]
-                    if len(e_list) == 2:
-                        e_runs = [
-                            (e_list[0], QRectF(center_x - emoji_size - 2 * scale, center_y - emoji_size / 2, emoji_size, emoji_size)),
-                            (e_list[1], QRectF(center_x + 2 * scale, center_y - emoji_size / 2, emoji_size, emoji_size))
-                        ]
-                    else:
-                        e_runs = [
-                            (e_list[0], QRectF(center_x - emoji_size / 2, center_y - emoji_size / 2, emoji_size, emoji_size))
-                        ]
-                    painter.save()
-                    painter.translate(center_x, center_y)
-                    painter.scale(pop_factor, pop_factor)
-                    painter.translate(-center_x, -center_y)
-                    draw_emoji(painter, e_runs)
-                    painter.restore()
+            e_runs=caption_emoji_runs(bounds,word_boxes,emojis_for_caption(project,caption,2),scale)
+            if e_runs and 0<=elapsed<caption.end-caption.start:
+                pop_factor=.82+elapsed/.10*.26 if elapsed<.10 else 1.08-(elapsed-.10)/.08*.08 if elapsed<.18 else 1.
+                center=e_runs[0][1].united(e_runs[-1][1]).center()
+                painter.save();painter.translate(center);painter.scale(pop_factor,pop_factor);painter.translate(-center)
+                draw_emoji(painter,e_runs);painter.restore()
     else:draw_caption_glyphs(painter,path,emojis,style,scale)
     painter.restore(); return bounds
 

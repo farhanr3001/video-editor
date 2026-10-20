@@ -109,6 +109,22 @@ class StabilityJobTests(unittest.TestCase):
                 release.set(); self.wait(200)
             self.assertFalse(self.w.project.captions,mode)
 
+    def test_caption_duplicate_request_does_not_start_second_inference(self):
+        self.speech_project();entered=threading.Event();release=threading.Event()
+        def delayed(*a,**kw):entered.set();release.wait(2);return [],'fixture'
+        with patch('kinetic_cut.process.run_cancellable'),patch('kinetic_cut.ui.transcribe',side_effect=delayed) as infer:
+            self.w.generate_captions(headless=True);self.assertTrue(entered.wait(2))
+            self.assertIsNone(self.w.generate_captions(headless=True));self.assertEqual(infer.call_count,1)
+            release.set();self.wait(200)
+        self.assertIsNone(self.w._caption_cancel)
+
+    def test_caption_muted_speech_track_is_not_replaced_with_video_audio(self):
+        p=self.speech_project()
+        for track in p.audio_tracks:p.track_states.setdefault(track,{})['muted']=True
+        with patch('kinetic_cut.ui.transcribe') as infer:
+            self.assertIsNone(self.w.generate_captions(headless=True))
+        infer.assert_not_called();self.assertFalse(p.captions)
+
     def test_import_result_does_not_cross_project_switch(self):
         from kinetic_cut.config import DATA_DIR
         fixture=DATA_DIR/'import-fixture.png'; fixture.write_bytes(b'fixture')

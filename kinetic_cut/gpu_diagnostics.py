@@ -25,6 +25,22 @@ def run(output,project_path=None):
         loop=QEventLoop();QTimer.singleShot(ms,loop.quit);loop.exec()
     report={'checks':[],'performance_measured':False,'background_only':background,
             'onscreen_presentation_verified':False,'verification_desktop':'private' if os.environ.get('KINETIC_DIAGNOSTIC_PRIVATE_DESKTOP')=='1' else 'current'}
+    def check(name,condition):
+        report['checks'].append(dict(name=name,passed=bool(condition)))
+        (out/'report.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+        assert condition,name
+    if os.environ.get('KINETIC_NUMERIC_FOCUS_SELFTEST')=='1':
+        from .ui import MainWindow
+        import time
+        window=MainWindow();window.resize(1700,1000);window.autosave_timer.stop();window.show();wait(350)
+        timeline_polish_checks(window,out,check,wait)
+        peer=window.preview.gpu.peer
+        window.close();deadline=time.monotonic()+10
+        while (window.isVisible() or peer.active) and time.monotonic()<deadline:wait(50)
+        check('native window and renderer close gracefully',not window.isVisible() and not peer.active and peer.exitcode==0 and not peer.forced_shutdown)
+        report['passed']=all(c['passed'] for c in report['checks']);report['scope']='numeric focus and timeline polish'
+        (out/'report.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+        return 0
     asset=QImage(64,64,QImage.Format_RGBA8888);asset.fill(QColor('#ec2030'))
     asset.save(str(out/'thumbnail.png'))
     wave=QImage(32,1,QImage.Format_RGBA8888);wave.fill(QColor(255,255,0,255))
@@ -41,10 +57,6 @@ def run(output,project_path=None):
            clip(startTime=0.,audio=True,waveform=url,waveCount=32.,waveResolution=.125)]
     clips[2].values.update(laneY=105.,color='#326951',duration=4.)
     native.publish(clips);widget.show();surface.geometry(widget.rect());wait(700)
-    def check(name,condition):
-        report['checks'].append(dict(name=name,passed=bool(condition)))
-        (out/'report.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
-        assert condition,name
     image=surface.view.grabWindow();image.save(str(out/'native-clips.png'))
     blue=image.pixelColor(30,30);red=image.pixelColor(240,30);peak=image.pixelColor(40,135);outline=image.pixelColor(0,45)
     check('clip body is visible',blue.blue()>110 and blue.blue()>blue.red()*1.5)
@@ -381,7 +393,7 @@ def blade_caption_priority_checks(window,out,check,wait):
 
 def timeline_polish_checks(window,out,check,wait):
     import numpy as np
-    from PySide6.QtCore import Qt,QPoint,QPointF,QEvent
+    from PySide6.QtCore import Qt,QPoint,QPointF,QEvent,QObject
     from PySide6.QtGui import QImage,QMouseEvent
     from PySide6.QtWidgets import QApplication,QWidget,QVBoxLayout,QLineEdit
     from PySide6.QtTest import QTest
@@ -408,6 +420,54 @@ def timeline_polish_checks(window,out,check,wait):
                 QTest.mouseRelease(line,Qt.LeftButton,pos=pos)
                 check(label+' immediately drags without Enter',spin.value()>before)
     finally:host.close();host.deleteLater()
+    # Exercise the owner's first interaction after clip deselection/reselection
+    # in the actual inspector, including events delivered to either Qt target.
+    for theme in ('default','final_cut_obsidian','ableton_gray'):
+        window.apply_theme(theme,save=False)
+        for width in (1700,1100):
+            window.resize(width,900)
+            p=Project(timeline=[TimelineItem('audio-a','','audio_1',0,2,role='source_audio'),TimelineItem('audio-b','','audio_1',2,2,role='source_audio'),TimelineItem('video-a','','video_1',0,2),TimelineItem('video-b','','video_1',2,2)])
+            window.set_project(p)
+            for item_id,target_name in (('video-a','line'),('video-b','spin'),('audio-a','line'),('audio-b','spin')):
+                t=window.timeline
+                track=window.project.item_by_id(item_id).track
+                blank=QPoint(t.LABEL_WIDTH+round(5*t.pixels_per_second),round(t.section_rect(track).center().y()))
+                t.gpu.view.requestActivate();wait(20)
+                QTest.mouseClick(t.gpu.view,Qt.LeftButton,pos=blank-t.gpu.offset.toPoint());wait(25)
+                check(f'{theme} {width} native blank click deselects all before '+item_id,not t.selected_ids)
+                clip_pos=t.item_rect(window.project.item_by_id(item_id)).center().toPoint()
+                QTest.mouseClick(t.gpu.view,Qt.LeftButton,pos=clip_pos-t.gpu.offset.toPoint());wait(40)
+                check(f'{theme} {width} native click selects '+item_id,t.selected_id==item_id)
+                spin=window.inspector.volume.spin if track=='audio_1' else window.inspector.zoom_x.spin;line=spin.lineEdit()
+                label=f'{theme} {width} {item_id} first {target_name} drag'
+                # No pre-focus: the owner's first gesture crosses from the
+                # native timeline window directly into the inspector edit.
+                check(label+' rejects automatic text selection',not spin._typing and not line.hasSelectedText())
+                check(label+' shows horizontal adjustment cursor',line.cursor().shape()==Qt.SizeHorCursor)
+                def current_value():
+                    item=window.project.item_by_id(item_id)
+                    return item.gain_db if track=='audio_1' else item.transform.scale
+                target=line if target_name=='line' else spin;pos=target.rect().center();before=current_value()
+                # Route through the native top-level window and Qt hit-testing,
+                # as a real mouse does, rather than send directly to the edit.
+                native_window=window.windowHandle();local=window.mapFromGlobal(target.mapToGlobal(pos))
+                QTest.mouseMove(native_window,local);wait(10)
+                QTest.mousePress(native_window,Qt.LeftButton,pos=local)
+                check(label+' starts immediately',spin._drag_start is not None)
+                QTest.mouseMove(native_window,local+QPoint(8,0),delay=20)
+                QTest.mouseRelease(native_window,Qt.LeftButton,pos=local+QPoint(8,0));wait(25)
+                after=current_value()
+                check(label+' changes actual clip without highlighting',after>before and not line.hasSelectedText())
+                check(label+' restores adjustment cursor after drag',line.cursor().shape()==Qt.SizeHorCursor)
+                window.undo();check(label+' remains undoable',current_value()==before)
+                window.redo();check(label+' remains redoable',current_value()==after)
+                QTest.mouseDClick(line,Qt.LeftButton);check(label+' explicit double-click selects text',spin._typing and line.hasSelectedText())
+                check(label+' shows text cursor only while typing',line.cursor().shape()==Qt.IBeamCursor)
+                QTest.mouseClick(window,Qt.LeftButton,pos=QPoint(window.width()-2,window.height()-2));wait(10)
+                check(label+' blank click restores unselected drag mode',not spin._typing and not line.hasSelectedText())
+                check(label+' restores adjustment cursor after typing',line.cursor().shape()==Qt.SizeHorCursor)
+            window.grab().save(str(out/f'numeric-first-drag-{theme}-{width}.png'))
+    window.resize(1700,1000)
     captions=[];at=.5
     for n,width in enumerate((8,18,24,32,40,80,150)):
         captions.append(Caption('label-'+str(width),at,at+width/40,'a very good caption with more words than fit'))

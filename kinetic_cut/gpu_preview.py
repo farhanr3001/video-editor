@@ -361,8 +361,25 @@ class GpuPreview(Surface):
             if len(self.layer_images)<=32:break
             if identifier not in self._used_textures:
                 self.layer_images.pop(identifier).deleteLater();self.images.remove(identifier)
+        self._fit_prepared_geometry(jobs,local)
         self._controls(frame)
         self.publish_ms=(time.perf_counter()-started)*1000
+    def _fit_prepared_geometry(self,jobs,rect):
+        # Prepared pixels use canvas-local coordinates. Keep the last useful
+        # texture attached to the current canvas while a new raster is pending.
+        # Otherwise the canvas origin moves immediately but text retains its
+        # previous size, visibly jumping on every worker completion during zoom.
+        for key,*_ in jobs:
+            layer=self.layers.get(key)
+            if layer is not None:
+                layer.setWidth(max(.01,rect.width()));layer.setHeight(max(.01,rect.height()))
+                layer.setProperty('placement',QMatrix4x4(QTransform()))
+        previous=getattr(self,'_bounds_size',None)
+        if previous and previous.width()>0 and previous.height()>0:
+            sx=rect.width()/previous.width();sy=rect.height()/previous.height()
+            if sx!=1 or sy!=1:
+                self.bounds={key:QRectF(value.x()*sx,value.y()*sy,value.width()*sx,value.height()*sy) for key,value in self.bounds.items()}
+        self._bounds_size=rect.size()
     def _controls(self,frame):
         c=self.canvas
         c.text_rects={k:r.translated(frame.topLeft()) for k,r in self.bounds.items()}
@@ -450,10 +467,13 @@ class GpuPreview(Surface):
             if epoch!=self.epoch:self.dropped+=1
             else:
                 self.preparation_ms=elapsed;self.completed+=1;bounds={};notices=[]
+                current=self.canvas.composition_rect()
+                target=QRectF(0,0,current.width(),current.height())
                 for key,image,item_bounds,z,notice in results:
-                    texture=self._texture(key,image);self._place(key,texture,rect,z=z);bounds.update(item_bounds)
+                    texture=self._texture(key,image);self._place(key,texture,target,z=z);bounds.update(item_bounds)
                     if notice:notices.append(notice)
-                self.bounds=bounds;self.notice='\n'.join(dict.fromkeys(notices));self._control_key=None;self._controls(self.canvas.composition_rect())
+                self.bounds=bounds;self._bounds_size=rect.size();self._fit_prepared_geometry([],target)
+                self.notice='\n'.join(dict.fromkeys(notices));self._control_key=None;self._controls(current)
         except Exception:
             if epoch==self.epoch:
                 import logging

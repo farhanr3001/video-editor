@@ -26,7 +26,7 @@ def write(project,path,burn_captions=True):
     def escape(text):return text.replace("\\",r"\\").replace("{",r"\{").replace("}",r"\}")
     for n,cap in enumerate(entries):
         s=project.caption_style(cap); raw=cap.text.upper() if s.uppercase else cap.text
-        if (s.animation in ('word highlight','word highlight 2','fade every word','word reveal','punch','bounce','karaoke','emoji pop','double emoji') or s.glow_enabled or s.font in ('Geometos','TikTok Sans','Montserrat','Poppins','Anton','Archivo Black','Bebas Neue','Bangers')) and s.box_style!="headline":
+        if (s.animation in ('word highlight','word highlight 2','fade every word','word reveal','punch','bounce','karaoke','emoji pop','double emoji','smart highlight') or s.glow_enabled or s.font in ('Geometos','TikTok Sans','Montserrat','Poppins','Anton','Archivo Black','Bebas Neue','Bangers','VAG Rounded Std')) and s.box_style!="headline":
             from .word_highlight import events
             lines.extend(events(project,cap,f"C{n}")); continue
         if s.box_style=="headline":

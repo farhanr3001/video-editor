@@ -22,6 +22,7 @@ def events(project,caption,style_name):
         if style.animation=='pop':phases=[(0,.13,.72,1.08),(.13,.22,1.08,1.),(.22,finish-begin,1.,1.)]
         if style.animation=='punch':phases=[(0,.10,.55,1.15),(.10,.22,1.15,1.),(.22,finish-begin,1.,1.)]
         if style.animation=='bounce':phases=[(0,.12,.40,1.25),(.12,.20,1.25,.95),(.20,.28,.95,1.),(.28,finish-begin,1.,1.)]
+        if style.animation=='smart highlight':phases=[(0,.10,.86,1.04),(.10,.18,1.04,1.),(.18,finish-begin,1.,1.)]
         for a,b,first,last in phases:
             b=min(b,finish-begin)
             if b<=a:continue
@@ -43,7 +44,7 @@ def events(project,caption,style_name):
             path=QPainterPath(); path.addRoundedRect(rect,5,5)
             a,b=times[n] if style.animation=='word highlight' else (caption.start,caption.end)
             if min(b,caption.end)>max(a,caption.start):event(path,style.highlight,1,max(a,caption.start),min(b,caption.end))
-    pieces=word_glyphs if style.animation in ('fade every word','word reveal','karaoke','emoji pop','double emoji') else [(letters,emojis)]
+    pieces=word_glyphs if style.animation in ('fade every word','word reveal','karaoke','emoji pop','double emoji','smart highlight') else [(letters,emojis)]
     for n,(shape,runs) in enumerate(pieces):
         start=max(caption.start,times[n][0]) if style.animation in ('fade every word','word reveal') else caption.start
         if start>=caption.end:continue
@@ -63,23 +64,20 @@ def events(project,caption,style_name):
             if caption.end>w_end:
                 event(shape,style.color,3,w_end,caption.end,extra=f"\\bord{style.outline_width}\\3c{_ass_color(style.outline)}")
             result.extend(ass_events(runs,caption.start,caption.end,style_name,style.opacity,style.animation,layer=4,origin=(x,y)))
-            if style.animation in ('emoji pop','double emoji') and len(words)>n:
-                from .caption_emojis import emojis_for_caption
-                max_e = 2 if style.animation=='double emoji' else 1
-                cap_emojis = emojis_for_caption(project,caption,max_e)
-                active_e = [e for idx, e in cap_emojis if idx == n]
-                if active_e:
-                    box = words[n]
-                    from .visuals import caption_emoji_rect
-                    e_runs = [(active_e[0],caption_emoji_rect(bounds,box))]
-                    center=e_runs[0][1].center()
-                    result.extend(ass_events(e_runs, w_start, w_end, style_name, style.opacity, 'pop', layer=5, origin=(center.x(),center.y())))
             continue
         anim=r'\fad(120,100)' if style.animation=='fade every word' else ''
-        if style.glow_enabled:event(shape,style.color if style.glow_follow_color else style.glow_color,2,start,opacity=style.opacity*style.glow_opacity/100,extra=f"\\blur{style.glow_radius}"+anim)
+        color=style.highlight if style.animation=='smart highlight' and n in caption.highlighted_words else style.color
+        if style.glow_enabled:event(shape,color if style.glow_follow_color else style.glow_color,2,start,opacity=style.opacity*style.glow_opacity/100,extra=f"\\blur{style.glow_radius}"+anim)
         if style.shadow_enabled:
             shadow=QPainterPath(shape); shadow.translate(style.shadow_x,style.shadow_y)
             event(shadow,style.shadow_color,2,start,opacity=style.opacity*style.shadow_opacity/100,extra=f"\\blur{style.shadow_blur}"+anim)
-        event(shape,style.color,3,start,extra=f"\\bord{style.outline_width}\\3c{_ass_color(style.outline)}"+anim)
+        event(shape,color,3,start,extra=f"\\bord{style.outline_width}\\3c{_ass_color(style.outline)}"+anim)
         result.extend(ass_events(runs,start,caption.end,style_name,style.opacity,'fade' if anim else style.animation,layer=4,origin=(x,y)))
+    if style.animation in ('emoji pop','double emoji'):
+        from .caption_emojis import emojis_for_caption
+        from .visuals import caption_emoji_runs
+        runs=caption_emoji_runs(bounds,words,emojis_for_caption(project,caption,2))
+        if runs:
+            center=runs[0][1].united(runs[-1][1]).center()
+            result.extend(ass_events(runs,caption.start,caption.end,style_name,style.opacity,'emoji badge',layer=5,origin=(center.x(),center.y())))
     return result

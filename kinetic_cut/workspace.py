@@ -699,7 +699,7 @@ class EffectsPanel(QWidget):
         from .ui import tool_button
         head=QHBoxLayout(); head.addWidget(QLabel("Effects")); head.addStretch(); head.addWidget(tool_button("search",self.toggle_search,"Search effects")); root.addLayout(head)
         self.search=PanelSearch(); self.search.setPlaceholderText("Search effects"); self.search.hide(); self.search.textChanged.connect(self.refresh); self.search.dismissed.connect(lambda:self.list.setFocus()); root.addWidget(self.search)
-        split=QSplitter(Qt.Horizontal); self.categories=QListWidget(); category_names=["All Effects",*self.catalog]; self.categories.addItems(category_names); self.categories.setMaximumWidth(160); self.categories.setMinimumWidth(90)
+        split=QSplitter(Qt.Horizontal); self.categories=QListWidget(); category_names=["All Effects","Titles",*(name for name in self.catalog if name!="Titles")]; self.categories.addItems(category_names); self.categories.setMaximumWidth(160); self.categories.setMinimumWidth(90)
         remembered=window.settings.get("effects_category","All Effects")
         self.categories.setCurrentRow(category_names.index(remembered) if remembered in category_names else 0)
         self.categories.currentTextChanged.connect(self._category_changed)

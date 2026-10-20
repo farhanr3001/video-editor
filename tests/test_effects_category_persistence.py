@@ -15,6 +15,7 @@ class EffectsCategoryPersistenceTests(unittest.TestCase):
         first=MainWindow()
         try:
             names=[first.effects_panel.categories.item(i).text() for i in range(first.effects_panel.categories.count())]
+            self.assertEqual(names[:2],['All Effects','Titles'])
             first.effects_panel.categories.setCurrentRow(names.index('Open FX / Blur'))
             self.assertEqual(first.settings['effects_category'],'Open FX / Blur')
             self.assertEqual(load_settings()['effects_category'],'Open FX / Blur')

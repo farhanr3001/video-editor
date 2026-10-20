@@ -9,6 +9,102 @@ from kinetic_cut.captions import _from_segments,split_caption,merge_captions
 from kinetic_cut.caption_words import timings,active_word,prepare_generated,remove_periods,set_text
 
 class CaptionStyleTests(unittest.TestCase):
+    def test_template_priority_and_impact_is_exact_default_plus_font_and_glow(self):
+        from dataclasses import asdict
+        from kinetic_cut.caption_templates import CAPTION_TEMPLATES,get_template
+        self.assertEqual([t['id'] for t in CAPTION_TEMPLATES[:7]],['none','impact','hormozi_yellow','mrbeast_gold','smart_highlight','capcut_emoji_pop','basic'])
+        template=get_template('impact');expected=CaptionStyle(font='Impact',glow_enabled=True,size=82)
+        self.assertEqual({k:template[k] for k in asdict(expected) if k!='name'},{k:v for k,v in asdict(expected).items() if k!='name'})
+        from kinetic_cut.caption_style_dialog import CaptionStyleDialog
+        d=CaptionStyleDialog(CaptionStyle(zoom_x=2,background_override=True,opacity=12,box_style='headline'),{})
+        try:
+            d.on_template_selected(get_template('impact'))
+            actual=asdict(d.selected_style());actual['name']=expected.name
+            self.assertEqual(actual,asdict(expected))
+            d.on_template_selected(get_template('smart_highlight'));self.assertEqual(d.words.minimum(),1)
+            self.assertEqual(d.selected_style().font_face,'Bold')
+            self.assertTrue(d.form.isRowVisible(d.color_buttons['highlight']))
+        finally:d.close()
+
+    def test_basic_uses_bundled_owner_selected_vag_font_and_thin_outline(self):
+        from kinetic_cut.caption_fonts import load_fonts
+        from kinetic_cut.caption_templates import get_template
+        from PySide6.QtGui import QFont,QFontInfo
+        load_fonts();template=get_template('basic')
+        self.assertEqual(template['font'],'VAG Rounded Std');self.assertIn(QFontInfo(QFont(template['font'])).family(),('VAG Rounded Std','VAG Rounded Std Light'))
+        self.assertEqual(template['color'],'#FFFFFF');self.assertLessEqual(template['outline_width'],2);self.assertTrue(template['shadow_enabled'])
+        self.assertEqual(template['size'],82);self.assertEqual(template['animation'],'pop')
+
+    def test_requested_sizes_shadows_and_restore_generation_defaults(self):
+        from kinetic_cut.caption_templates import get_template,CAPTION_TEMPLATES
+        from kinetic_cut.caption_style_dialog import CaptionStyleDialog
+        from dataclasses import asdict
+        for key in ('impact','mint_focus','documentary','ink_card','blue_note','neon_glow','studio','editorial','clean_minimal_card'):
+            self.assertEqual(get_template(key)['size'],82,key)
+        smart=get_template('smart_highlight');self.assertEqual((smart['size'],smart['shadow_enabled'],smart['shadow_x'],smart['shadow_y']),(94,True,10.,3.))
+        self.assertNotIn('soft_rose',[t['id'] for t in CAPTION_TEMPLATES])
+        d=CaptionStyleDialog(CaptionStyle(size=180,zoom_x=3,background_override=True),{'caption_words_per_card':12,'caption_censor':True,'caption_remove_periods':True})
+        try:
+            d.on_template_selected(smart);d.restore_defaults.click()
+            expected=asdict(CaptionStyle());expected['name']='Default'
+            self.assertEqual(asdict(d.selected_style()),expected)
+            self.assertEqual(d.words.value(),3);self.assertFalse(d.censor.isChecked());self.assertFalse(d.remove_periods.isChecked())
+            self.assertEqual(d.selected_template_id,'none')
+        finally:d.close()
+
+    def test_cinematic_generated_style_has_readable_letter_height(self):
+        from kinetic_cut.caption_templates import get_template
+        from kinetic_cut.visuals import caption_geometry
+        data=get_template('cinematic_serif');style=CaptionStyle(**{k:v for k,v in data.items() if k in CaptionStyle.__dataclass_fields__})
+        c=Caption('cinematic',0,2,'Behind the story',style=style);p=Project(captions=[c],subtitle_style=style)
+        self.assertGreaterEqual(style.size,80);self.assertLessEqual(style.outline_width,2)
+        self.assertGreaterEqual(caption_geometry(p,c,QRectF(0,0,1080,1920))[0].boundingRect().height(),55)
+
+    def test_smart_plan_is_sparse_and_groups_strong_phrase_across_one_word_cards(self):
+        style=CaptionStyle(animation='smart highlight')
+        words='Okay chat. The man with the most range. Okay chat.'.split()
+        singles=[Caption(str(n),n*.32,(n+1)*.32,w) for n,w in enumerate(words)]
+        grouped=[Caption('g',0,len(words)*.32,' '.join(words),word_timings=[dict(text=w,start=n*.32,end=(n+1)*.32) for n,w in enumerate(words)])]
+        for caps in (singles,grouped):prepare_generated(caps,style)
+        picked=lambda caps:[w for c in caps for n,w in enumerate(c.text.split()) if n in c.highlighted_words]
+        self.assertEqual(picked(singles),['most','range.']);self.assertEqual(picked(grouped),picked(singles))
+        self.assertFalse(singles[0].highlighted_words);self.assertFalse(singles[1].highlighted_words)
+
+    def test_relative_voice_energy_adds_presentation_scores_without_retiming(self):
+        import numpy as np
+        from kinetic_cut.caption_emphasis import measure_emphasis
+        rate=16000;t=np.arange(rate*4)/rate;audio=(np.sin(t*2*np.pi*180)*.06).astype('float32')
+        audio[rate*2:rate*2+int(rate*.4)]*=4
+        c=Caption('c',20,24,'We found something special',word_timings=[dict(text=w,start=a,end=b) for w,a,b in [('We',0,.4),('found',1,1.4),('something',2,2.4),('special',3,3.4)]])
+        before=timings(c);measure_emphasis([c],audio,offset=20)
+        self.assertGreater(c.word_timings[2]['emphasis_db'],8);self.assertEqual(timings(c),before)
+        prepare_generated([c],CaptionStyle(animation='smart highlight'));self.assertIn(2,c.highlighted_words)
+        p=Project(captions=[c]);self.assertEqual(Project.from_dict(p.to_dict()).captions[0].word_timings,c.word_timings)
+
+    def test_smart_colour_is_static_for_whole_caption_and_export_has_same_marks(self):
+        from unittest.mock import patch
+        from kinetic_cut.visuals import draw_caption
+        from kinetic_cut.word_highlight import events
+        c=Caption('c',5,7,'THE MOST RANGE',highlighted_words=[1,2]);p=Project(captions=[c],subtitle_style=CaptionStyle(animation='smart highlight',color='#FFFFFF',highlight='#FF1616',glow_enabled=True))
+        for at in (5.01,5.5,6.99):
+            p.playhead=at;image=QImage(320,568,QImage.Format_ARGB32);image.fill(Qt.black);painter=QPainter(image);colours=[]
+            with patch('kinetic_cut.visuals.draw_caption_glyphs',side_effect=lambda a,b,c,s,e:colours.append(s.color)):
+                try:draw_caption(painter,p,c,QRectF(image.rect()))
+                finally:painter.end()
+            self.assertEqual(colours,['#FFFFFF','#FF1616','#FF1616'])
+        lines=events(p,c,'C0');ink=[line for line in lines if line.startswith('Dialogue: 3') and ',0:00:05.18,0:00:07.00,' in line]
+        self.assertEqual(len(ink),3);self.assertIn('\\1c&H001616FF',ink[1]);self.assertIn('\\fscx86',lines[0])
+
+    def test_smart_manual_mark_removal_keeps_smart_style_and_roundtrips(self):
+        from kinetic_cut.ui import MainWindow
+        w=MainWindow()
+        try:
+            c=Caption('c',0,2,'most range',highlighted_words=[0,1]);w.project.captions=[c];w.project.subtitle_style.animation='smart highlight'
+            w.inspector.toggle_word_highlight(c.id,1)
+            self.assertEqual(w.project.caption_style(c).animation,'smart highlight');self.assertEqual(c.highlighted_words,[0])
+            restored=Project.from_dict(w.project.to_dict());self.assertEqual(restored.captions[0].highlighted_words,[0])
+        finally:w.close()
+
     def test_word_onsets_preserved_without_padding_distribution(self):
         caps=_from_segments([dict(start=0,end=3,text='This is great.',words=[dict(text='This',start=0,end=.2),dict(text='is',start=.3,end=.5),dict(text='great.',start=1,end=1.4)])],offset=10,words_per_caption=3)
         self.assertEqual(timings(caps[0]),[(10,10.2),(10.3,10.5),(11,11.4)])
@@ -239,4 +335,43 @@ class CaptionStyleTests(unittest.TestCase):
             self.assertEqual(c2.style.size, 115)
         finally:
             w.close()
+
+    def test_selected_custom_caption_template_reset_and_history(self):
+        from kinetic_cut.ui import MainWindow
+        from kinetic_cut.caption_templates import get_template
+        from dataclasses import asdict
+        w=MainWindow()
+        try:
+            p=w.project
+            p.captions=[Caption('a',0,1,'THE MOST RANGE',customize=True),Caption('b',1,2,'Keep this',customize=True),Caption('c',2,3,'Track text')]
+            before=copy.deepcopy(p.to_dict());track=asdict(p.subtitle_style)
+            panel=w.inspector;panel.caption_id='a';w.timeline.selected_caption_ids={'a'};panel.subtitle.setCurrentIndex(3)
+            panel.apply_inspector_template(get_template('smart_highlight'))
+            self.assertEqual(p.captions[0].style.font_face,'Bold');self.assertEqual(p.captions[0].highlighted_words,[1,2])
+            self.assertTrue(p.captions[0].customize);self.assertEqual(asdict(p.subtitle_style),track)
+            self.assertEqual(p.to_dict()['captions'][1:],before['captions'][1:])
+            self.assertTrue(next(c for c in panel.inspector_template_cards if c.template['id']=='smart_highlight').is_selected)
+            w.undo();self.assertEqual(w.project.to_dict()['captions'],before['captions'])
+            w.redo();self.assertEqual(w.project.captions[0].style.font_face,'Bold')
+            panel.caption_id='a';w.timeline.selected_caption_ids={'a'}
+            panel.apply_inspector_template(get_template('none'))
+            self.assertTrue(w.project.captions[0].customize)
+            self.assertEqual(asdict(w.project.captions[0].style),asdict(CaptionStyle(name='Default')))
+            self.assertEqual(asdict(w.project.subtitle_style),track)
+            w.project.track_states['subtitle_1']={'locked':True}
+            panel.apply_inspector_template(get_template('impact'))
+            self.assertEqual(w.project.captions[0].style.font,CaptionStyle().font)
+        finally:w.close()
+
+    def test_template_indicator_is_empty_until_selected(self):
+        from kinetic_cut.caption_style_dialog import TemplateCardWidget
+        from kinetic_cut.caption_templates import get_template
+        card=TemplateCardWidget(get_template('impact'))
+        try:
+            card.show();_app.processEvents()
+            image=card.grab().toImage();x=card.width()-15;y=card.height()-15
+            self.assertTrue(all(image.pixelColor(x+dx,y+dy).name()=='#222734' for dx in range(-3,4) for dy in range(-3,4)))
+            card.set_selected(True);image=card.grab().toImage()
+            self.assertNotEqual(image.pixelColor(x,y).name(),'#222734')
+        finally:card.close()
 

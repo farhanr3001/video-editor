@@ -29,13 +29,21 @@ class _ValueScrub:
     def _init_scrub(self):
         self._drag_start=None; self.drag_sensitivity=None; self._typing=False; self._finishing_edit=False; self._committing_typed_value=False
         self.setFocusPolicy(Qt.NoFocus); self.installEventFilter(self); self.lineEdit().installEventFilter(self)
+        self.lineEdit().setFocusPolicy(Qt.NoFocus)
+        self.lineEdit().setCursor(Qt.SizeHorCursor)
+        self.lineEdit().selectionChanged.connect(self._guard_value_selection)
         self.lineEdit().setToolTip("Drag to adjust · Shift: fine · Ctrl: coarse · Double-click to type")
+
+    def _guard_value_selection(self):
+        # Native spin-box focus/step handling can select the edit even when
+        # its parent has NoFocus. Only explicit double-click typing owns text.
+        if not self._typing and self.lineEdit().hasSelectedText():self.lineEdit().deselect()
 
     def _end_scrub(self):
         if self._drag_start is None:return
         anchor=self._drag_start; self._drag_start=None
         QGuiApplication.instance().removeEventFilter(self)
-        self.lineEdit().releaseMouse(); self.lineEdit().unsetCursor()
+        self.lineEdit().releaseMouse(); self.lineEdit().setCursor(Qt.SizeHorCursor)
         if QGuiApplication.platformName()!="offscreen":QCursor.setPos(anchor)
         self.scrubFinished.emit()
 
@@ -55,20 +63,29 @@ class _ValueScrub:
         if watched in (self,self.lineEdit()) and event.type()==QEvent.KeyPress and event.key() in (Qt.Key_Return,Qt.Key_Enter):
             self._finish_keyboard_edit(); return True
         if self._drag_start is not None:
-            if event.type() in (QEvent.ApplicationDeactivate,QEvent.WindowDeactivate):self._end_scrub()
+            # Leaving an embedded native timeline window for this inspector
+            # deactivates that child, not the editor. Its activation handoff
+            # must not cancel the gesture which just captured the mouse.
+            if event.type()==QEvent.ApplicationDeactivate or (event.type()==QEvent.WindowDeactivate and watched in (self.window(),self.window().windowHandle())):self._end_scrub()
             elif event.type()==QEvent.KeyPress and event.key()==Qt.Key_Escape:self._end_scrub(); return True
-        if watched is self.lineEdit():
+        if watched in (self,self.lineEdit()):
+            line=self.lineEdit()
             kind=event.type()
             if kind==QEvent.Wheel:self.wheelEvent(event); return True
-            if kind==QEvent.MouseButtonDblClick and event.button()==Qt.LeftButton:
-                self._end_scrub(); self._typing=True; self.setKeyboardTracking(False); self.setFocusPolicy(Qt.StrongFocus); watched.setFocus(); watched.selectAll()
-                watched.setModified(False)
+            # A newly activated inspector can receive the first mouse event
+            # on the spin box rather than its edit. Share value-area handling,
+            # leaving native arrow buttons outside the edit untouched.
+            in_value=watched is line or (kind in (QEvent.MouseButtonPress,QEvent.MouseButtonDblClick) and line.geometry().contains(event.position().toPoint()))
+            if in_value and kind==QEvent.MouseButtonDblClick and event.button()==Qt.LeftButton and not self.isReadOnly():
+                self._end_scrub(); self._typing=True; self.setKeyboardTracking(False); self.setFocusPolicy(Qt.StrongFocus); line.setFocusPolicy(Qt.StrongFocus); line.setFocus(); line.selectAll()
+                line.setModified(False)
+                line.setCursor(Qt.IBeamCursor)
                 QGuiApplication.instance().installEventFilter(self);return True
-            if kind==QEvent.MouseButtonPress and event.button()==Qt.LeftButton and not self._typing and not self.isReadOnly():
+            if in_value and kind==QEvent.MouseButtonPress and event.button()==Qt.LeftButton and not self._typing and not self.isReadOnly():
                 self._drag_start=event.globalPosition().toPoint(); self._drag_value=float(self.value()); self._drag_time=time.perf_counter()
                 QGuiApplication.instance().installEventFilter(self)
-                watched.setCursor(Qt.BlankCursor)
-                if QGuiApplication.platformName()!="offscreen":watched.grabMouse()
+                line.setCursor(Qt.BlankCursor)
+                if QGuiApplication.platformName()!="offscreen":line.grabMouse()
                 self.scrubStarted.emit(); return True
             if kind==QEvent.MouseMove and self._drag_start is not None:
                 dx=event.globalPosition().x()-self._drag_start.x()
@@ -81,7 +98,7 @@ class _ValueScrub:
                     if QGuiApplication.platformName()!="offscreen":QCursor.setPos(self._drag_start)
                 return True
             if kind==QEvent.MouseButtonRelease and self._drag_start is not None:self._end_scrub(); return True
-            if kind in (QEvent.Hide,QEvent.UngrabMouse,QEvent.WindowDeactivate):self._end_scrub()
+            if kind in (QEvent.Hide,QEvent.UngrabMouse):self._end_scrub()
             if kind==QEvent.KeyPress:
                 if event.key()==Qt.Key_Escape and self._drag_start is not None:self._end_scrub(); return True
                 if event.key() in (Qt.Key_Return,Qt.Key_Enter) and self._typing:
@@ -97,6 +114,8 @@ class _ValueScrub:
             self.lineEdit().deselect()
             if clear_focus:self.lineEdit().clearFocus(); self.clearFocus()
             self.setFocusPolicy(Qt.NoFocus)
+            self.lineEdit().setFocusPolicy(Qt.NoFocus)
+            self.lineEdit().setCursor(Qt.SizeHorCursor)
             self.editingFinished.emit()
             self.lineEdit().deselect()
             if clear_focus:self.lineEdit().clearFocus(); self.clearFocus()

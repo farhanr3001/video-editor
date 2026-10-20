@@ -9,8 +9,8 @@ import unittest
 from unittest.mock import patch
 import numpy as np
 from PySide6.QtWidgets import QApplication
-from kinetic_cut.captions import transcribe,_from_segments,CaptionBackendError,CaptionCancelled
-from kinetic_cut.caption_alignment import ctc_spans,preserve_fillers,usable_words
+from kinetic_cut.captions import transcribe,_from_segments,_speech_windows,CaptionBackendError,CaptionCancelled
+from kinetic_cut.caption_alignment import ctc_spans,preserve_fillers,refine_speech_edges,usable_words
 from kinetic_cut.caption_progress import CaptionProgressDialog
 from kinetic_cut import caption_runtime
 
@@ -57,6 +57,25 @@ class WordBoundaryTests(unittest.TestCase):
             self.assertTrue(all(c.end>=c.start+max(w['end'] for w in c.word_timings) for c in cards))
             self.assertTrue(all(a.end<=b.start for a,b in zip(cards,cards[1:])))
 
+    def test_weak_alignment_word_uses_confirmed_audio_onset_and_spoken_tail(self):
+        audio=np.zeros(48000,np.float32);audio[16000:28800]=.4
+        words=[dict(text='seven',start=.8,end=1.5)]
+        refine_speech_edges(audio,words,[(1.12,1.84)])
+        self.assertAlmostEqual(words[0]['start'],.99,places=2)
+        self.assertAlmostEqual(words[0]['end'],1.8,places=2)
+        cards=_from_segments([dict(start=0,end=3,text='seven',words=words)],hold_seconds=.08)
+        self.assertGreaterEqual(cards[0].end,1.8)
+
+    def test_acoustic_edge_recovery_does_not_steal_next_word_or_span_noise(self):
+        audio=np.zeros(48000,np.float32);audio[16000:28800]=.4
+        words=[dict(text='one',start=.99,end=1.5),dict(text='two',start=1.6,end=1.8)]
+        refine_speech_edges(audio,words,[(1.12,1.84)])
+        self.assertEqual(words[0]['end'],1.5)
+        noisy=np.full(48000,.1,np.float32);noisy[16000:28800]=.4
+        word=dict(text='seven',start=.8,end=1.5)
+        refine_speech_edges(noisy,[word],[(1.12,1.84)])
+        self.assertEqual((word['start'],word['end']),(.8,1.5))
+
 
 class EngineTests(unittest.TestCase):
     def modules(self,model):
@@ -66,7 +85,35 @@ class EngineTests(unittest.TestCase):
         vad.get_speech_timestamps=lambda *a:[dict(start=0,end=32000)]
         return {'faster_whisper':parent,'faster_whisper.audio':audio,'faster_whisper.vad':vad}
 
-    def test_gpu_failure_retries_whole_transcript_on_cpu_without_partial_cards(self):
+    def test_alignment_uses_audio_bounds_not_approximate_segment_end(self):
+        devices=[];bounds=[]
+        class Model:
+            def __init__(self,*a,device,**k):devices.append(device)
+            def transcribe(self,*a,**k):
+                words=[types.SimpleNamespace(word=t,start=s,end=e) for t,s,e in [('I',0,.3),('am',.3,.3),('ready',.3,.3)]]
+                return iter([types.SimpleNamespace(start=0.,end=.3,text='I am ready',words=words)]),None
+        class Aligner:
+            def align(self,audio,words,start,end,cancel):
+                bounds.append((start,end))
+                for w,s,e in zip(words,[.05,.4,.9],[.3,.8,1.5]):w.update(start=s,end=e)
+        with patch.dict(sys.modules,self.modules(Model)),patch('kinetic_cut.caption_runtime.model_arguments',return_value=('fixture',{})),patch('kinetic_cut.caption_runtime.device_options',return_value=[('cuda','float16',[]),('cpu','int8',[])]),patch('kinetic_cut.caption_alignment.WordAligner',Aligner),patch('kinetic_cut.captions._windows_speech',side_effect=AssertionError('Must not silently change recognizer')):
+            cards,backend=transcribe('fixture',{},words_per_caption=2,hold_seconds=0)
+        self.assertEqual(devices,['cuda']);self.assertIn('GPU',backend)
+        self.assertEqual(bounds,[(0.,2.)])
+        self.assertEqual(' '.join(c.text for c in cards),'I am ready')
+        self.assertAlmostEqual(cards[-1].end,1.5)
+
+    def test_invalid_recognition_is_not_retried_as_a_gpu_failure(self):
+        devices=[]
+        class Model:
+            def __init__(self,*a,device,**k):devices.append(device)
+            def transcribe(self,*a,**k):
+                return iter([types.SimpleNamespace(start=0.,end=1.,text='hello',words=[])]),None
+        with patch.dict(sys.modules,self.modules(Model)),patch('kinetic_cut.caption_runtime.model_arguments',return_value=('fixture',{})),patch('kinetic_cut.caption_runtime.device_options',return_value=[('cuda','float16',[]),('cpu','int8',[])]):
+            with self.assertRaises(CaptionBackendError):transcribe('fixture',{'caption_alignment':False},require_word_timestamps=True)
+        self.assertEqual(devices,['cuda'])
+
+    def test_gpu_failure_retries_uncommitted_window_without_partial_cards(self):
         devices=[]
         class Model:
             def __init__(self,*a,device,**k):self.device=device;devices.append(device)
@@ -87,18 +134,80 @@ class EngineTests(unittest.TestCase):
             with self.assertRaises(CaptionCancelled):transcribe('fixture',{'caption_alignment':False},cancel_check=event.is_set)
         self.assertEqual(devices,['cuda'])
 
+    def test_gpu_retry_keeps_completed_windows_and_progress(self):
+        calls=[];updates=[]
+        class Model:
+            def __init__(self,*a,device,**k):self.device=device
+            def transcribe(self,audio,**k):
+                index=int(audio[0]);calls.append((self.device,index))
+                if self.device=='cuda' and index==1:raise RuntimeError('device lost')
+                word=types.SimpleNamespace(word=['hello','world'][index],start=.1,end=.6)
+                return iter([types.SimpleNamespace(start=.1,end=.6,text=word.word,words=[word])]),None
+        modules=self.modules(Model)
+        modules['faster_whisper.audio'].decode_audio=lambda *a,**k:np.repeat(np.arange(2,dtype=np.float32),16000)
+        modules['faster_whisper.vad'].get_speech_timestamps=lambda *a:[dict(start=0,end=16000),dict(start=16000,end=32000)]
+        with patch.dict(sys.modules,modules),patch('kinetic_cut.caption_runtime.model_arguments',return_value=('fixture',{})),patch('kinetic_cut.caption_runtime.device_options',return_value=[('cuda','float16',[]),('cpu','int8',[])]):
+            cards,_=transcribe('fixture',{'caption_alignment':False},progress=updates.append,hold_seconds=0)
+        self.assertEqual(calls,[('cuda',0),('cuda',1),('cpu',1)])
+        self.assertEqual([c.text for c in cards],['hello','world'])
+        self.assertAlmostEqual(cards[1].start,1.1)
+        percents=[p[0] for p in updates if isinstance(p,tuple)]
+        self.assertEqual(percents,sorted(percents))
+
+    def test_cpu_inference_error_does_not_silently_switch_to_windows_speech(self):
+        class Model:
+            def __init__(self,*a,**k):pass
+            def transcribe(self,*a,**k):raise RuntimeError('inference failed')
+        with patch.dict(sys.modules,self.modules(Model)),patch('kinetic_cut.caption_runtime.model_arguments',return_value=('fixture',{})),patch('kinetic_cut.caption_runtime.device_options',return_value=[('cpu','int8',[])]),patch('kinetic_cut.captions._windows_speech') as legacy:
+            with self.assertRaisesRegex(CaptionBackendError,'inference failed'):transcribe('fixture',{'caption_alignment':False})
+        legacy.assert_not_called()
+
+    def test_speech_windows_keep_gaps_bound_work_and_include_vad_misses(self):
+        windows=_speech_windows([dict(start=0,end=16000),dict(start=30000,end=800000)],800000)
+        self.assertEqual(windows[0],dict(start=0,end=16000))
+        self.assertEqual(windows[1]['start'],30000)
+        self.assertEqual(windows[-1]['end'],800000)
+        self.assertTrue(all(w['end']-w['start']<=26*16000 for w in windows))
+        self.assertEqual(_speech_windows([],16000),[dict(start=0,end=16000)])
+        self.assertEqual(_speech_windows([],0),[])
+
+    def test_short_isolated_word_is_not_filtered_out_beside_longer_speech(self):
+        class Model:
+            def __init__(self,*a,**k):pass
+            def transcribe(self,audio,**k):
+                text='yes' if len(audio)<1000 else 'hello'
+                return iter([types.SimpleNamespace(start=0.,end=.05,text=text,words=[types.SimpleNamespace(word=text,start=0.,end=.05)])]),None
+        modules=self.modules(Model);vad=modules['faster_whisper.vad'];vad.VadOptions=lambda **k:k
+        vad.get_speech_timestamps=lambda audio,options:([dict(start=1600,end=2400)] if options.get('min_speech_duration_ms',0)<=50 else [])+[dict(start=16000,end=32000)]
+        with patch.dict(sys.modules,modules),patch('kinetic_cut.caption_runtime.model_arguments',return_value=('fixture',{})),patch('kinetic_cut.caption_runtime.device_options',return_value=[('cpu','int8',[])]):
+            cards,_=transcribe('fixture',{'caption_alignment':False},hold_seconds=0)
+        self.assertEqual([c.text for c in cards],['yes','hello'])
+        self.assertAlmostEqual(cards[0].start,.1)
+
+    def test_mixed_missing_word_output_retains_sentence_and_marks_estimates(self):
+        class Model:
+            def __init__(self,*a,**k):pass
+            def transcribe(self,*a,**k):
+                return iter([types.SimpleNamespace(start=0.,end=.5,text='hello',words=[types.SimpleNamespace(word='hello',start=0.,end=.5)]),
+                    types.SimpleNamespace(start=.6,end=1.5,text='world again',words=[])]),None
+        with patch.dict(sys.modules,self.modules(Model)),patch('kinetic_cut.caption_runtime.model_arguments',return_value=('fixture',{})),patch('kinetic_cut.caption_runtime.device_options',return_value=[('cpu','int8',[])]):
+            cards,_=transcribe('fixture',{'caption_alignment':False},words_per_caption=1,hold_seconds=0)
+        self.assertEqual([c.text for c in cards],['hello','world','again'])
+        self.assertEqual(cards[-1].word_timings[0]['confidence'],0.)
+        self.assertAlmostEqual(cards[-1].end,1.5)
+
 
 class ProgressTests(unittest.TestCase):
-    def test_clock_updates_between_messages_and_eta_excludes_model_loading(self):
+    def test_clock_updates_between_messages_without_unreliable_eta_or_progress_reset(self):
         clock=[0.];dialog=CaptionProgressDialog(clock=lambda:clock[0])
         try:
-            clock[0]=30;dialog.refresh_time();self.assertIn('Elapsed 0:30',dialog.labelText());self.assertIn('Estimating',dialog.labelText())
+            clock[0]=30;dialog.refresh_time();self.assertIn('Elapsed 0:30',dialog.labelText());self.assertNotIn('Estimating',dialog.labelText())
             dialog.set_progress(45,'Transcribing… 0s / 100s')
             clock[0]=40;dialog.set_progress(54,'Transcribing… 20s / 100s')
-            self.assertIn('About 0:40 remaining',dialog.labelText())
+            self.assertNotIn('remaining',dialog.labelText())
             clock[0]=42;dialog.refresh_time();self.assertIn('Elapsed 0:42',dialog.labelText())
             dialog.set_progress(45,'GPU speech engine unavailable; retrying with CPU…')
-            self.assertIn('Estimating',dialog.labelText())
+            self.assertEqual(dialog.value(),54);self.assertNotIn('remaining',dialog.labelText())
         finally:dialog.close()
         self.assertFalse(dialog._timer.isActive())
 

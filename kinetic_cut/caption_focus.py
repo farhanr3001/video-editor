@@ -79,7 +79,7 @@ def paint(view,painter,frame_rect):
         if not playing:
             shown=copy.copy(caption); shown.style=copy.copy(project.caption_style(caption)); shown.customize=True
             # Paused review shows complete text even at a fade/reveal's onset.
-            if shown.style.animation!='word highlight 2':shown.style.animation='none'
+            if shown.style.animation not in ('word highlight 2','smart highlight'):shown.style.animation='none'
         painter.save(); painter.setClipRect(frame_rect,Qt.IntersectClip)
         bounds=draw_caption(painter,project,shown,frame_rect); painter.restore()
         view.text_rects[('caption',caption.id)]=bounds

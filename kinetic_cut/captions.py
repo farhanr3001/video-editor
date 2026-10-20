@@ -23,6 +23,22 @@ def _check_cancel(cancel_check):
     if cancel_check and cancel_check():raise CaptionCancelled('Caption generation cancelled')
 
 
+def _speech_windows(regions, length, maximum=26*16000):
+    """Keep each speech island's source clock without concatenating audio.
+
+    Bound inference/alignment work even when several people speak continuously.
+    Empty VAD output is not proof that quiet/overlapping speech is absent.
+    """
+    windows=[]
+    for region in regions:
+        a=max(0,int(region['start']));b=min(length,int(region['end']))
+        if b<=a:continue
+        windows.append(dict(start=a,end=b))
+    if not windows and length:windows=[dict(start=0,end=length)]
+    return [dict(start=a,end=min(a+maximum,r['end'])) for r in windows
+            for a in range(r['start'],r['end'],maximum)]
+
+
 def run_caption_process(command, cancel_check=None, **kwargs):
     """Cooperative subprocess cancellation without blocking on silent tools."""
     if cancel_check is None:return run_process(command,**kwargs)
@@ -88,6 +104,7 @@ def transcribe(path: str, settings: dict, offset: float = 0.0,
                cancel_check=None) -> tuple[list[Caption], str]:
     """Transcribe locally, preferring faster-whisper, then whisper.cpp, then Windows Speech."""
     faster_error = ""
+    recognition_started=False
     _check_cancel(cancel_check)
     try:
         from faster_whisper import WhisperModel  # type: ignore
@@ -103,9 +120,11 @@ def transcribe(path: str, settings: dict, offset: float = 0.0,
         from faster_whisper.vad import get_speech_timestamps, VadOptions
         audio=decode_audio(path, sampling_rate=16000)
         _check_cancel(cancel_check)
-        regions=get_speech_timestamps(audio,VadOptions(min_silence_duration_ms=700,speech_pad_ms=200))
+        regions=_speech_windows(get_speech_timestamps(audio,VadOptions(threshold=.35,
+            min_speech_duration_ms=0,max_speech_duration_s=26,
+            min_silence_duration_ms=700,speech_pad_ms=200)),len(audio))
         _check_cancel(cancel_check)
-        from .caption_alignment import WordAligner,preserve_fillers,usable_words
+        from .caption_alignment import WordAligner,preserve_fillers,refine_speech_edges,usable_words
         aligner=None
         if settings.get('caption_language','en')=='en' and settings.get('caption_alignment',True):
             try:aligner=WordAligner()
@@ -117,45 +136,73 @@ def transcribe(path: str, settings: dict, offset: float = 0.0,
             speech=[(r['start']/16000,r['end']/16000) for r in get_speech_timestamps(audio,VadOptions(min_speech_duration_ms=50,min_silence_duration_ms=80,speech_pad_ms=0))]
         from .caption_runtime import device_options
         devices=device_options(settings)
+        data=[];completed=0
         for attempt,(device,compute,handles) in enumerate(devices):
             _check_cancel(cancel_check)
-            data=[];model=None
+            model=None;inference=True
             try:
                 if progress:progress('Loading local Whisper model…')
                 model=WhisperModel(model_name,device=device,compute_type=compute,**model_options)
                 _check_cancel(cancel_check)
-                if progress:progress((45,f'Transcribing… 0.0s / {len(audio)/16000:.1f}s'))
-                for region in regions:
+                done=regions[completed-1]['end']/16000 if completed else 0.
+                if progress:progress((45+round(45*done/max(.01,len(audio)/16000)),f'Transcribing… {done:.1f}s / {len(audio)/16000:.1f}s'))
+                for region in regions[completed:]:
                     _check_cancel(cancel_check)
                     origin=region['start']/16000
                     options=dict(language=settings.get('caption_language','en'),vad_filter=False,
                         word_timestamps=True,condition_on_previous_text=False)
                     if settings.get('caption_vocabulary'):options['hotwords']=str(settings['caption_vocabulary'])[:1000]
+                    inference=True
+                    recognition_started=True
                     segments,_=model.transcribe(audio[region['start']:region['end']],**options)
+                    # Finish this bounded inference before committing anything.
+                    # A GPU failure retries only this window, not prior speech.
+                    segments=list(segments);inference=False
+                    words=[];texts=[]
                     for segment in segments:
                         _check_cancel(cancel_check)
-                        words=[dict(start=origin+w.start,end=origin+w.end,text=w.word,
+                        texts.append(segment.text)
+                        timed=[dict(start=origin+w.start,end=origin+w.end,text=w.word,
                             confidence=getattr(w,'probability',1.),_recognizer_start=origin+w.start)
                             for w in (getattr(segment,'words',None) or []) if str(getattr(w,'word','')).strip()]
-                        if not words and require_word_timestamps:
-                            raise CaptionBackendError('The recognizer returned no word-level timestamps; audio was not changed.')
-                        if aligner and words:
-                            try:aligner.align(audio,words,origin+segment.start,origin+segment.end,cancel_check)
-                            except CaptionCancelled:raise
-                            except Exception as error:
-                                import logging
-                                logging.warning('Word alignment failed; retaining Whisper timestamps: %s',error)
-                            preserve_fillers(words,speech)
-                        words=usable_words(words,origin+segment.start,origin+segment.end,require_word_timestamps)
-                        data.append(dict(start=origin+segment.start,end=max(origin+segment.end,max((w['end'] for w in words),default=0)),text=segment.text,words=words))
-                        if progress:progress((45+round(45*min(1,(origin+segment.end)/max(.01,len(audio)/16000))),f'Transcribing… {origin+segment.end:.1f}s / {len(audio)/16000:.1f}s'))
+                        if not timed and segment.text.strip():
+                            if require_word_timestamps:
+                                raise CaptionBackendError('The recognizer returned no word-level timestamps; audio was not changed.')
+                            # Preserve text even if one sentence lacks DTW word
+                            # output. CTC may still recover its acoustic timing.
+                            tokens=segment.text.split();span=max(0.,segment.end-segment.start)
+                            timed=[dict(text=t,start=origin+segment.start+span*n/len(tokens),
+                                end=origin+segment.start+span*(n+1)/len(tokens),confidence=0.) for n,t in enumerate(tokens)]
+                        words.extend(timed)
+                    end=region['end']/16000
+                    if aligner and words:
+                        try:aligner.align(audio,words,origin,end,cancel_check)
+                        except CaptionCancelled:raise
+                        except Exception as error:
+                            import logging
+                            logging.warning('Word alignment failed; retaining Whisper timestamps: %s',error)
+                        preserve_fillers(words,speech)
+                        if not require_word_timestamps:refine_speech_edges(audio,words,speech)
+                    # Whisper segment endpoints are estimates, not the limits
+                    # of the audio. CTC can correctly place words beyond them.
+                    words=usable_words(words,origin,end,require_word_timestamps)
+                    if texts:data.append(dict(start=origin,end=end,text=' '.join(texts),words=words))
+                    completed+=1
+                    if progress:progress((45+round(45*min(1,end/max(.01,len(audio)/16000))),f'Transcribing… {end:.1f}s / {len(audio)/16000:.1f}s'))
                 _check_cancel(cancel_check)
                 usable_words([w for segment in data for w in segment['words']],0,len(audio)/16000,require_word_timestamps)
                 result=_from_segments(data,offset,words_per_caption=words_per_caption,hold_seconds=hold_seconds)
+                if settings.get('caption_measure_emphasis') and not require_word_timestamps:
+                    from .caption_emphasis import measure_emphasis
+                    measure_emphasis(result,audio,offset,cancel_check=cancel_check)
                 return result,'faster-whisper ('+('GPU' if device=='cuda' else 'CPU')+(' + word alignment)' if aligner else ')')
-            except CaptionCancelled:raise
-            except Exception:
+            except (CaptionCancelled,CaptionBackendError):raise
+            except Exception as error:
+                if not inference:
+                    raise CaptionBackendError('Caption timing could not be prepared: '+str(error)) from error
                 if device!='cuda' or attempt+1>=len(devices):raise
+                import logging
+                logging.warning('Local speech device %s failed after %d windows: %s',device,completed,error)
                 if progress:progress('Retrying with a compatible speech engine…')
             finally:
                 # Release GPU memory on success, failure and cancellation.
@@ -164,8 +211,10 @@ def transcribe(path: str, settings: dict, offset: float = 0.0,
                     try:engine.unload_model()
                     except Exception:pass
                 del model
-    except CaptionCancelled:raise
+    except (CaptionCancelled,CaptionBackendError):raise
     except Exception as error:
+        if recognition_started:
+            raise CaptionBackendError('Local speech recognition could not finish. Please retry. '+str(error)) from error
         # A model may not be downloaded yet or a machine may lack a compatible
         # runtime. Continue to configured whisper.cpp / Windows Speech fallbacks.
         faster_error = str(error)

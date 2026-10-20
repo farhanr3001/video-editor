@@ -10,6 +10,16 @@ from kinetic_cut.mcp_bridge import send_mcp_request
 
 
 class AssistantModelTests(unittest.TestCase):
+    def test_smart_template_batch_persists_sparse_marks_without_mutating_source(self):
+        from kinetic_cut.model import Caption,CaptionStyle
+        p=Project(captions=[Caption('chosen',0,2,'THE MOST RANGE',customize=True),Caption('other',3,4,'Keep this',style=CaptionStyle(font='Poppins'),customize=True)])
+        before=copy.deepcopy(p.to_dict())
+        result,_=edited(p,[dict(op='set_caption_style',template='smart_highlight',caption_ids=['chosen'])])
+        self.assertEqual(p.to_dict(),before)
+        self.assertEqual(result.captions[0].highlighted_words,[1,2]);self.assertEqual(result.captions[0].style.animation,'smart highlight')
+        self.assertEqual(result.captions[1].style.font,'Poppins');self.assertEqual(result.captions[1].highlighted_words,[])
+        restored=Project.from_dict(result.to_dict());self.assertEqual(restored.captions[0].highlighted_words,[1,2])
+
     def test_atomic_batch_full_style_and_rollback(self):
         p=Project(); before=p.to_dict()
         result,ids=edited(p,[dict(op='add',collection='timeline',values=dict(title_text='Hello',fade_in=.4,title_style={'color':'#ff3344'}))])

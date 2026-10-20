@@ -15,6 +15,17 @@ from kinetic_cut.native_engine import LIB as INDEX_LIB,LatestRequest
 
 
 class GpuSurfaceTests(unittest.TestCase):
+    def test_prepared_text_tracks_current_canvas_geometry_before_raster_finishes(self):
+        from kinetic_cut.gpu_preview import GpuPreview
+        from PySide6.QtCore import QRectF,QSizeF
+        from unittest.mock import Mock
+        layer=Mock();surface=SimpleNamespace(layers={'captions':layer},bounds={('caption','c'):QRectF(20,60,100,20)},_bounds_size=QSizeF(200,400))
+        GpuPreview._fit_prepared_geometry(surface,[('captions',)],QRectF(0,0,100,200))
+        layer.setWidth.assert_called_with(100);layer.setHeight.assert_called_with(200)
+        self.assertEqual(surface.bounds[('caption','c')],QRectF(10,30,50,10))
+        GpuPreview._fit_prepared_geometry(surface,[('captions',)],QRectF(0,0,400,800))
+        self.assertEqual(surface.bounds[('caption','c')],QRectF(40,120,200,40))
+
     def test_image_texture_reloads_changed_file_without_recreating_its_layer(self):
         import tempfile
         from unittest.mock import Mock

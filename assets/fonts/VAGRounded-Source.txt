@@ -1,0 +1,6 @@
+VAG Rounded Std Light
+Owner-selected caption font, 20 October 2026.
+Original unmodified OpenType/CFF font; 26,912 bytes.
+Copyright (c) 1989, 1995 Adobe Systems Incorporated. All Rights Reserved.
+Specimen/source: https://www.onlinewebfonts.com/download/21b0e9c93e5b240b0c3b22793c0f3169
+Retain the original embedded naming and copyright records.

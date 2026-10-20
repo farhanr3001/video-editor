@@ -892,25 +892,27 @@ class PropertiesPanel(QWidget):
         if self.window.project.track_states.get('subtitle_1', {}).get('locked'):
             return
         self.window.commit_history()
+        project = self.window.project
+        caption = self.current_caption()
+        custom = bool(caption and (caption.customize or caption.is_hook))
+        targets = self.caption_targets() if custom else [c for c in project.captions if not c.customize and not c.is_hook]
         is_none = template_data.get("is_none", False) or template_data.get("id") == "none"
-        if is_none:
-            default_style = CaptionStyle()
-            default_style.id = None
-            default_style.name = "Default"
-            self.window.project.subtitle_style = copy.deepcopy(default_style)
-            for c in self.window.project.captions:
-                if not c.customize and not c.is_hook:
-                    c.style = copy.deepcopy(default_style)
-        else:
-            target_style = self.window.project.subtitle_style
-            target_style.id = template_data.get("id")
-            target_style.name = template_data.get("name", "")
+        target_style = CaptionStyle()
+        target_style.id = None if is_none else template_data.get("id")
+        target_style.name = "Default" if is_none else template_data.get("name", "")
+        if not is_none:
             for k, v in template_data.items():
                 if hasattr(target_style, k):
-                    setattr(target_style, k, copy.deepcopy(v) if isinstance(v, (list, dict)) else v)
-            for c in self.window.project.captions:
-                if not c.customize and not c.is_hook:
-                    c.style = copy.deepcopy(target_style)
+                    setattr(target_style, k, copy.deepcopy(v))
+        if not custom:
+            project.subtitle_style = copy.deepcopy(target_style)
+        for c in targets:
+            c.style = copy.deepcopy(target_style)
+            if custom:
+                c.customize = True
+        if target_style.animation == 'smart highlight':
+            from .caption_words import prepare_generated
+            prepare_generated(targets, target_style)
 
         self.sync_inspector_template_cards()
         self.changed.emit()
@@ -919,7 +921,9 @@ class PropertiesPanel(QWidget):
         self.relocate_style()
 
     def sync_inspector_template_cards(self):
-        curr_id = getattr(self.window.project.subtitle_style, "id", None)
+        caption = self.current_caption()
+        style = self.window.project.caption_style(caption) if caption and (caption.customize or caption.is_hook) else self.window.project.subtitle_style
+        curr_id = getattr(style, "id", None)
         if not curr_id:
             curr_id = "none"
         for card in getattr(self, "inspector_template_cards", []):
@@ -1016,6 +1020,10 @@ class PropertiesPanel(QWidget):
             if attr in {"zoom_x","zoom_y"} and style.zoom_linked:
                 factor=value/getattr(style,attr); style.zoom_x*=factor; style.zoom_y*=factor
             else:setattr(style,attr,value)
+        if attr=='animation' and value=='smart highlight':
+            from .caption_emphasis import mark_strong_words
+            targets=self.caption_targets() if self.current_caption() and self.subtitle.currentIndex()==0 else [c for c in self.window.project.captions if not c.customize and not c.is_hook]
+            mark_strong_words(targets)
         self.changed.emit()
     def reset_style_section(self,*attrs):
         self.window.flush_text_edit(); defaults=CaptionStyle()
@@ -1403,7 +1411,7 @@ class PropertiesPanel(QWidget):
             for row,cap in enumerate(caps):
                 for col,value in enumerate([f'{cap.start:.3f}',f'{cap.end:.3f}',cap.text]):
                     item=QTableWidgetItem(value); item.setData(Qt.UserRole,cap.id); table.setItem(row,col,item)
-                    if col==2 and cap.highlighted_words and self.window.project.caption_style(cap).animation=='word highlight 2':
+                    if col==2 and cap.highlighted_words and self.window.project.caption_style(cap).animation in ('word highlight 2','smart highlight'):
                         item.setData(Qt.UserRole+1,(cap.highlighted_words,self.window.project.caption_style(cap).highlight))
                         item.setToolTip('Highlighted: '+', '.join(word for n,word in enumerate(cap.text.split()) if n in cap.highlighted_words)+' · Right-click to change')
             self._timing_signature=signature
@@ -1431,7 +1439,7 @@ class PropertiesPanel(QWidget):
         self.window.flush_text_edit()
         if index in caption.highlighted_words:caption.highlighted_words.remove(index)
         else:caption.highlighted_words.append(index)
-        if self.window.project.caption_style(caption).animation!='word highlight 2':
+        if self.window.project.caption_style(caption).animation not in ('word highlight 2','smart highlight'):
             caption.style=copy.deepcopy(self.window.project.caption_style(caption)); caption.customize=True; caption.style.animation='word highlight 2'
         self.changed.emit(); self.refresh_timings()
     def select_timing_rows(self):

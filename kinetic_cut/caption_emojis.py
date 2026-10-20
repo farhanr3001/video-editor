@@ -17,7 +17,7 @@ _GROUPS=[
     ('😂',6,'laugh laughing laughed laughter hilarious'),('😰',6,'panic panicked panicking'),
     ('🤯',6,'crazy insane unbelievable'),('😱',6,'shocked shocking terrified'),
     ('😵‍💫',6,'unhinged'),('😢',6,'cry crying cried tears'),('😡',6,'angry furious'),
-    ('🤔',5,'curious confused'),('🤫',5,'secret secrets'),('❤️',5,'love heart'),
+    ('🤔',5,'think thinking curious confused'),('🤫',5,'secret secrets'),('❤️',5,'love heart'),
     ('💰',5,'money cash millionaire'),('💵',5,'dollar dollars'),('🏆',6,'win winner victory'),
     ('🏅',6,'medal medals'),('🏊',5,'swim swimming'),('🧗',5,'climbing'),
     ('💪',5,'strength strong workout'),('👶',5,'baby babies'),('🎮',5,'gaming gamer videogame'),
@@ -36,8 +36,25 @@ def find_emoji_for_word(word):
     # No prefix or random fallback: filler/unknown words must stay plain.
     return KEYWORD_EMOJI_MAP.get(clean_token(word))
 
-def _candidate(tokens,index):
+_GAME_TOPICS = (
+    ('🎮', frozenset('gaming gamer videogame minecraft fortnite roblox xbox playstation nintendo controller console valorant overwatch'.split())),
+    ('⚽', frozenset('football soccer goalkeeper striker'.split())),
+    ('🏀', frozenset('basketball nba hoop hoops'.split())),
+)
+
+def _game_topic(tokens):
+    words = set(tokens)
+    scores = [(len(words & keywords), emoji) for emoji, keywords in _GAME_TOPICS]
+    if 'video' in words and words & {'game', 'games'}:
+        scores[0] = (scores[0][0] + 1, scores[0][1])
+    scores.sort(reverse=True)
+    return scores[0][1] if scores[0][0] and scores[0][0] > scores[1][0] else None
+
+def _candidate(tokens,index,topic_tokens=None):
     word=tokens[index]; before=tokens[max(0,index-3):index]; after=tokens[index+1:index+4]
+    if word in ('game', 'games'):
+        emoji = _game_topic(tokens if topic_tokens is None else topic_tokens)
+        return (emoji, 5.5) if emoji else None
     if word in ('call','calls','calling'):
         if after[:2]==['of','duty'] or after[:1] in (['out'],['it'],['him'],['her'],['them']):return None
         if after[:2]==['me','crazy']:return None
@@ -84,7 +101,10 @@ def _plan(project):
         left=max(0,index-3); right=min(len(records),index+4)
         while left<index and records[left][5]!=group:left+=1
         while right>index+1 and records[right-1][5]!=group:right-=1
-        candidate=_candidate([r[2] for r in records[left:right]],index-left)
+        # Cached, bounded nearby speech; never carry a topic across a pause.
+        topic_left=max(0,index-16);topic_right=min(len(records),index+17)
+        topic=[r[2] for r in records[topic_left:topic_right] if r[5]==group and abs(r[3]-start)<=8]
+        candidate=_candidate([r[2] for r in records[left:right]],index-left,topic)
         if candidate and end>start:
             emoji,score=candidate
             # Recurring concrete topics deserve emphasis over incidental nouns;
@@ -93,11 +113,11 @@ def _plan(project):
             candidates.append((score+int(word_index in caption.highlighted_words),start,index,caption,word_index,emoji))
     chosen=[]; counts={}
     for _,start,index,caption,word_index,emoji in sorted(candidates,key=lambda c:(-c[0],c[1],c[2])):
-        limit=2 if project.caption_style(caption).animation=='double emoji' else 1
+        limit=2 if len(caption.text.split())>=3 or project.caption_style(caption).animation=='double emoji' else 1
         if counts.get(caption.id,0)>=limit:continue
         # Distinct concrete words can occur in the same sentence (headphones,
         # coffee). Keep repetition sparse without discarding the earlier object.
-        if any(abs(start-other[0])<.8 or (emoji==other[3] and abs(start-other[0])<8) for other in chosen):continue
+        if any((other[1]!=caption.id and abs(start-other[0])<.8) or (emoji==other[3] and (other[1]==caption.id or abs(start-other[0])<8)) for other in chosen):continue
         chosen.append((start,caption.id,word_index,emoji)); counts[caption.id]=counts.get(caption.id,0)+1
     result={c.id:(_signature(project,c),[]) for c in project.captions}
     for _,caption_id,index,emoji in sorted(chosen):result[caption_id][1].append((index,emoji))
@@ -105,7 +125,7 @@ def _plan(project):
 
 def emojis_for_caption(project,caption,max_emojis=1):
     """Cached sparse transcript plan; ephemeral state never enters project files."""
-    stamp=(project.modified_at,id(project.captions),len(project.captions),project.subtitle_style.animation)
+    stamp=(project.modified_at,getattr(project,'_edit_revision',0),id(project.captions),len(project.captions),project.subtitle_style.animation)
     cache=getattr(project,'_caption_emoji_plan',None); own=_signature(project,caption)
     if not cache or cache[0]!=stamp or (caption.id in cache[1] and cache[1][caption.id][0]!=own):
         cache=(stamp,_plan(project)); project._caption_emoji_plan=cache

@@ -140,6 +140,8 @@ def ass_events(emojis,start,end,style_name,opacity=100,animation="none",layer=3,
             phases=[(0,end-start,1.,1.)]
             if animation=="pop":phases=[(0,min(.13,end-start),.72,1.08),(.13,min(.22,end-start),1.08,1.),(.22,end-start,1.,1.)]
             if animation=="punch":phases=[(0,min(.10,end-start),.55,1.15),(.10,min(.22,end-start),1.15,1.),(.22,end-start,1.,1.)]
+            if animation=="emoji badge":phases=[(0,min(.10,end-start),.82,1.08),(.10,min(.18,end-start),1.08,1.),(.18,end-start,1.,1.)]
+            if animation=="smart highlight":phases=[(0,min(.10,end-start),.86,1.04),(.10,min(.18,end-start),1.04,1.),(.18,end-start,1.,1.)]
             for a,b,first,last in phases:
                 if b<=a:continue
                 ox,oy=origin or (rect.center().x(),rect.center().y())

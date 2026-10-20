@@ -7,7 +7,7 @@ from PySide6.QtGui import QImage,QPainter
 from PySide6.QtWidgets import QApplication,QStyle,QStyleOptionSpinBox
 from PySide6.QtTest import QTest
 from kinetic_cut.model import Caption,CaptionStyle,Project
-from kinetic_cut.visuals import draw_caption,caption_geometry,caption_emoji_rect
+from kinetic_cut.visuals import draw_caption,caption_geometry,caption_emoji_rect,caption_emoji_runs
 from kinetic_cut.caption_emojis import emojis_for_caption
 from kinetic_cut.word_highlight import events
 
@@ -118,8 +118,8 @@ class CaptionFollowupTests(unittest.TestCase):
             p,c=self.fixture(' '.join(['headphones']+['word']*(count-1))); p.settings.height=400
             frame=QRectF(8,8,464,144); fit_preview(p,c,frame)
             geometry=caption_geometry(p,c,frame); bounds=geometry[2]
-            rect=caption_emoji_rect(bounds,geometry[3][0],frame.width()/1080)
-            center=rect.center(); rect.setWidth(rect.width()*1.3); rect.setHeight(rect.height()*1.3); rect.moveCenter(center)
+            rect=caption_emoji_runs(bounds,geometry[3],emojis_for_caption(p,c,2),frame.width()/1080)[0][1]
+            center=rect.center(); rect.setWidth(rect.width()*1.08); rect.setHeight(rect.height()*1.08); rect.moveCenter(center)
             composite=bounds.united(rect)
             self.assertGreaterEqual(composite.top(),frame.top())
             self.assertLessEqual(composite.bottom(),frame.bottom())

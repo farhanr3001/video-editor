@@ -39,12 +39,19 @@ def run(output,project_path):
                 texts.append(dialog.labelText())
     try:
         project=copy.deepcopy(Project.load(path));project.path='';project.captions=[]
-        project.timeline=[item for item in project.timeline if item.start<20]
-        for item in project.timeline:item.duration=min(item.duration,20-item.start)
+        range_name=os.environ.get('KINETIC_CAPTION_TEST_RANGE','first20')
+        if range_name=='second56':
+            item=project.item_by_id('2f79ee52490e');assert item is not None
+            selected={i.id for i in project.linked_items(item)}|{item.id}
+        else:
+            end=30.812154576388906 if range_name=='first30' else 20
+            project.timeline=[item for item in project.timeline if item.start<end]
+            for item in project.timeline:item.duration=min(item.duration,end-item.start)
+            selected=set()
         window.request_waveform=lambda media:None
         window.queue_proxy=lambda media:None
         window.preview_quality.request=lambda:None
-        window.set_project(project);window.timeline.select_ids(set(),'')
+        window.set_project(project);window.timeline.select_ids(selected,next(iter(selected),'') if selected else '')
         model=resource_path('assets','caption-models','base.en')
         if not (model/'model.bin').is_file():model=Path.cwd()/'dist/KineticCut/_internal/assets/caption-models/base.en'
         assert (model/'model.bin').is_file(),'No existing local speech model; no download attempted'
@@ -70,13 +77,49 @@ def run(output,project_path):
             assert 1<=len(caption.text.split())<=2 and caption.word_timings
             assert caption.end-caption.start+1e-6>=max(w['end'] for w in caption.word_timings)
         assert all(a.end<=b.start+1e-6 for a,b in zip(project.captions,project.captions[1:]))
-        assert any('Elapsed' in text and 'remaining' in text for text in texts)
+        assert any('Elapsed' in text for text in texts)
+        assert not any('remaining' in text or 'Estimating' in text for text in texts)
         assert len(ticks)>10
         caption_count=len(project.captions);window.undo();assert not window.project.captions
         window.redo();assert len(window.project.captions)==caption_count
+        # Repeat/cancel on the same window: reopening must never be required to
+        # release the model, settle the worker, or allow the next generation.
+        retained=[c.id for c in window.project.captions]
+        window.timeline.select_ids(selected,next(iter(selected),'') if selected else '')
+        cancelled=window.generate_captions(headless=True,words_per_card=2)
+        assert cancelled is not None
+        cancel_requested=[]
+        def cancel_inference(value):
+            text=value[1] if isinstance(value,tuple) else str(value)
+            if not cancel_requested and text.startswith('Transcribing'):
+                cancel_requested.append(True);cancelled.cancel()
+        cancelled.signals.progress.connect(cancel_inference)
+        deadline=time.monotonic()+30
+        while window._caption_cancel is not None and time.monotonic()<deadline:wait(50)
+        assert cancel_requested and window._caption_cancel is None and [c.id for c in window.project.captions]==retained
+        # Clear this diagnostic's generated layer before the fresh generation,
+        # as in the owner's delete/regenerate workflow. General subtitle
+        # overwrite intentionally retains old tails/gaps and list order.
+        window.project.delete([],caption_ids=retained);window.model_changed()
+        assert not window.project.captions
+        window.timeline.select_ids(selected,next(iter(selected),'') if selected else '')
+        again=window.generate_captions(headless=True,words_per_card=2);assert again is not None
+        repeat_finished=[];repeat_errors=[]
+        again.signals.finished.connect(lambda:repeat_finished.append(True));again.signals.error.connect(repeat_errors.append)
+        deadline=time.monotonic()+120
+        while not repeat_finished and time.monotonic()<deadline:wait(50)
+        assert repeat_finished and not repeat_errors,repeat_errors
+        # Temperature fallback on ambiguous speech may vary the wording/card
+        # count. Verify committed, valid new output rather than identical ASR.
+        assert window.project.captions and window._caption_cancel is None
+        assert any(c.id not in retained for c in window.project.captions)
+        assert all(a.end<=b.start+1e-6 for a,b in zip(window.project.captions,window.project.captions[1:]))
+        for caption in window.project.captions:
+            assert caption.word_timings and caption.end-caption.start+1e-6>=max(w['end'] for w in caption.word_timings)
         window.project.save(output/'review.kcut')
         report.update(passed=True,captions=caption_count,seconds=time.monotonic()-started,progress_texts=list(dict.fromkeys(texts)),screenshots=screens,
-            words_per_card=2,all_spoken_tails_contained=True,undo_redo=True,heartbeat_ticks=len(ticks),source_preserved=True)
+            words_per_card=2,all_spoken_tails_contained=True,undo_redo=True,heartbeat_ticks=len(ticks),source_preserved=True,
+            cancel_preserves_captions=True,repeat_after_cancel=True)
     except Exception:report['error']=traceback.format_exc()
     finally:
         timer.stop();window.close()

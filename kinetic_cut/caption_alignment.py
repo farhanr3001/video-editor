@@ -111,6 +111,39 @@ def preserve_fillers(words,speech):
         word['end']=max(word['end'],min(b,right))
 
 
+def refine_speech_edges(audio,words,speech):
+    """Repair silent leads/clipped tails only at isolated acoustic boundaries.
+
+    CTC can be all blank on a short word. VAD alone is too late for initial
+    fricatives, so use energy around its boundary when quiet context confirms
+    the onset/tail. Never stretch across another recognized word or a pause.
+    This is caption presentation recovery, not exact audio-edit evidence.
+    """
+    import numpy as np
+    if not words:return
+    for a,b in speech:
+        candidates=[(i,w) for i,w in enumerate(words) if w['start']<b and w['end']>a]
+        if not candidates:continue
+        left=max(0,round((a-.2)*SAMPLE_RATE));right=min(len(audio),round((b+.12)*SAMPLE_RATE))
+        clip=audio[left:right];step=160
+        if len(clip)<step:continue
+        levels=np.sqrt(np.mean(clip[:len(clip)//step*step].reshape(-1,step)**2,axis=1))
+        peak=float(levels.max());floor=float(np.quantile(levels,.1))
+        if peak<1e-5 or floor>peak*.08:continue  # Background sound obscures the boundary.
+        active=np.flatnonzero(levels>max(1e-5,peak*.02,floor*3))
+        if not len(active):continue
+        first,last=candidates[0],candidates[-1]
+        onset=(left+int(active[0])*step)/SAMPLE_RATE
+        tail=(left+(int(active[-1])+1)*step)/SAMPLE_RATE
+        i,w=first
+        if active[0]>0 and onset-.35<=w['start']<onset-.02 and w['end']>onset:
+            w['start']=max(words[i-1]['end'] if i else 0,onset-.01)
+        i,w=last
+        next_start=words[i+1]['start'] if i+1<len(words) else float('inf')
+        if active[-1]<len(levels)-1 and 0<tail-w['end']<=.45 and next_start>=tail:
+            w['end']=tail
+
+
 def usable_words(words,start,end,require_exact=False):
     """Preserve collapsed recognized tokens, but never call interpolation exact."""
     from .captions import CaptionBackendError

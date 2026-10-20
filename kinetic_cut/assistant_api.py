@@ -259,7 +259,7 @@ def edited(project, operations):
             from .caption_templates import CAPTION_TEMPLATES
             template_map = {t["id"]: t for t in CAPTION_TEMPLATES}
             target = op.get('template') or op.get('preset', '')
-            preset_dict = copy.deepcopy(template_map.get(target, CAPTION_PRESETS.get(target, {})))
+            preset_dict = {k:copy.deepcopy(v) for k,v in template_map.get(target, CAPTION_PRESETS.get(target, {})).items() if k in CaptionStyle.__dataclass_fields__}
             if 'properties' in op and isinstance(op['properties'],dict):
                 merge(preset_dict,op['properties'])
             raw=stage.to_dict(); merge(raw['subtitle_style'],preset_dict)
@@ -273,6 +273,9 @@ def edited(project, operations):
                 for c in raw['captions']:
                     merge(c['style'],preset_dict)
             stage=Project.from_dict(raw)
+            if preset_dict.get('animation')=='smart highlight':
+                from .caption_emphasis import mark_strong_words
+                mark_strong_words([c for c in stage.captions if not caption_ids or c.id in caption_ids])
         elif kind=='apply_vertical_framing':
             fg_track=op.get('foreground_track','video_2')
             bg_track=op.get('background_track','video_1')

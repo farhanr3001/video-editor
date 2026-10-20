@@ -1625,6 +1625,9 @@ class MainWindow(QMainWindow):
                             setattr(cap.style, k, type(cur)(v))
                         else:
                             setattr(cap.style, k, v)
+        if merged.get('animation')=='smart highlight':
+            from .caption_emphasis import mark_strong_words
+            mark_strong_words([c for c in self.project.captions if not caption_ids or c.id in caption_ids])
         self.model_changed()
         if hasattr(self, 'caption_style_changed'):
             self.caption_style_changed()
@@ -2025,6 +2028,9 @@ class MainWindow(QMainWindow):
 
     @edit_only
     def generate_captions(self, headless: bool = False, words_per_card: int | None = None, style_override: dict | None = None):
+        if getattr(self,'_caption_cancel',None) is not None:
+            self.statusBar().showMessage('Caption generation is already running; wait or cancel it first.',4000)
+            return None
         if self.project.track_states.get("subtitle_1",{}).get("locked"):
             self.statusBar().showMessage("Unlock the subtitle track before generating captions.",4000)
             return None
@@ -2064,7 +2070,8 @@ class MainWindow(QMainWindow):
         destination_project=self.project
         snapshot=copy.deepcopy(self.project)
         selected=self.timeline.selected_ids
-        targets=[i for i in snapshot.timeline if i.track in snapshot.audio_tracks and i.role in {"source_audio","dialogue"} and not i.muted]
+        speech_items=[i for i in snapshot.timeline if i.track in snapshot.audio_tracks and i.role in {"source_audio","dialogue"}]
+        targets=[i for i in speech_items if not i.muted and not snapshot.track_states.get(i.track,{}).get('muted')]
         if selected:
             related=set(selected)
             for item in snapshot.timeline:
@@ -2074,10 +2081,14 @@ class MainWindow(QMainWindow):
             if chosen:
                 targets=chosen
         if not targets:
+            if speech_items:
+                self.statusBar().showMessage('Unmute speech audio before generating captions.',4000)
+                return None
             targets=[copy.deepcopy(main)]
         offset=min(i.start for i in targets)
         duration=max(i.start+i.duration for i in targets)-offset
         settings=copy.deepcopy(self.settings)
+        settings['caption_measure_emphasis']=style.animation=='smart highlight'
         self.statusBar().showMessage("Preparing timeline speech for local captions…")
 
         cancel=threading.Event()

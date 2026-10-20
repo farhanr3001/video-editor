@@ -1,5 +1,7 @@
 """Curated CapCut-style caption templates with unique typography, animations, glows, boxes, and emojis."""
 from typing import Any
+from dataclasses import asdict
+from .model import CaptionStyle
 
 CAPTION_TEMPLATES: list[dict[str, Any]] = [
     {
@@ -183,14 +185,14 @@ CAPTION_TEMPLATES: list[dict[str, Any]] = [
         "name": "Cinematic Serif",
         "badge": "Serif",
         "preview_text": "Cinematic",
-        "font": "Baskerville Old Face",
-        "font_face": "Italic",
-        "size": 54,
+        "font": "Georgia",
+        "font_face": "Regular",
+        "size": 84,
         "uppercase": False,
         "color": "#F8FAFC",
         "highlight": "#FDE047",
         "outline": "#000000",
-        "outline_width": 3,
+        "outline_width": 1.5,
         "animation": "fade",
         "shadow_enabled": True,
         "shadow_color": "#000000",
@@ -267,6 +269,39 @@ CAPTION_TEMPLATES: list[dict[str, Any]] = [
         "background_override": False,
     },
 ]
+
+# Complete styles prevent a previous template's box, transform or glow leaking
+# into the next one. Impact deliberately differs from the defaults in two fields.
+_DEFAULT=asdict(CaptionStyle())
+_NEW=[
+    dict(id='impact',name='Impact',badge='Impact',preview_text='Your words',font='Impact',glow_enabled=True),
+    dict(id='smart_highlight',name='Smart Highlight',badge='Smart Highlight',preview_text='THE MOST RANGE',
+         font='Bebas Neue',font_face='Bold',size=94,uppercase=True,color='#FFFFFF',highlight='#FF1616',
+         outline_width=1.5,animation='smart highlight',shadow_enabled=True,shadow_x=10.,shadow_y=3.,shadow_blur=3.,shadow_opacity=95.,
+         glow_enabled=True,glow_follow_color=True,glow_radius=8.,glow_opacity=65.),
+    dict(id='basic',name='Basic',badge='Basic',preview_text='clout and water',font='VAG Rounded Std',font_face='Regular',size=82,
+         color='#FFFFFF',outline_width=1.5,animation='pop',shadow_enabled=True),
+    dict(id='editorial',name='Editorial',badge='Editorial',preview_text='A different perspective',font='Georgia',font_face='Regular',size=60,
+         color='#FFF5E6',outline_width=1.,animation='fade',shadow_x=1.,shadow_y=2.,shadow_blur=4.,shadow_opacity=80.),
+    dict(id='studio',name='Studio',badge='Studio',preview_text='Clear and simple',font='Poppins',font_face='Bold',size=58,
+         color='#FFFFFF',outline_width=2.,animation='pop',shadow_x=0.,shadow_y=3.,shadow_blur=5.,shadow_opacity=85.),
+    dict(id='mint_focus',name='Mint Focus',badge='Mint Focus',preview_text='Make it incredible',font='Montserrat',font_face='Bold',size=64,
+         color='#FFFFFF',highlight='#8FFFD0',outline_width=3.,animation='smart highlight',shadow_x=2.,shadow_y=3.,shadow_opacity=85.,glow_enabled=False),
+    dict(id='documentary',name='Documentary',badge='Documentary',preview_text='Behind the story',font='Arial',font_face='Regular',size=52,
+         color='#FFFFFF',outline_width=1.,animation='fade',shadow_x=1.,shadow_y=2.,shadow_blur=2.,shadow_opacity=90.),
+    dict(id='ink_card',name='Ink Card',badge='Ink Card',preview_text='One clear idea',font='Poppins',font_face='Bold',size=54,
+         color='#1B2230',outline_width=0.,animation='pop',shadow_enabled=False,background_enabled=True,
+         background_color='#F6F0E5',background_opacity=100.,background_radius=.008),
+    dict(id='blue_note',name='Blue Note',badge='Blue Note',preview_text='Follow the rhythm',font='Montserrat',font_face='Bold',size=60,
+         color='#FFFFFF',highlight='#68D9FF',outline_width=2.,animation='karaoke',shadow_x=1.,shadow_y=3.,shadow_blur=4.,shadow_opacity=85.),
+]
+_by_id={t['id']:t for t in CAPTION_TEMPLATES+_NEW}
+_first=['none','impact','hormozi_yellow','mrbeast_gold','smart_highlight','capcut_emoji_pop','basic']
+_order=_first+[t['id'] for t in _NEW if t['id'] not in _first]+[t['id'] for t in CAPTION_TEMPLATES if t['id'] not in _first]
+CAPTION_TEMPLATES=[dict(_DEFAULT,**_by_id[key]) if key!='none' else _by_id[key] for key in _order]
+for _template in CAPTION_TEMPLATES:
+    if _template['id'] in {'impact','mint_focus','documentary','ink_card','blue_note','neon_glow','studio','editorial','clean_minimal_card'}:
+        _template['size']=82
 
 CAPTION_TEMPLATES_BY_ID: dict[str, dict[str, Any]] = {t["id"]: t for t in CAPTION_TEMPLATES}
 

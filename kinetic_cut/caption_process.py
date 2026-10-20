@@ -18,7 +18,7 @@ def run(path,settings,offset=0.,progress=None,words_per_caption=5,hold_seconds=.
     with tempfile.TemporaryDirectory(prefix='kinetic-caption-worker-') as directory:
         folder=Path(directory);request=folder/'request.json';log=folder/'worker.log'
         # Never serialize unrelated credentials/settings into an inference request.
-        allowed=('whisper_model','whisper_cli','whisper_model_path','caption_language','caption_device','caption_alignment','caption_vocabulary','ffmpeg')
+        allowed=('whisper_model','whisper_cli','whisper_model_path','caption_language','caption_device','caption_alignment','caption_vocabulary','caption_measure_emphasis','ffmpeg')
         request.write_text(json.dumps(dict(path=str(Path(path).resolve()),settings={k:settings[k] for k in allowed if k in settings},offset=offset,
             words_per_caption=words_per_caption,hold_seconds=hold_seconds,require_word_timestamps=require_word_timestamps)),encoding='utf-8')
         command=[sys.executable]

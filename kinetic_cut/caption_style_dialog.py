@@ -16,15 +16,13 @@ from .theme_widgets import set_ui_style
 
 def fit_preview(project,caption,frame):
     """Fit the complete text/emoji composition inside a small preview tile."""
-    from .visuals import caption_geometry,caption_emoji_rect
+    from .visuals import caption_geometry,caption_emoji_runs
     from .caption_emojis import emojis_for_caption
     def extent():
         geometry=caption_geometry(project,caption,frame); bounds=geometry[2]
         selected=emojis_for_caption(project,caption,2) if project.subtitle_style.animation in ('emoji pop','double emoji') else []
-        for index,_ in selected:
-            rect=caption_emoji_rect(bounds,geometry[3][index],frame.width()/project.settings.width)
-            # Include the largest phase of the unchanged emoji pop animation.
-            center=rect.center(); rect.setWidth(rect.width()*1.3); rect.setHeight(rect.height()*1.3); rect.moveCenter(center)
+        for _,rect in caption_emoji_runs(bounds,geometry[3],selected,frame.width()/project.settings.width):
+            center=rect.center(); rect.setWidth(rect.width()*1.08); rect.setHeight(rect.height()*1.08); rect.moveCenter(center)
             bounds=bounds.united(rect)
         return bounds
     for _ in range(3):
@@ -185,7 +183,7 @@ class TemplateCardWidget(QWidget):
             painter.setPen(badge_ink)
             painter.drawText(badge_rect, Qt.AlignCenter, badge)
 
-        # Indicator (bottom right): Checkmark if selected, Download icon if unselected
+        # Indicator (bottom right): checkmark if selected, empty circle otherwise
         ind_cx = self.width() - 15.0
         ind_cy = self.height() - 15.0
         ind_r = 7.0
@@ -201,12 +199,6 @@ class TemplateCardWidget(QWidget):
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor("#222734"))
             painter.drawEllipse(QPointF(ind_cx, ind_cy), ind_r, ind_r)
-            # draw subtle download arrow
-            painter.setPen(QPen(QColor("#94A3B8"), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            painter.drawLine(QPointF(ind_cx, ind_cy - 3.5), QPointF(ind_cx, ind_cy + 2.0))
-            painter.drawLine(QPointF(ind_cx - 2.5, ind_cy - 0.5), QPointF(ind_cx, ind_cy + 2.0))
-            painter.drawLine(QPointF(ind_cx + 2.5, ind_cy - 0.5), QPointF(ind_cx, ind_cy + 2.0))
-            painter.drawLine(QPointF(ind_cx - 3.0, ind_cy + 3.8), QPointF(ind_cx + 3.0, ind_cy + 3.8))
 
         # Center Preview using draw_caption
         preview_rect = QRectF(6, 6, self.width() - 12, self.height() - 12)
@@ -357,7 +349,7 @@ class CaptionStyleDialog(QDialog):
         self.animation = QComboBox()
         self.animation.addItems(ANIMATIONS)
         self.animation.setCurrentText(style.animation)
-        self.animation.setToolTip('Word animations use speech-recognizer word timings. "karaoke" highlights the active spoken word in highlight colour. "emoji pop" and "double emoji" pop animated emojis above the spoken words.')
+        self.animation.setToolTip('Karaoke follows the spoken word. Smart highlight marks occasional strong words or phrases using vocal emphasis and text; marks can be edited in Timings. Emoji styles keep relevant emojis visible for the whole caption.')
 
         self.words = QSpinBox()
         self.words.setRange(1, 12)
@@ -421,6 +413,11 @@ class CaptionStyleDialog(QDialog):
         form.addRow('Custom glow colour', self.color_button('glow_color', 'Glow Colour'))
         form.addRow('Glow radius', self.glow_radius)
 
+        self.restore_defaults = QPushButton("Restore Defaults")
+        self.restore_defaults.setToolTip("Reset caption style and generation options to their original defaults.")
+        self.restore_defaults.clicked.connect(self.reset_defaults)
+        form.addRow(self.restore_defaults)
+
         setup_scroll.setWidget(setup_content)
         setup_layout.addWidget(setup_scroll)
         self.tabs.addTab(setup_tab, "Caption Setup")
@@ -483,6 +480,14 @@ class CaptionStyleDialog(QDialog):
         self.finished.connect(lambda _: self.preview.play(False))
         self.refresh()
 
+    def reset_defaults(self):
+        self.base = CaptionStyle()
+        self.on_template_selected({'id':'none','is_none':True})
+        self.words.setValue(3)
+        self.censor.setChecked(False)
+        self.remove_periods.setChecked(False)
+        self.preview.update()
+
     def on_template_selected(self, template_data):
         is_none = template_data.get("is_none", False) or template_data.get("id") == "none"
         self.selected_template_id = "none" if is_none else template_data.get("id")
@@ -517,6 +522,7 @@ class CaptionStyleDialog(QDialog):
                 self.base.name = "Default"
                 self.base.id = None
             else:
+                self.base=CaptionStyle(**{k:v for k,v in template_data.items() if k in CaptionStyle.__dataclass_fields__})
                 font_family = template_data.get("font", "Arial")
                 self.font.setCurrentFont(QFont(font_family))
                 self.hover_font = ''
@@ -620,7 +626,7 @@ class CaptionStyleDialog(QDialog):
         self.words.setMinimum(minimum)
         self.words.setSuffix(" word" if self.words.value() == 1 else " words")
         self.form.setRowVisible(self.color_buttons["background_color"], self.background.isChecked())
-        is_highlight_anim = self.animation.currentText() in ('word highlight', 'word highlight 2', 'karaoke', 'emoji pop', 'double emoji')
+        is_highlight_anim = self.animation.currentText() in ('word highlight', 'word highlight 2', 'karaoke', 'emoji pop', 'double emoji', 'smart highlight')
         self.form.setRowVisible(self.color_buttons["highlight"], is_highlight_anim)
         self.form.setRowVisible(self.glow_follow, self.glow.isChecked())
         self.form.setRowVisible(self.glow_radius, self.glow.isChecked())

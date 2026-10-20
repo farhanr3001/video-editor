@@ -4,13 +4,14 @@ from PySide6.QtGui import QFont,QFontDatabase
 from .controls import SafeComboBox
 from .icons import resource_path
 
-CURATED=['Nirmala UI','Geometos','TikTok Sans','Montserrat','Poppins','Anton','Archivo Black','Bebas Neue','Bangers','Arial','Arial Black','Impact','Verdana','Trebuchet MS','Georgia']
+CURATED=['Nirmala UI','Geometos','TikTok Sans','Montserrat','Poppins','Anton','Archivo Black','Bebas Neue','Bangers','Arial','Arial Black','Impact','VAG Rounded Std','Verdana','Trebuchet MS','Georgia']
 _loaded=False
 
 def load_fonts():
     global _loaded
     if _loaded:return
-    for path in resource_path('assets','fonts').glob('*.ttf'):QFontDatabase.addApplicationFont(str(path))
+    for path in sorted(resource_path('assets','fonts').iterdir()):
+        if path.suffix.lower() in ('.ttf','.otf'):QFontDatabase.addApplicationFont(str(path))
     _loaded=True
 
 def families():

@@ -1,7 +1,7 @@
 """Persisted, caption-relative word timing and editable sparse emphasis."""
 import re,math
 
-ANIMATIONS = ["none", "pop", "fade", "word reveal", "word highlight", "fade every word", "word highlight 2", "punch", "bounce", "karaoke", "emoji pop", "double emoji"]
+ANIMATIONS = ["none", "pop", "fade", "word reveal", "word highlight", "fade every word", "word highlight 2", "punch", "bounce", "karaoke", "emoji pop", "double emoji", "smart highlight"]
 STOP_WORDS=set("a an the this that these those i you he she it we they my your his her our their is are was were be been being am to of in on at for from with as by and or but so if then than not do does did have has had can could will would should just very really oh uh um hey there here what how who when where why".split())
 
 def timings(caption):
@@ -37,6 +37,9 @@ def prepare_generated(captions,style,strip_periods=False,censor=False):
                 candidates.append((score,index))
         if candidates and caption.start-last_emphasis>=1.5:
             caption.highlighted_words=[max(candidates,key=lambda pair:(pair[0],-pair[1]))[1]]; last_emphasis=caption.start
+    if style.animation=='smart highlight':
+        from .caption_emphasis import mark_strong_words
+        mark_strong_words(captions)
 
 def set_text(caption,text):
     if text!=caption.text:

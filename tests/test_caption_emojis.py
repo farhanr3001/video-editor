@@ -25,6 +25,21 @@ class CaptionEmojiTests(unittest.TestCase):
         self.assertEqual(get_caption_emojis('coffee coffee'),[(0,'☕')])
         self.assertEqual(get_caption_emojis('headphones and coffee'),[(0,'🎧'),(2,'☕')])
 
+    def test_thinking_and_ambiguous_game_topics(self):
+        self.assertEqual(get_caption_emojis('THINK'),[(0,'🤔')])
+        self.assertEqual(get_caption_emojis('game'),[])
+        self.assertEqual(get_caption_emojis('video game'),[(1,'🎮')])
+        self.assertEqual(get_caption_emojis('football game',1),[(1,'⚽')])
+        self.assertEqual(get_caption_emojis('basketball game',1),[(1,'🏀')])
+        self.assertEqual(get_caption_emojis('Minecraft football game'),[(1,'⚽')])
+        for topic,expected in [('Minecraft','🎮'),('football','⚽'),('basketball','🏀')]:
+            p=self.project(topic+' is what we are playing in this game',.3)
+            self.assertEqual(emojis_for_caption(p,p.captions[-1]),[(0,expected)])
+            p.captions[0].text+='.';p.touch()
+            self.assertEqual(emojis_for_caption(p,p.captions[-1]),[])
+            p.captions[0].text=topic;p.captions[0].end=-1;p.touch()
+            self.assertEqual(emojis_for_caption(p,p.captions[-1]),[])
+
     def test_context_disambiguates_idioms_time_and_phone_calls(self):
         self.assertEqual(get_caption_emojis('run the code and fire him'),[])
         self.assertEqual(get_caption_emojis('call it a day'),[])
@@ -62,19 +77,19 @@ class CaptionEmojiTests(unittest.TestCase):
         p.subtitle_style.animation='emoji pop'; restored=Project.from_dict(p.to_dict())
         self.assertEqual(emojis_for_caption(restored,restored.captions[0]),[(0,'📱')])
 
-    def test_preview_only_draws_selected_word_not_other_words_or_timing_gaps(self):
+    def test_preview_keeps_selected_emoji_for_whole_caption_including_word_gaps(self):
         from kinetic_cut.visuals import draw_caption
         cap=Caption('c',0,1,'The coffee is',word_timings=[{'text':'The','start':0,'end':.2},{'text':'coffee','start':.3,'end':.7},{'text':'is','start':.8,'end':1}])
         p=Project(captions=[cap],subtitle_style=CaptionStyle(animation='emoji pop'))
         calls=[]
         with patch('kinetic_cut.emoji.draw',side_effect=lambda painter,runs:calls.extend(runs)):
-            for time,expected in [(.1,[]),(.25,[]),(.45,['☕']),(.75,[]),(.9,[])]:
+            for time,expected in [(-.01,[]),(0.,['☕']),(.1,['☕']),(.25,['☕']),(.45,['☕']),(.75,['☕']),(.99,['☕']),(1.,[])]:
                 calls.clear(); p.playhead=time; image=QImage(1080,1920,QImage.Format_ARGB32); image.fill(0); painter=QPainter(image)
                 try:draw_caption(painter,p,cap,QRectF(0,0,1080,1920))
                 finally:painter.end()
                 self.assertEqual([emoji for emoji,_ in calls],expected)
 
-    def test_export_matches_selected_word_window_without_first_word_fallback(self):
+    def test_export_matches_full_caption_lifetime_without_duplicate_emojis(self):
         from kinetic_cut.word_highlight import events
         cap=Caption('c',0,1,'The coffee is',word_timings=[{'text':'The','start':0,'end':.2},{'text':'coffee','start':.3,'end':.7},{'text':'is','start':.8,'end':1}])
         p=Project(captions=[cap],subtitle_style=CaptionStyle(animation='emoji pop')); calls=[]
@@ -82,7 +97,26 @@ class CaptionEmojiTests(unittest.TestCase):
             if runs:calls.append(([e for e,_ in runs],start,end))
             return []
         with patch('kinetic_cut.emoji.ass_events',side_effect=record):events(p,cap,'C0')
-        self.assertEqual(calls,[(['☕'],.3,.7)])
+        self.assertEqual(calls,[(['☕'],0,1)])
+
+    def test_two_relevant_emojis_share_centered_layout_for_longer_caption(self):
+        from kinetic_cut.visuals import caption_geometry,caption_emoji_runs
+        c=Caption('c',0,1.5,'headphones and coffee');p=Project(captions=[c],subtitle_style=CaptionStyle(animation='emoji pop'))
+        selected=emojis_for_caption(p,c,2);self.assertEqual(selected,[(0,'🎧'),(2,'☕')])
+        _,_,bounds,boxes,*_=caption_geometry(p,c,QRectF(0,0,1080,1920))
+        runs=caption_emoji_runs(bounds,boxes,selected)
+        self.assertEqual(len(runs),2);self.assertLess(runs[0][1].right(),runs[1][1].left())
+        self.assertAlmostEqual(runs[0][1].united(runs[1][1]).center().x(),bounds.center().x())
+
+    def test_inline_emoji_stays_with_text_while_automatic_badge_pops(self):
+        from kinetic_cut.word_highlight import events
+        c=Caption('c',0,1.4,'money ❤️');p=Project(captions=[c],subtitle_style=CaptionStyle(animation='emoji pop'))
+        lines=events(p,c,'C0');inline=[s for s in lines if s.startswith('Dialogue: 4,')];badge=[s for s in lines if s.startswith('Dialogue: 5,')]
+        self.assertTrue(inline and badge)
+        self.assertTrue(all('\\fscx100' in s and '\\fscx82' not in s for s in inline))
+        self.assertTrue(any('\\fscx82' in s for s in badge));self.assertTrue(any('\\fscx108' in s for s in badge))
+        p.subtitle_style.animation='smart highlight';inline=[s for s in events(p,c,'C0') if s.startswith('Dialogue: 4,')]
+        self.assertTrue(any('\\fscx86' in s for s in inline));self.assertTrue(any('\\fscx104' in s for s in inline))
 
     def test_full_export_routes_emoji_templates_with_any_font_to_word_events(self):
         import tempfile
