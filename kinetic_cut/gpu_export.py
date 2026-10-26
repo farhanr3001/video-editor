@@ -161,7 +161,7 @@ def prepare_recipe(project,preset,directory,burn_captions,prepared,ffmpeg,progre
     titles=[i for i in project.timeline if i.role in ('title','graphic')]
     ordered={track:n for n,track in enumerate(project.video_tracks)}
     items=sorted((i for i in project.timeline if i.track in ordered and i.role not in ('title','graphic') and not i.muted and project.track_states.get(i.track,{}).get('visible',True)),key=lambda i:(ordered[i.track],i.start))
-    def raster(stage,start,end,label,blend_mode=0):
+    def raster(stage,start,end,label,blend_mode=0,stream=False):
         if cancel and cancel.is_set():raise RuntimeError('Export cancelled. Previous output is unchanged.')
         output=directory/f'island-{len(result["cpu_islands"]):04d}.mkv'
         ass=directory/(output.stem+'.ass')
@@ -169,11 +169,47 @@ def prepare_recipe(project,preset,directory,burn_captions,prepared,ffmpeg,progre
         if has_text:write_ass(stage,str(ass),burn_captions)
         args=command(stage,str(output),preset,burn_captions,'CPU',ffmpeg,str(ass) if has_text else None,False,prepared,
             window=None if has_text else (start,end),transparent=True)
-        args=args[:args.index('-c:v')]+['-c:v','ffv1','-level','3','-pix_fmt','bgra','-threads','2','-frames:v',str(math.ceil((end-start)*stage.settings.fps-1e-7)),'-progress','pipe:1','-nostats',str(output)]
-        update=(lambda value,text:progress(0,'Preparing exact effect layer · '+label+' · '+text)) if progress else None
-        code,tail=render(args,end-start,update,cancel)
-        if code:raise RuntimeError('Exact effect layer failed:\n'+'\n'.join(tail)[-3000:])
         width,height=stage.settings.width,stage.settings.height
+        frames=math.ceil((end-start)*stage.settings.fps-1e-7)
+        args=args[:args.index('-c:v')]
+        if stream:
+            # Preserve the exact ASS/alpha graph, but avoid encoding and then
+            # decoding a full-resolution lossless movie before GPU composition.
+            # The private worker consumes one RGBA frame at a time with bounded
+            # pipe backpressure; progress on stdout would corrupt those pixels.
+            output=output.with_suffix('.rgba')
+            samples=None
+            if '-filter_complex' in args and '-i' not in args:
+                index=args.index('-filter_complex');graph=args[index+1];parts=graph.split(';')
+                if (len(parts)==3 and parts[0].startswith('color=c=black@0:') and parts[0].endswith(',format=rgba[base]')
+                    and parts[1].startswith('[base]ass=') and parts[1].endswith(':alpha=1[captions]')
+                    and parts[2]==f'[captions]fps={stage.settings.fps},format=rgba[vout]'):
+                    from .export_overlay_schedule import sample_frames
+                    samples=sample_frames(ass,stage.settings.fps,frames)
+                    if samples is not None:
+                        ranges=[];first=last=samples[0]
+                        for frame in samples[1:]:
+                            if frame==last+1:last=frame;continue
+                            ranges.append((first,last));first=last=frame
+                        ranges.append((first,last))
+                        if len(ranges)>4096:samples=None
+                        else:
+                            expression='+'.join(f'eq(n,{a})' if a==b else f'between(n,{a},{b})' for a,b in ranges)
+                            selected=f"[base]select='{expression}'[sampled];"+parts[1].replace('[base]','[sampled]',1)
+                            graph=parts[0]+';'+selected+';[captions]format=rgba[vout]'
+                            script=directory/(output.stem+'-filter.txt');script.write_text(graph,encoding='utf-8')
+                            args[index:index+2]=['-filter_complex_script',str(script)]
+            args+=['-c:v','rawvideo','-pix_fmt','rgba','-threads','1','-frames:v',str(frames if samples is None else len(samples)),
+                '-fps_mode','passthrough','-f','rawvideo','pipe:1']
+            result.setdefault('raw_sources',{})[str(output)]=dict(command=args,width=width,height=height,
+                fps=stage.settings.fps,frames=frames,log=str(output.with_suffix('.log')))
+            if samples is not None:result['raw_sources'][str(output)]['sample_frames']=samples
+            if progress:progress(0,'Preparing exact caption and title stream…')
+        else:
+            args+=['-c:v','ffv1','-level','3','-pix_fmt','bgra','-threads','2','-frames:v',str(frames),'-progress','pipe:1','-nostats',str(output)]
+            update=(lambda value,text:progress(0,'Preparing exact effect layer · '+label+' · '+text)) if progress else None
+            code,tail=render(args,end-start,update,cancel)
+            if code:raise RuntimeError('Exact effect layer failed:\n'+'\n'.join(tail)[-3000:])
         result['layers'].append(dict(id=output.stem,path=str(output),cpu=True,still=False,clock=output.stem,blend_mode=blend_mode,
             start=start,end=end,in_point=0.,speed=1.,size=[width,height],crop=[0,0,1,1],box=[0,0,width,height],opacity=1.,operations=[]))
         result['cpu_islands'].append(label)
@@ -190,7 +226,7 @@ def prepare_recipe(project,preset,directory,burn_captions,prepared,ffmpeg,progre
         # the requested full document duration below.
         from .model import TimelineItem
         overlay.timeline=titles+[TimelineItem('__export_overlay_duration__','','__export_duration__',0,project.duration)]
-        raster(overlay,0.,project.duration,'captions and titles')
+        raster(overlay,0.,project.duration,'captions and titles',stream=True)
     return result
 
 
@@ -226,10 +262,11 @@ def worker(path):
         import PySide6
         from .gpu_export_decode import Decoder,CALLBACK
         dlls=os.add_dll_directory(str(Path(PySide6.__file__).parent))
-        decoder=Decoder()
         library=ctypes.CDLL(str(resource_path('assets','native','gpu_export.dll')))
         library.kc_export_abi.restype=ctypes.c_uint
-        if library.kc_export_abi()!=2:raise RuntimeError('Unsupported native export ABI')
+        abi=library.kc_export_abi()
+        if abi not in (2,3):raise RuntimeError('Unsupported native export ABI')
+        decoder=Decoder(job.get('raw_sources'),reuse_frames=abi>=3)
         library.kc_export_set_cpu_reader.argtypes=[CALLBACK];library.kc_export_set_cpu_reader.restype=None
         library.kc_export_set_cpu_reader(decoder.callback)
         library.kc_export_job.argtypes=[ctypes.c_wchar_p];library.kc_export_job.restype=ctypes.c_int

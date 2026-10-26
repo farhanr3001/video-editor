@@ -79,6 +79,15 @@ an explicitly separate desktop and never calls `SwitchDesktop`. Do not use
 topmost, foreground or focus-taking diagnostic windows. Performance runs come
 after functional checks and run without concurrent builds/full tests.
 
+The offline exporter (`scripts/build_gpu_export.ps1`, `gpu_export.dll`) now uses
+C ABI **3**. Its CPU reader keeps the same callback signature:0 supplies pixels,
+1 reports failure, and2 retains an already uploaded, dimension-matching raw
+overlay texture. The Python worker accepts ABI2 with reuse disabled. Cached
+caption images do not skip scene draws or encoded frames. Exact ASS sampling
+uses original timestamps and conservative dynamic/boundary retention; unknown
+scripts use the continuous path. Keep full native/owned-producer/pixel checks
+when changing this protocol.
+
 Diagnostics expose the backend, hardware texture evidence, native CPU/GPU
 timings, coalesced source frames, deferred scene synchronization, bounded effect
 work and GUI heartbeat delays. Qt's public decoder does not expose execution

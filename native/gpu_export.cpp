@@ -6907,7 +6907,7 @@ public:
     ComPtr<ID3D11Buffer> constants;
     ComPtr<ID3D11SamplerState> clamp,mirror;
     ComPtr<ID3D11BlendState> blend;
-    unsigned decodedGpu=0,decodedCpu=0;QString adapterName;
+    unsigned decodedGpu=0,decodedCpu=0,reusedCpu=0;QString adapterName;
     std::shared_ptr<size_t> allocated=std::make_shared<size_t>(0);
     Gpu(){
         D3D_FEATURE_LEVEL level;
@@ -7017,7 +7017,12 @@ public:
     CpuSource(Gpu& gpu,QString path,QString key):gpu(gpu),path(path),key(key){if(!cpuRead)throw std::runtime_error("Compatibility decoder unavailable");}
     Texture& frame(double seconds)override{
         unsigned w=0,h=0;const void* bytes=nullptr;
-        if(cpuRead((const wchar_t*)path.utf16(),(const wchar_t*)key.utf16(),seconds,&w,&h,&bytes)||!bytes)throw std::runtime_error("Compatibility source decode failed");
+        int result=cpuRead((const wchar_t*)path.utf16(),(const wchar_t*)key.utf16(),seconds,&w,&h,&bytes);
+        // ABI3: the owned raw overlay reader can retain an exactly identical
+        // frame. Reuse its read-only texture; all scene draws/encoder clocks
+        // still run at the requested output cadence.
+        if(result==2&&uploaded.image&&uploaded.width==w&&uploaded.height==h&&bytes){gpu.reusedCpu++;return uploaded;}
+        if(result||!bytes)throw std::runtime_error("Compatibility source decode failed");
         if(!uploaded.image||uploaded.width!=w||uploaded.height!=h)uploaded=gpu.texture(w,h);
         gpu.context->UpdateSubresource(uploaded.image.Get(),0,nullptr,bytes,w*4,0);gpu.decodedCpu++;return uploaded;
     }
@@ -7169,7 +7174,7 @@ public:
 };
 
 extern "C" __declspec(dllexport) void kc_export_set_cpu_reader(CpuRead callback){cpuRead=callback;}
-extern "C" __declspec(dllexport) unsigned kc_export_abi(){return 2;}
+extern "C" __declspec(dllexport) unsigned kc_export_abi(){return 3;}
 static int exportJob(const wchar_t* jobPath){
     QString status;bool com=false,mf=false;
     try{
@@ -7333,7 +7338,7 @@ static int exportJob(const wchar_t* jobPath){
                 for(auto i=intermediates.begin();i!=intermediates.end();)if(!usedIntermediates.count(i->first))i=intermediates.erase(i);else ++i;
                 if(composed!=&target)gpu.context->CopyResource(target.image.Get(),composed->image.Get());
                 gpu.context->Flush();encoder.frame(n);
-                if(n%30==0||n+1==frames){double elapsed=std::chrono::duration<double>(Clock::now()-started).count();saveJson(status,QJsonObject{{"state",n+1==frames?"Complete":"Rendering"},{"frame",int(n+1)},{"frames",int(frames)},{"elapsed",elapsed},{"decoded_gpu",int(gpu.decodedGpu)},{"decoded_cpu",int(gpu.decodedCpu)},{"composition","Direct3D11 GPU"},{"encoder","NVENC D3D11 texture"},{"adapter",gpu.adapterName},{"decoder","Media Foundation D3D11 textures / PyAV compatibility"}});}
+                if(n%30==0||n+1==frames){double elapsed=std::chrono::duration<double>(Clock::now()-started).count();saveJson(status,QJsonObject{{"state",n+1==frames?"Complete":"Rendering"},{"frame",int(n+1)},{"frames",int(frames)},{"elapsed",elapsed},{"decoded_gpu",int(gpu.decodedGpu)},{"decoded_cpu",int(gpu.decodedCpu)},{"reused_cpu",int(gpu.reusedCpu)},{"composition","Direct3D11 GPU"},{"encoder","NVENC D3D11 texture"},{"adapter",gpu.adapterName},{"decoder","Media Foundation D3D11 textures / PyAV compatibility"}});}
             }
             encoder.finish();
         }
