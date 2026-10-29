@@ -5,6 +5,7 @@ Item {
     property var inputTexture: null
     property var effects: []
     property size rasterSize
+    property real effectAspect: width/Math.max(0.001,height)
     property int generation: 0
     property var outputTexture: {
         let revision = generation
@@ -31,7 +32,7 @@ Item {
                     return previous ? previous.outputTexture : chain.inputTexture
                 }
                 property vector4d p1: Qt.vector4d(pass.settings.p1[0],pass.settings.p1[1],pass.settings.p1[2],pass.settings.p1[3])
-                property vector4d p2: Qt.vector4d(pass.settings.p2[0],pass.settings.p2[1],pass.settings.p2[2],Math.max(1,chain.rasterSize.width)/Math.max(1,chain.rasterSize.height))
+                property vector4d p2: Qt.vector4d(pass.settings.p2[0],pass.settings.p2[1],pass.settings.p2[2],chain.effectAspect)
                 property vector4d colorA: Qt.vector4d(pass.settings.colorA[0],pass.settings.colorA[1],pass.settings.colorA[2],1)
                 property vector4d colorB: Qt.vector4d(pass.settings.colorB[0],pass.settings.colorB[1],pass.settings.colorB[2],1)
                 property real mode: pass.settings.mode
@@ -43,6 +44,7 @@ Item {
                 sourceItem: shader
                 textureSize: chain.rasterSize
                 hideSource: true; visible: false
+                smooth: true; mipmap: true
             }
         }
     }

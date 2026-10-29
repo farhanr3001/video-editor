@@ -23,5 +23,7 @@ Item {
         visible: false
         live: host.admitted
         textureSize: Qt.size(host.pixelWidth, host.pixelHeight)
+        smooth: true
+        mipmap: true
     }
 }

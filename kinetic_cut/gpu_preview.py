@@ -7,14 +7,29 @@ The GUI only publishes geometry and immutable handles. No synchronous fallback.
 """
 import copy
 import math
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from PySide6.QtCore import QTimer, QRectF, QPointF, Qt
+from PySide6.QtCore import QTimer, QRectF, QPointF, QSizeF, Qt
 from PySide6.QtGui import QImage, QPainter, QTransform, QMatrix4x4, QVector4D, QVector2D
 from PySide6.QtQuick import QQuickItem
 from .quick_surface import Surface, enabled
 from .native_engine import LatestRequest
 from .creative_effects import NAMES as CREATIVE_NAMES, descriptor, clock as creative_clock
+
+
+def sampling_size(source_width,source_height,viewport_width,viewport_height,dpr=1.,view_zoom=1.):
+    """Stable source-space effect grid, independent of the animated media rect.
+
+    Two physical viewport pixels per intermediate axis retain minification
+    detail without growing beyond native source resolution or the existing
+    2048-pixel render-target limit. Resize/DPI/manual view changes may reallocate;
+    per-frame clip transforms do not. Geometry is never snapped to this grid.
+    """
+    width=max(1.,float(source_width));height=max(1.,float(source_height))
+    budget=min(2048.,2*max(1.,viewport_width,viewport_height)*max(.25,dpr)*max(1.,view_zoom))
+    scale=min(1.,budget/max(width,height))
+    return QSizeF(min(2048,max(2,math.ceil(width*scale))),min(2048,max(2,math.ceil(height*scale))))
 
 
 def shader_supported(item):
@@ -49,6 +64,7 @@ class GpuPreview(Surface):
     def __init__(self,canvas):
         super().__init__(canvas,'GpuPreview.qml')
         self.canvas=canvas;self.sources={};self.layers={};self.transition_pairs={};self.serial=0
+        self.sampling_diagnostic=os.environ.get('KINETIC_SAMPLING_DIAGNOSTIC')=='1'
         self.layer_images={};self._used_textures=set();self.bounds={};self.last_tracks={};self.retired_sources=[];self.notice=''
         self.targets=[]
         self.suspended=False;self.whole_scene_cpu=False
@@ -117,7 +133,8 @@ class GpuPreview(Surface):
     def _texture(self,identifier,image):
         self._used_textures.add(identifier)
         obj=self.layer_images.get(identifier)
-        if obj is None:obj=self.create('GpuImage.qml');self.layer_images[identifier]=obj
+        if obj is None:
+            obj=self.create('GpuImage.qml');obj.setProperty('minification',True);self.layer_images[identifier]=obj
         identity=image.cacheKey()
         if obj.property('_imageIdentity')==identity:return obj
         obj.setProperty('_imageIdentity',identity)
@@ -129,7 +146,7 @@ class GpuPreview(Surface):
         import os
         identifier='file:'+path;self._used_textures.add(identifier);obj=self.layer_images.get(identifier)
         if obj is None:
-            obj=self.create('GpuImage.qml');obj.setProperty('asynchronous',True)
+            obj=self.create('GpuImage.qml');obj.setProperty('asynchronous',True);obj.setProperty('minification',True)
             self.layer_images[identifier]=obj
         try:
             info=os.stat(path);stamp=f'{info.st_size}:{info.st_mtime_ns}:{info.st_ctime_ns}'
@@ -168,6 +185,20 @@ class GpuPreview(Surface):
         # Sharpen is a per-layer shader uniform, including at zero. It must not
         # retire every decoder/crop using this source just to reset one control.
         media=self.canvas.project.media_by_id(item.media_id) if item else None
+        # Full source dimensions remain constant through procedural zoom and
+        # nonuniform transforms; shader UVs still apply the exact fractional crop.
+        source_size=texture.property('sourceSize')
+        source_width=media.width if media and media.width>0 else source_size.width() if source_size and source_size.width()>0 else self.canvas.width()*self.view.devicePixelRatio()
+        source_height=media.height if media and media.height>0 else source_size.height() if source_size and source_size.height()>0 else self.canvas.height()*self.view.devicePixelRatio()
+        if creative:
+            # Procedural patterns generate detail beyond source pixels. Anchor
+            # their raster to the document transform, never the animated clone.
+            original=self.canvas.project.item_by_id(item.id) or item
+            base=self.canvas._layer_rect(original,self.identity_image,self.canvas.composition_rect())
+            source_width=base.width()*self.view.devicePixelRatio()
+            source_height=base.height()*self.view.devicePixelRatio()
+        layer.setProperty('processingSize',sampling_size(source_width,source_height,
+            self.canvas.width(),self.canvas.height(),self.view.devicePixelRatio(),getattr(self.canvas,'view_zoom',1.)))
         sw=media.width*crop.z() if media and crop else target.width()
         sh=media.height*crop.w() if media and crop else target.height()
         layer.setProperty('sharpen',max(0.,item.sharpen*2) if item else 0.)
@@ -497,7 +528,7 @@ class GpuPreview(Surface):
             decoders.append(dict(media_id=key[0],engine='PyAV/libav worker' if software else 'Qt FFmpeg / native VideoOutput' if isinstance(player,NativeVideoPlayer) else 'Qt FFmpeg compatibility',
                 hardware_decode=player.engine.hardware_active if software else True if handle=='RhiTextureHandle' else None,handle_type=handle))
         hardware=[entry['hardware_decode'] for entry in decoders]
-        return dict(super().diagnostics(),composition='CPU whole-scene fallback / GPU presentation' if self.whole_scene_cpu else 'GPU scene graph',decoder=', '.join(dict.fromkeys(entry['engine'] for entry in decoders)) or 'prepared image texture',active_decoders=decoders,
+        result=dict(super().diagnostics(),composition='CPU whole-scene fallback / GPU presentation' if self.whole_scene_cpu else 'GPU scene graph',decoder=', '.join(dict.fromkeys(entry['engine'] for entry in decoders)) or 'prepared image texture',active_decoders=decoders,
                     hardware_decode=True if True in hardware else False if hardware and all(value is False for value in hardware) else None,decoded_frame_handles=handles,
                     source_codecs={key:media.video_codec for key in active_ids if (media:=project.media_by_id(key))},
                     hardware_decode_note='RhiTextureHandle confirms a Qt FFmpeg hardware-backed frame; missing texture handles alone do not identify decoder hardware status. Software-worker status is reported per decoder.',
@@ -509,6 +540,10 @@ class GpuPreview(Surface):
                     adaptive_scrub_resolution=True,dropped_preview_frames=None,
                     presentation_counter_note='Qt VideoOutput does not expose per-video presentation drops; discarded queued effect requests are counted separately',
                     decode_timing_note='Qt public video sink exposes delivery timestamps, not decoder execution duration')
+        if self.sampling_diagnostic:
+            from .preview_sampling_diagnostics import sampling_state
+            result.update(sampling_state(self))
+        return result
     def close(self):
         if self.closed:return
         self.suspend()

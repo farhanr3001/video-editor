@@ -157,7 +157,8 @@ class TimelineTransport(QObject):
             self.previous_video.clear(); self.boundary_holds.clear()
             for media_id in changed:
                 self.window.proxies.pop(media_id,None)
-                if hasattr(self.window,'preview_quality'):self.window.preview_quality.ready.pop(media_id,None)
+                quality=getattr(self.window,'preview_quality',None)
+                if quality is not None:quality.ready.pop(media_id,None)
         self._media_source_paths=sources
         caption_focus=getattr(preview,'caption_focus',False)
         is_different_project = (self._project is None or 

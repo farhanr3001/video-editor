@@ -15,7 +15,9 @@ Item {
     property real rasterScale: 1
     property real sharpen: 0
     property vector2d pixelStep: Qt.vector2d(0,0)
-    property size rasterSize: Qt.size(Math.max(2, Math.min(2048, Math.ceil(width*rasterScale))), Math.max(2, Math.min(2048, Math.ceil(height*rasterScale))))
+    property size processingSize: Qt.size(1024,1024)
+    property size rasterSize: Qt.size(Math.max(2,Math.ceil(processingSize.width*rasterScale)), Math.max(2,Math.ceil(processingSize.height*rasterScale)))
+    readonly property bool filtered: blurMix != 0 && (blurX != 0 || blurY != 0)
     transform: Matrix4x4 { matrix: layer.placement }
     ShaderEffect {
         id: graded
@@ -23,20 +25,23 @@ Item {
         property var source: layer.texture
         property vector4d cropRect: layer.cropRect
         property vector4d grade: layer.grade
-        property real alpha: 1
-        property real ellipse: 0
+        property real alpha: layer.filtered ? 1 : layer.alpha
+        property real ellipse: !layer.filtered && layer.ellipse ? 1 : 0
         property real sharpen: layer.sharpen
         property vector2d pixelStep: layer.pixelStep
         fragmentShader: "../shaders/layer.frag.qsb"
     }
     ShaderEffectSource {
         id: gradedTexture
-        sourceItem: graded
+        objectName: "gradedTexture"
+        sourceItem: layer.filtered ? graded : null
         hideSource: true; visible: false
         textureSize: layer.rasterSize
+        smooth: true; mipmap: true
     }
     ShaderEffect {
         id: horizontal
+        visible: layer.filtered
         anchors.fill: parent
         property var source: gradedTexture
         property var original: gradedTexture
@@ -49,11 +54,14 @@ Item {
     }
     ShaderEffectSource {
         id: horizontalTexture
-        sourceItem: horizontal
+        objectName: "horizontalTexture"
+        sourceItem: layer.filtered ? horizontal : null
         hideSource: true; visible: false
         textureSize: layer.rasterSize
+        smooth: true; mipmap: true
     }
     ShaderEffect {
+        visible: layer.filtered
         anchors.fill: parent
         property var source: horizontalTexture
         property var original: gradedTexture

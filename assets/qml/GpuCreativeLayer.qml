@@ -17,7 +17,8 @@ Item {
     property real rasterScale: 1
     property real sharpen: 0
     property vector2d pixelStep: Qt.vector2d(0,0)
-    property size rasterSize: Qt.size(Math.max(2, Math.min(2048, Math.ceil(width*rasterScale))), Math.max(2, Math.min(2048, Math.ceil(height*rasterScale))))
+    property size processingSize: Qt.size(1024,1024)
+    property size rasterSize: Qt.size(Math.max(2,Math.ceil(processingSize.width*rasterScale)), Math.max(2,Math.ceil(processingSize.height*rasterScale)))
     transform: Matrix4x4 { matrix: layer.placement }
     ShaderEffect {
         id: graded
@@ -33,9 +34,11 @@ Item {
     }
     ShaderEffectSource {
         id: gradedTexture
+        objectName: "gradedTexture"
         sourceItem: graded
         hideSource: true; visible: false
         textureSize: layer.rasterSize
+        smooth: true; mipmap: true
     }
     CreativeChain {
         id: beforeChain
@@ -43,6 +46,7 @@ Item {
         inputTexture: gradedTexture
         effects: layer.beforeEffects
         rasterSize: layer.rasterSize
+        effectAspect: layer.width/Math.max(0.001,layer.height)
     }
     ShaderEffect {
         id: horizontal
@@ -58,9 +62,11 @@ Item {
     }
     ShaderEffectSource {
         id: horizontalTexture
+        objectName: "horizontalTexture"
         sourceItem: horizontal
         hideSource: true; visible: false
         textureSize: layer.rasterSize
+        smooth: true; mipmap: true
     }
     ShaderEffect {
         id: vertical
@@ -76,9 +82,11 @@ Item {
     }
     ShaderEffectSource {
         id: verticalTexture
+        objectName: "verticalTexture"
         sourceItem: vertical
         hideSource: true; visible: false
         textureSize: layer.rasterSize
+        smooth: true; mipmap: true
     }
     CreativeChain {
         id: afterChain
@@ -86,6 +94,7 @@ Item {
         inputTexture: verticalTexture
         effects: layer.afterEffects
         rasterSize: layer.rasterSize
+        effectAspect: layer.width/Math.max(0.001,layer.height)
     }
     ShaderEffect {
         anchors.fill: parent

@@ -6,6 +6,10 @@ from kinetic_cut.process import install_desktop_process_policy
 
 
 if __name__ == "__main__":
+    if len(sys.argv)==3 and sys.argv[1]=='--preview-sampling-selftest':
+        install_desktop_process_policy()
+        from kinetic_cut.preview_sampling_diagnostics import run
+        sys.exit(run(sys.argv[2]))
     if len(sys.argv)==3 and sys.argv[1]=='--preview-effect-source':
         install_desktop_process_policy()
         from kinetic_cut.export_preview_source import worker
