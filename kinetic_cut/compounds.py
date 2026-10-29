@@ -16,7 +16,7 @@ def validate(data,ancestors=()):
             if media['id'] in ancestors:raise ValueError('A compound cannot contain itself.')
             validate(media['compound'],ancestors+(media['id'],))
 
-def cache_path(data):
+def cache_path(data,_include_history=False):
     from .config import CACHE_DIR
     validate(data)
     stamps=[]
@@ -37,7 +37,13 @@ def cache_path(data):
                     s=Path(m['path']).stat(); stamps.append((m['path'],s.st_size,s.st_mtime_ns))
                 except OSError:stamps.append((m['path'],'missing'))
     sources(data)
-    key=hashlib.sha256(json.dumps((data,stamps,'compound-alpha-v3'),sort_keys=True).encode()).hexdigest()
+    canonical=copy.deepcopy(data)
+    def nonvisual(body):
+        if 'render_history' in body:body['render_history']=[]
+        for media in body.get('media',[]):
+            if media.get('compound'):nonvisual(media['compound'])
+    if not _include_history:nonvisual(canonical)
+    key=hashlib.sha256(json.dumps((canonical,stamps,'compound-alpha-v3'),sort_keys=True).encode()).hexdigest()
     return CACHE_DIR/'compounds'/(key+'.mkv')
 
 def first_child_thumbnail(child):
@@ -128,23 +134,51 @@ def create(project,item_ids,caption_ids,name):
     return asset,clips
 
 _locks={}; _lock_guard=threading.Lock()
-def render_asset(media,ffmpeg='ffmpeg',progress=None,cancel=None):
-    target=cache_path(media.compound); target.parent.mkdir(parents=True,exist_ok=True)
+def render_asset(media,ffmpeg='ffmpeg',progress=None,cancel=None,audio_only=False):
+    target=cache_path(media.compound)
+    if audio_only:target=target.with_name(target.stem+'-audio.mkv')
+    target.parent.mkdir(parents=True,exist_ok=True)
     with _lock_guard:lock=_locks.setdefault(str(target),threading.Lock())
     while not lock.acquire(timeout=.1):
         if cancel and cancel.is_set():raise RuntimeError('Compound preparation cancelled')
     try:
         if not target.is_file():
+            legacy=cache_path(media.compound,_include_history=True)
+            if not audio_only and legacy!=target and legacy.is_file():
+                # Same visual inputs and dependency stamps; only job-history
+                # metadata differed. Reuse closed bytes without another render.
+                try:target.hardlink_to(legacy)
+                except OSError:
+                    import shutil
+                    shutil.copy2(legacy,target)
+        if not target.is_file():
             from .exporter import export,PRESETS
             child=Project.from_dict(media.compound)
             if child.duration<=0:raise ValueError('The compound timeline is empty.')
-            export(child,str(target),PRESETS['YouTube Shorts · Quality'],True,'CPU',ffmpeg,progress,cancel,True,lossless=True)
+            if audio_only:
+                from .motion_audio import expanded
+                from .rendergraph import append_audio
+                from .export_process import render
+                import tempfile
+                duration=child.duration;child=expanded(child)
+                child.timeline=[i for i in child.timeline if i.track in child.audio_tracks];child.captions=[];child.transitions=[]
+                child=prepare(child,ffmpeg,progress,cancel)
+                args=[ffmpeg,'-hide_banner','-y'];filters=[];final=append_audio(child,args,filters,0,duration)
+                with tempfile.TemporaryDirectory(prefix='compound-audio-',dir=target.parent) as directory:
+                    pending=Path(directory)/'audio.mkv'
+                    command=args+['-filter_complex_threads','2','-filter_complex',';'.join(filters),'-map',f'[{final}]','-vn','-c:a','pcm_s16le','-t',str(duration),'-progress','pipe:1','-nostats',str(pending)]
+                    code,tail=render(command,duration,progress,cancel)
+                    if code:raise RuntimeError('Nested audio render failed: '+'\n'.join(tail)[-2000:])
+                    if cancel and cancel.is_set():raise RuntimeError('Compound preparation cancelled')
+                    pending.replace(target)
+            else:export(child,str(target),PRESETS['YouTube Shorts · Quality'],True,'CPU',ffmpeg,progress,cancel,True,lossless=True)
         return str(target)
     finally:lock.release()
 
 def prepare(project,ffmpeg,progress,cancel):
     if not any(m.compound for m in project.media):return project
-    stage=copy.deepcopy(project); used={i.media_id for i in stage.timeline}
+    stage=copy.deepcopy(project); used={i.media_id for i in stage.timeline if not i.muted and (i.track not in stage.video_tracks or stage.track_states.get(i.track,{}).get('visible',True))}
+    video={i.media_id for i in stage.timeline if i.track in stage.video_tracks and not i.muted and stage.track_states.get(i.track,{}).get('visible',True)}
     for m in stage.media:
-        if m.compound and m.id in used:m.path=render_asset(m,ffmpeg,progress,cancel)
+        if m.compound and m.id in used:m.path=render_asset(m,ffmpeg,progress,cancel,audio_only=m.id not in video)
     return stage

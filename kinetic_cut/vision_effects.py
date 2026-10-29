@@ -208,7 +208,7 @@ def decoded_frames(stream,size,cancel,timeout=90):
             started=time.monotonic()
     finally:finished.set()
 
-def prepare_export(project,ffmpeg,progress,cancel):
+def prepare_export(project,ffmpeg,progress,cancel,cached_only=False):
     from .enhance import active as enhance_active,prepare_export as enhance_export
     from .tracking_effect import render_effects as tracking_active, apply as apply_tracking, export_error as tracking_export_error, prune as prune_tracking, follow_effect, effective_crop, crop_source, VISION_CONFLICT_ERROR
     if not any(active(item) or tracking_active(item) or enhance_active(item) for item in project.timeline):return {}
@@ -221,7 +221,7 @@ def prepare_export(project,ffmpeg,progress,cancel):
     from .exporter import _crop_filter
     import av
     from fractions import Fraction
-    result=enhance_export(project,ffmpeg,progress,cancel)
+    result=enhance_export(project,ffmpeg,progress,cancel,cached_only=cached_only)
     for item in project.timeline:
         if item.id in result:continue
         effects=active(item)
@@ -233,7 +233,7 @@ def prepare_export(project,ffmpeg,progress,cancel):
         for effect in tracking:
             error=tracking_export_error(effect,media,item)
             if error:raise ValueError(error)
-        if any(e['name']=='Remove Person Background' for e in effects):
+        if not cached_only and any(e['name']=='Remove Person Background' for e in effects):
             analysis=effects[0]['analysis']
             for index in range(frame_index(analysis,item.in_point),frame_index(analysis,item.in_point+item.source_duration)+1):
                 check_cancel(cancel)
@@ -250,6 +250,7 @@ def prepare_export(project,ffmpeg,progress,cancel):
         key=hashlib.sha256(json.dumps([fingerprint(media),vars(crop),item.in_point,item.source_duration,fps,effects]+([2,tracking,assets] if tracking else []),sort_keys=True).encode()).hexdigest()
         target=CACHE_DIR/'vision-renders'/(('track-' if tracking else '')+key+'.mkv'); target.parent.mkdir(parents=True,exist_ok=True)
         if target.is_file():result[item.id]=str(target); continue
+        if cached_only:continue
         import shutil
         needed=max(50*1024**2,int(width*height*4*item.source_duration*fps/3))
         if shutil.disk_usage(target.parent).free<needed:raise RuntimeError(f'Please free about {needed/1024**3:.1f} GB for this lossless effect render cache.')

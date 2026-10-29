@@ -78,25 +78,59 @@ def video_codec(path: str | Path, ffprobe: str = "ffprobe") -> str:
     return result.stdout.strip().splitlines()[0].lower() if result.stdout.strip() else ""
 
 
-def make_thumbnail(path: str | Path, kind: str, ffmpeg: str = "ffmpeg", *, timeout=None) -> str:
+def _thumbnail_target(path,kind):
     source=Path(path).resolve()
     stat=source.stat()
     signature=str(source)+f':{stat.st_size}:{stat.st_mtime_ns}:rgba-v3'
     digest = hashlib.sha1(signature.encode()).hexdigest()[:16]
-    target = CACHE_DIR / "thumbs" / (digest+(".png" if kind=="image" else ".jpg"))
+    return CACHE_DIR / "thumbs" / (digest+(".png" if kind=="image" else ".jpg"))
+
+
+def cached_thumbnail(path,kind):
+    """Find existing small artwork without decoding the original image/video."""
+    try:
+        target=_thumbnail_target(path,kind)
+        return str(target) if target.is_file() and target.stat().st_size else ''
+    except OSError:return ''
+
+
+def planned_thumbnail(path,kind):
+    """Stable derived path, assigned before asynchronous work/snapshots start."""
+    try:return str(_thumbnail_target(path,kind))
+    except OSError:return ''
+
+
+def make_thumbnail(path: str | Path, kind: str, ffmpeg: str = "ffmpeg", *, timeout=None, cancel_check=None) -> str:
+    target=_thumbnail_target(path,kind)
     if target.exists():
         return str(target)
-    if kind == "image":
-        with Image.open(path) as image:
-            from PIL import ImageOps
-            converted = ImageOps.exif_transpose(image).convert("RGBA")
-            converted.thumbnail((320, 180))
-            converted.save(target)
-    else:
-        run_process([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", "0.5",
-                        "-i", str(path), "-frames:v", "1", "-vf",
-                        "scale=320:180:force_original_aspect_ratio=decrease", str(target)],
-                       check=False, capture_output=True, timeout=timeout)
+    import tempfile
+    # A cancelled/failed writer must never leave a partial image that the next
+    # project load mistakes for a completed thumbnail.
+    with tempfile.NamedTemporaryFile(dir=target.parent,suffix=target.suffix,delete=False) as pending:
+        temporary=Path(pending.name)
+    try:
+        if cancel_check and cancel_check():raise InterruptedError('Thumbnail generation cancelled')
+        if kind == "image":
+            with Image.open(path) as image:
+                from PIL import ImageOps
+                converted = ImageOps.exif_transpose(image).convert("RGBA")
+                converted.thumbnail((320, 180))
+                converted.save(temporary)
+        else:
+            from .process import run_cancellable
+            runner=run_cancellable if cancel_check is not None else run_process
+            options=dict(cancel_check=cancel_check) if cancel_check is not None else {}
+            result=runner([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", "0.5",
+                            "-i", str(path), "-frames:v", "1", "-vf",
+                            "scale=320:180:force_original_aspect_ratio=decrease", str(temporary)],
+                           check=False, capture_output=True, timeout=timeout,**options)
+            if result.returncode:return ""
+        if cancel_check and cancel_check():raise InterruptedError('Thumbnail generation cancelled')
+        if temporary.stat().st_size:
+            temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
     return str(target) if target.exists() else ""
 
 

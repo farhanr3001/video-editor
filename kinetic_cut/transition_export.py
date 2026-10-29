@@ -2,10 +2,30 @@
 import copy,math
 from .animated_transitions import NAMES,descriptor
 
+def exact_names():
+ """Legacy motion/wipe compositors cannot be represented by a generic fade."""
+ from .transitions import TRANSITION_SET
+ return TRANSITION_SET
+
+def legacy_frame(project,transition,images,size):
+ """Use the actual preview's crop-local/pivot compositing, without a widget."""
+ from PySide6.QtGui import QImage,QPainter
+ from PySide6.QtCore import Qt,QRectF
+ from .preview_compositor import SceneContext
+ frames={key:image for key,image in zip((transition.left_item_id,transition.right_item_id),images) if key and image is not None}
+ context=SceneContext(project,frames,{key:key for key in frames},{},False,1.,draw_captions=False)
+ image=QImage(*size,QImage.Format_ARGB32_Premultiplied);image.fill(Qt.transparent)
+ painter=QPainter(image);painter.setRenderHints(QPainter.Antialiasing|QPainter.SmoothPixmapTransform)
+ try:context._draw_layer_transition(painter,transition.track,transition,QRectF(0,0,*size))
+ finally:painter.end()
+ return image
+
 def configure_layers(project,layers,error):
  """Add bounded pair passes without changing the document or source clocks."""
  new=[t for t in project.transitions if t.name in NAMES and t.track in project.video_tracks and project.track_states.get(t.track,{}).get('visible',True)]
- if not new:return layers
+ if not new:
+  from .legacy_transition_gpu import configure_layers as legacy
+  return legacy(project,layers,error)
  by_id={v['id']:v for v in layers};pairs=[]
  for trans in new:
   if any(t is not trans and t.track==trans.track and t.start<trans.end and t.end>trans.start for t in project.transitions):raise error('overlapping transition windows')
@@ -25,23 +45,26 @@ def configure_layers(project,layers,error):
    # Geometry streams are indexed by absolute output frame, not pair-window start.
    pairs.append(layer)
  order={t:n for n,t in enumerate(project.video_tracks)}
- return sorted([*layers,*pairs],key=lambda v:(order.get(v.get('track'),0),bool(v.get('pair')),v.get('pair',{}).get('start',v['start']),v.get('pair',{}).get('side',0)))
+ from .legacy_transition_gpu import configure_layers as legacy
+ return legacy(project,sorted([*layers,*pairs],key=lambda v:(order.get(v.get('track'),0),bool(v.get('pair')),v.get('pair',{}).get('start',v['start']),v.get('pair',{}).get('side',0))),error)
 
 def prepare(project,directory,preset,ffmpeg,prepared,progress,cancel):
  """Raster only unsupported pair windows; all files belong to this export job."""
- transitions=[t for t in project.transitions if t.name in NAMES and t.track in project.video_tracks and project.track_states.get(t.track,{}).get('visible',True)]
+ names=exact_names()
+ transitions=[t for t in project.transitions if t.name in names and t.track in project.video_tracks and project.track_states.get(t.track,{}).get('visible',True)]
  if not transitions:return project
  import av,numpy as np,shutil
  from pathlib import Path
  from fractions import Fraction
- from PySide6.QtGui import QImage
+ from PySide6.QtGui import QImage,QPainter
+ from PySide6.QtCore import Qt,QRectF
  from .rendergraph import command
  from .export_process import render
  from .gpu_export_decode import Source
  from .animated_transitions import composite
  from .model import MediaItem,TimelineItem,Transform
  directory=Path(directory)/'paired-transitions';directory.mkdir(exist_ok=True)
- stage=copy.deepcopy(project);stage.transitions=[t for t in stage.transitions if t.name not in NAMES]
+ stage=copy.deepcopy(project);stage.transitions=[t for t in stage.transitions if t.name not in names]
  stage._transition_exclusions=copy.deepcopy(getattr(project,'_transition_exclusions',{}))
  fps=project.settings.fps;width=project.settings.width;height=project.settings.height
  def check():
@@ -57,6 +80,10 @@ def prepare(project,directory,preset,ffmpeg,prepared,progress,cancel):
     if not item or item.muted:sides.append(None);continue
     low=min(max(first/fps,item.start),max(item.start,item.start+item.duration-1/fps))
     high=max(low+1/fps,min(last/fps,item.start+item.duration))
+    if trans.name not in NAMES:
+     media=project.media_by_id(item.media_id)
+     if media.kind=='image':sides.append((None,low,item));continue
+     sides.append((Source(media.path,item.in_point+(low-item.start)*item.speed),low,item));continue
     one=copy.copy(project);one.timeline=[item];one.transitions=[];one.captions=[]
     path=directory/f'{number}-{side}.mkv';paths.append(path)
     args=command(one,str(path),preset,False,'CPU',ffmpeg,None,False,prepared,window=(low,high),transparent=True)
@@ -72,8 +99,15 @@ def prepare(project,directory,preset,ffmpeg,prepared,progress,cancel):
      for side in sides:
       if side is None:images.append(None);continue
       reader,low,item=side;seconds=max(0,min(at,item.start+item.duration-1/fps)-low)
+      if trans.name not in NAMES:
+       if reader is None:images.append(QImage(project.media_by_id(item.media_id).path));continue
+       seconds=item.in_point+(low-item.start+seconds)*item.speed
       data=reader.frame(seconds);h,w=data.shape[:2];images.append(QImage(data.data,w,h,w*4,QImage.Format_RGBA8888).copy())
-     image=composite(*images,trans,trans.progress(at),(width,height)).convertToFormat(QImage.Format_RGBA8888)
+     if trans.name in NAMES:image=composite(*images,trans,trans.progress(at),(width,height))
+     else:
+      view=copy.copy(project);view.playhead=at
+      image=legacy_frame(view,trans,images,(width,height))
+     image=image.convertToFormat(QImage.Format_RGBA8888)
      pixels=np.frombuffer(image.constBits(),np.uint8).reshape(height,image.bytesPerLine()//4,4)[:,:width].copy()
      frame=av.VideoFrame.from_ndarray(pixels,format='rgba');frame.pts=n
      for packet in stream.encode(frame):movie.mux(packet)
@@ -86,6 +120,6 @@ def prepare(project,directory,preset,ffmpeg,prepared,progress,cancel):
     if identifier:stage._transition_exclusions.setdefault(identifier,[]).append((first/fps,last/fps))
   finally:
    for side in sides:
-    if side:side[0].close()
+    if side and side[0]:side[0].close()
    for path in paths:path.unlink(missing_ok=True)
  return stage

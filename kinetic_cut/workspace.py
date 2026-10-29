@@ -444,6 +444,15 @@ class MediaPanel(QWidget):
         return any(asset and not asset.timeline_preset for asset in assets)
     def toggle_search(self):self.search.toggle()
     def refresh(self,*_,preserve=False):
+        if getattr(self,'_thumbnail_rebuild_project',None) is not self.window.project:
+            self._thumbnail_rebuild_project=self.window.project
+            cancel=getattr(self,'_thumbnail_rebuild_cancel',None)
+            if cancel:cancel.set()
+            self._thumbnail_rebuild_paths.clear()
+            # A previous project's transient failure must not suppress rebuilding
+            # forever when the user returns to a now-readable source.
+            self._thumbnail_rebuild_failed.clear()
+            for media in self.window.project.media:self._request_thumbnail(media)
         selected={i.data(Qt.UserRole) for i in self.grid.selectedItems()} if preserve else set()
         current=self.grid.currentItem(); primary=current.data(Qt.UserRole) if current and preserve else None
         scroll=self.grid.verticalScrollBar().value(); horizontal=self.grid.horizontalScrollBar().value()
@@ -486,40 +495,61 @@ class MediaPanel(QWidget):
         if media.kind=='audio':
             icon=self.audio_thumbnails.icon(media)
             if not icon.isNull():return icon
-        if media.kind=="image" and Path(media.path).is_file():
+        self._request_thumbnail(media)
+        if media.kind=="image" and media.thumbnail and Path(media.thumbnail).is_file():
             if not hasattr(self, '_image_icon_cache'):
                 self._image_icon_cache = {}
             cache_key = (media.id, media.path, media.thumbnail)
             if cache_key in self._image_icon_cache:
                 return self._image_icon_cache[cache_key]
-            from .media import make_thumbnail
-            if not media.thumbnail or not Path(media.thumbnail).exists():
-                media.thumbnail=make_thumbnail(media.path,"image")
             source=QImage(media.thumbnail); canvas=QPixmap(110,65); canvas.fill(QColor("#08090b"))
             fitted=source.scaled(110,65,Qt.KeepAspectRatio,Qt.SmoothTransformation)
             painter=QPainter(canvas); painter.drawImage((110-fitted.width())//2,(65-fitted.height())//2,fitted); painter.end()
             icon = QIcon(canvas)
             self._image_icon_cache[cache_key] = icon
             return icon
-        if media.kind=='video' and Path(media.path).is_file() and (not media.thumbnail or not Path(media.thumbnail).is_file()):
+        return QIcon(media.thumbnail) if media.thumbnail and Path(media.thumbnail).exists() else lucide_icon("music-2" if media.kind=="audio" else "captions" if media.kind in {"title","caption"} else "layers")
+
+    def _request_thumbnail(self,media):
+        if media.kind not in ('image','video'):return
+        if not media.thumbnail or not Path(media.thumbnail).is_file():
+            from .media import planned_thumbnail
+            media.thumbnail=planned_thumbnail(media.path,media.kind)
+        if Path(media.path).is_file() and (not media.thumbnail or not Path(media.thumbnail).is_file()):
             if media.path not in self._thumbnail_rebuild_failed:
                 self._thumbnail_rebuild_paths[media.path]=media.kind
                 if not self._thumbnail_rebuild_scheduled and not self._thumbnail_rebuild_busy:
                     self._thumbnail_rebuild_scheduled=True
                     QTimer.singleShot(0,self._start_thumbnail_rebuild)
-        return QIcon(media.thumbnail) if media.thumbnail and Path(media.thumbnail).exists() else lucide_icon("music-2" if media.kind=="audio" else "captions" if media.kind in {"title","caption"} else "layers")
 
     def _start_thumbnail_rebuild(self):
         self._thumbnail_rebuild_scheduled=False
-        if self._thumbnail_rebuild_busy or not self._thumbnail_rebuild_paths:return
+        import shiboken6
+        def live():return shiboken6.isValid(self) and shiboken6.isValid(self.window) and not getattr(self.window,'_closing',False)
+        if not live() or self._thumbnail_rebuild_busy or not self._thumbnail_rebuild_paths:return
+        import threading,logging
         from .ui import Worker
         from .media import make_thumbnail
         batch=list(self._thumbnail_rebuild_paths.items())[:20]
         for path,_ in batch:self._thumbnail_rebuild_paths.pop(path,None)
         self._thumbnail_rebuild_busy=True
+        cancel=threading.Event()
+        self._thumbnail_rebuild_cancel=cancel
+        self._thumbnail_rebuild_project=self.window.project
+        ffmpeg=self.window.settings.get('ffmpeg','ffmpeg')
         def work():
-            return [(path,make_thumbnail(path,kind)) for path,kind in batch]
+            results=[]
+            for path,kind in batch:
+                if cancel.is_set():raise InterruptedError('Thumbnail generation cancelled')
+                try:thumbnail=make_thumbnail(path,kind,ffmpeg,timeout=20,cancel_check=cancel.is_set)
+                except InterruptedError:raise
+                except Exception:
+                    logging.exception('Could not rebuild media thumbnail: %s',path)
+                    thumbnail=''
+                results.append((path,thumbnail))
+            return results
         def done(results):
+            if cancel.is_set() or not live():return
             power_changed=False
             for path,thumbnail in results:
                 if not thumbnail:
@@ -530,13 +560,15 @@ class MediaPanel(QWidget):
                     if entry['media'].get('path')==path:
                         entry['media']['thumbnail']=thumbnail; power_changed=True
             if power_changed:self.power.save()
-            self._thumbnail_rebuild_busy=False
             self.refresh()
-            if self._thumbnail_rebuild_paths:self._start_thumbnail_rebuild()
+            self.window.timeline.refresh_thumbnails()
         def failed(_):
-            self._thumbnail_rebuild_failed.update(path for path,_ in batch)
+            if not cancel.is_set() and live():self._thumbnail_rebuild_failed.update(path for path,_ in batch)
+        def finished():
             self._thumbnail_rebuild_busy=False
-        worker=Worker(work); worker.signals.result.connect(done); worker.signals.error.connect(failed); self.window.start_worker(worker)
+            if self._thumbnail_rebuild_paths and live():self._start_thumbnail_rebuild()
+        worker=Worker(work);worker.cancel_callback=cancel.set
+        worker.signals.result.connect(done);worker.signals.error.connect(failed);worker.signals.finished.connect(finished);self.window.start_worker(worker)
     def displayed_media(self,item):
         id=item.data(Qt.UserRole)
         if self.is_watch():return self.watch_folders.resolve(id)
@@ -862,7 +894,22 @@ class DeliveryPage:
         from .render_history import restore
         self.context_id=uuid.uuid4().hex
         active=[j for j in self.jobs if j['state']=='Rendering']
-        self.jobs=restore(project.render_history)+active;self.refresh()
+        self.jobs=restore(project.render_history)+active
+        # The form belongs to the newly opened document, even when two projects
+        # have the same dimensions. A typed output name is never a global default.
+        self.name.setText(project.name);self.name.setModified(False)
+        from PySide6.QtCore import QSignalBlocker
+        controls=[self.codec,self.hardware,self.quality,self.bitrate,self.audio,self.burn]
+        blockers=[QSignalBlocker(control) for control in controls]
+        self.codec.setCurrentIndex(0);self.hardware.setCurrentText('Auto');self.quality.setCurrentIndex(0)
+        self.bitrate.setValue(10);self.bitrate.setEnabled(False);self.audio.setChecked(True);self.burn.setChecked(True)
+        del blockers
+        # Emit once so the bitrate row visibility follows the restored quality.
+        self.quality.currentIndexChanged.emit(0)
+        self._project_format=None;self._had_subtitles=True;self.sync_project_settings()
+        if not active:
+            self.progress.setRange(0,100);self.progress.setValue(0);self.cancel_render.setEnabled(False)
+        self.refresh()
     def bind_job(self,job):
         job.setdefault('owner_context',getattr(self,'context_id',''))
         job.setdefault('owner_project',self.window.compounds.root())
@@ -1024,13 +1071,14 @@ class DeliveryPage:
         job['elapsed']=elapsed(job); job.pop('started_at',None)
         job["state"]=state; job["error"]=error
         if state=="Complete":
-            self.progress.setValue(100)
+            if job.get('owner_context',getattr(self,'context_id',''))==getattr(self,'context_id',''):self.progress.setValue(100)
             from .render_history import add
             owner=self.history_owner(job);add(owner,job,publish=False);self.publish_history(owner)
             try:self.location.remember(Path(job['output']).parent,self.window.settings)
             except OSError:self.window.statusBar().showMessage('Export completed; recent folders could not be saved.',5000)
         if job.get('owner_context',getattr(self,'context_id',''))!=getattr(self,'context_id','') and self.history_owner(job) is not self.window.compounds.root():
             self.jobs=[value for value in self.jobs if value is not job]
+            self.progress.setRange(0,100);self.progress.setValue(0)
         if not self.running:self.clock.stop()
         self.refresh()
         if self.running:self.next_job()

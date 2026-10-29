@@ -233,7 +233,7 @@ class TestCompositingEngine(unittest.TestCase):
 
 
 class TestExportFiltergraphSynthesis(unittest.TestCase):
-    def test_export_command_synthesizes_transitions(self):
+    def test_export_command_refuses_substitute_fades_for_exact_transitions(self):
         p = Project()
         p.settings.width = 1080
         p.settings.height = 1920
@@ -258,12 +258,10 @@ class TestExportFiltergraphSynthesis(unittest.TestCase):
         p.add_transition(trans)
 
         preset = ExportPreset("Custom Export", "h264", 10.0, 192, "Custom")
-        args = command(p, "output.mp4", preset, burn_captions=False, export_audio=False)
-
-        # Confirm filter complex has been synthesized with fade transitions
-        fc_idx = args.index("-filter_complex")
-        filter_complex = args[fc_idx + 1]
-        self.assertIn("fade=", filter_complex)
+        # A white-flash compositor must be prepared with its actual preview
+        # pixels; generating a generic fade silently loses its appearance.
+        with self.assertRaisesRegex(ValueError,'exact export preparation'):
+            command(p, "output.mp4", preset, burn_captions=False, export_audio=False)
 
 
 class MockWindow:

@@ -41,8 +41,13 @@ and49 transitions. New groups include distortion and flow, light and lens,
 texture and retro, pieces and particles, and geometric reveals. Puzzle Assemble
 connects moving pieces of the incoming video. Effects and transitions retain
 editable inspector controls, ordering, undo/redo and project persistence.
-Caption generation includes local speech alignment and elapsed/estimated timing.
-Completed render jobs are saved with projects.
+Caption generation includes local speech alignment and an elapsed timer.
+Completed render jobs are saved with projects. Export controls reset when switching
+projects. GPU exports stream captions and motion graphics with exact frame reuse,
+and supported retimes and transitions retain their preview geometry and timing.
+Cached enhancement and vision frames stream on demand; uncached complex nested
+timelines and explicit CPU compatibility can still require lossless preparation.
+Action and crash logs help investigate interrupted editing sessions.
 
 ## Themes
 
@@ -84,3 +89,18 @@ Uninstall removes Power Bins, settings, optional downloads, caches and files in
 the default Kinetic Cut download folder. Projects and media elsewhere stay intact.
 
 Built with Python, PySide6 and FFmpeg. See [dependency notices](THIRD_PARTY_NOTICES.txt).
+
+## Connect Claude to the editor
+
+Open AI Assistant and choose **Connect to Claude Desktop**, then fully quit and
+restart Claude Desktop. Keep Kinetic Cut open and enable its tools in your chat.
+The setup preserves other MCP servers and backs up existing Claude configuration.
+**Copy Claude Desktop JSON** provides the same local stdio configuration manually.
+
+For Claude Code, choose **Copy Claude Code command**, paste it into PowerShell,
+and check `/mcp` in Claude Code. No Node/Python install or API key is required for
+the installed editor bridge. Connection status verifies actual requests, not just
+configuration. Browser-only Claude cannot connect directly to this local bridge.
+
+Setup follows the [MCP local-server guide](https://modelcontextprotocol.io/docs/develop/connect-local-servers)
+and [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).

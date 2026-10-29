@@ -85,7 +85,7 @@ def run(output):
             expected=decoded(reference)
         check(name+' preserves frame count',len(actual)==math.ceil(project.duration*fps-1e-7) and actual.shape==expected.shape)
         error=float(np.abs(actual-expected).mean());check(name+' preserves visual output',error<5.)
-        check(name+' uses expected preparation',bool(job['cpu_islands'])==(name in ('titles','finishing-animation','retime-finishing')))
+        check(name+' uses expected preparation',bool(job['cpu_islands'])==(name in ('titles',)))
         if name.startswith('video-'):check(name+' retains hardware decoder textures',status['decoded_gpu']>0 and status['decoded_cpu']==0)
         results.append(dict(name=name,mean_pixel_error=error,diagnostics=status))
     from .transition_diagnostics import export_checks

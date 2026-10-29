@@ -61,6 +61,23 @@ class CompoundTests(unittest.TestCase):
         outer,_=create(self.p,{i.id for i in clips},set(),'Outer'); second=render_asset(outer)
         result2=run(['ffmpeg','-v','error','-i',second,'-frames:v','1','-f','rawvideo','-pix_fmt','rgb24','-'],capture_output=True,check=True)
         self.assertEqual(result.stdout,result2.stdout)
+    def test_render_history_does_not_invalidate_nested_visual_cache(self):
+        from kinetic_cut.compounds import cache_path
+        body=content(self.p);before=cache_path(body);original=copy.deepcopy(body)
+        body['render_history']=[dict(id='completed',output='movie.mp4',elapsed=10)]
+        self.assertEqual(before,cache_path(body));self.assertNotEqual(before,cache_path(body,_include_history=True))
+        self.assertEqual(original['timeline'],body['timeline'])
+        body['timeline'][0]['opacity']=50;self.assertNotEqual(before,cache_path(body))
+
+    def test_audio_only_compound_never_renders_the_child_video(self):
+        import av
+        asset,_=create(self.p,{'v'},{'c'},'Audio only fixture')
+        with patch('kinetic_cut.exporter.export',side_effect=AssertionError('unnecessary video preparation')):
+            output=render_asset(asset,audio_only=True)
+        with av.open(output) as movie:
+            self.assertEqual(len(movie.streams.video),0);self.assertEqual(len(movie.streams.audio),1)
+            self.assertAlmostEqual(float(movie.duration)/av.time_base,1.,delta=.03)
+
     def test_cycle_depth_rejected(self):
         data={'media':[{'id':'same','compound':{'media':[]}}]}
         with self.assertRaises(ValueError):validate(data,('same',))

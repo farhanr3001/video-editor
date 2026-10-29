@@ -96,7 +96,13 @@ def run(selftest_output=None, native_window_test=False):
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logging.getLogger().addHandler(handler)
     logging.getLogger().setLevel(logging.INFO)
+    if selftest_output is None:
+        from .crash_logging import install as install_crash_diagnostics
+        try:install_crash_diagnostics(app,DATA_DIR)
+        except Exception:logging.exception('Could not initialize crash diagnostics')
     def report_exception(kind, error, traceback):
+        from .activity_log import record
+        record('exception.unhandled',error_type=kind.__name__,message=str(error))
         logging.error("Application error", exc_info=(kind, error, traceback))
         QMessageBox.critical(app.activeWindow(), "Kinetic Cut", f"An unexpected error occurred. Your autosave is preserved.\n\n{error}\n\nDetails: {log_path}")
     sys.excepthook = report_exception
@@ -129,7 +135,7 @@ def run(selftest_output=None, native_window_test=False):
             # No networking during source/isolated diagnostics or normal editing.
             if getattr(sys, 'frozen', False) and selftest_output is None and not os.environ.get('KINETIC_CUT_HOME'):
                 QTimer.singleShot(2500, lambda: window.check_for_updates(startup=True))
-            if {'--enable-mcp','--connect-codex','--connect-antigravity'}.intersection(sys.argv):
+            if {'--enable-mcp','--connect-codex','--connect-antigravity','--connect-claude'}.intersection(sys.argv):
                 from .assistant import configure_startup_connection
                 configure_startup_connection(window,sys.argv)
             if selftest_output is not None:

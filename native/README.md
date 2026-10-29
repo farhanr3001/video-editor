@@ -80,9 +80,12 @@ topmost, foreground or focus-taking diagnostic windows. Performance runs come
 after functional checks and run without concurrent builds/full tests.
 
 The offline exporter (`scripts/build_gpu_export.ps1`, `gpu_export.dll`) now uses
-C ABI **3**. Its CPU reader keeps the same callback signature:0 supplies pixels,
+C ABI **4**. Its CPU reader keeps the same callback signature:0 supplies pixels,
 1 reports failure, and2 retains an already uploaded, dimension-matching raw
-overlay texture. The Python worker accepts ABI2 with reuse disabled. Cached
+overlay texture. ABI4 additionally accepts inverse projective placement in
+15-value geometry samples (six ordinary geometry values plus a row-major 3x3
+canvas-to-source-UV matrix). Earlier ABI2/3 libraries are accepted only when no
+projective samples are needed; ABI2 keeps texture reuse disabled. Cached
 caption images do not skip scene draws or encoded frames. Exact ASS sampling
 uses original timestamps and conservative dynamic/boundary retention; unknown
 scripts use the continuous path. Keep full native/owned-producer/pixel checks
@@ -96,3 +99,14 @@ Do not rename delivery/seek latency or coalescing as those unavailable metrics.
 
 Qt's synchronization behavior is documented by its
 [pinned threaded render-loop source](https://github.com/qt/qtdeclarative/blob/v6.11.2/src/quick/scenegraph/qsgthreadedrenderloop.cpp).
+
+Offline export ABI5 adds exact per-layer `source_times` / `frame_start` clocks,
+animated pixel-stack scratch resizing, and crop-local legacy transition modes
+25-49 (shader source in `legacy_transitions.inc`). `frameAbsolute` bypasses the
+ordinary decoder in-point phase only for a validated PTS schedule; shared clocks
+still share decoding. Params appends legacyCropA/B after the existing fields.
+Older libraries must reject jobs requiring these features. Retiming metadata is
+read from packet PTS, while source pixels, effect passes and composition stay
+native. Rich text rasterization and feature-specific inference/audio routes
+remain separate. Verify exact source-frame choices and preview pixels before
+accepting performance results; the special background-role fallback remains.

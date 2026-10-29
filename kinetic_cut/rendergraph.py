@@ -39,8 +39,8 @@ def audio_filters(item):
 
 
 def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffmpeg",ass_path=None,export_audio=True,prepared=None,window=None,transparent=False):
-    from .animated_transitions import NAMES as paired_names
-    if any(t.name in paired_names and t.track in project.video_tracks and project.track_states.get(t.track,{}).get('visible',True) for t in project.transitions):raise ValueError('Paired transitions require exact export preparation')
+    from .transition_export import exact_names
+    if any(t.name in exact_names() and t.track in project.video_tracks and project.track_states.get(t.track,{}).get('visible',True) for t in project.transitions):raise ValueError('Paired transitions require exact export preparation')
     from .motion_audio import expanded
     project=expanded(project)
     from .exporter import _crop_filter,_target_size,_flip_filter,_encoder,_escape_ass_path

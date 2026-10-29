@@ -1,4 +1,4 @@
-"""Stdio MCP bridge connecting Antigravity (and other stdio MCP hosts) to running Kinetic Cut."""
+"""Stdio MCP bridge for Claude, Antigravity and other local MCP hosts."""
 import json
 import sys
 import time
@@ -29,11 +29,33 @@ def send_mcp_request(url, token, payload, timeout=120):
         return None
 
 
+def restore_stdio():
+    """Windowed frozen executables still inherit MCP pipe handles on Windows."""
+    import os
+    if os.name != 'nt':return
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    kernel.GetStdHandle.argtypes=[wintypes.DWORD]; kernel.GetStdHandle.restype=wintypes.HANDLE
+    kernel.GetFileType.argtypes=[wintypes.HANDLE]; kernel.GetFileType.restype=wintypes.DWORD
+    for name,number,mode,flags in [('stdin',-10,'rb',os.O_RDONLY),('stdout',-11,'wb',os.O_WRONLY),('stderr',-12,'wb',os.O_WRONLY)]:
+        if getattr(sys,name) is not None:continue
+        handle=kernel.GetStdHandle(number & 0xffffffff)
+        if handle and kernel.GetFileType(handle)==3:  # FILE_TYPE_PIPE only
+            fd=msvcrt.open_osfhandle(handle, flags|os.O_BINARY)
+            setattr(sys,name,open(fd,mode,buffering=0))
+
+
 def run_bridge():
+    restore_stdio()
+    if sys.stdin is None or sys.stdout is None:return 1
     def _safe_write(data_dict):
         try:
             payload = (json.dumps(data_dict, ensure_ascii=False) + '\n').encode('utf-8')
-            if hasattr(sys.stdout, 'buffer') and sys.stdout.buffer is not None:
+            if 'b' in getattr(sys.stdout, 'mode', ''):
+                sys.stdout.write(payload); sys.stdout.flush()
+            elif hasattr(sys.stdout, 'buffer') and sys.stdout.buffer is not None:
                 sys.stdout.buffer.write(payload)
                 sys.stdout.buffer.flush()
             else:
@@ -44,6 +66,8 @@ def run_bridge():
 
     def _safe_readline():
         try:
+            if 'b' in getattr(sys.stdin, 'mode', ''):
+                return sys.stdin.readline().decode('utf-8', errors='replace')
             if hasattr(sys.stdin, 'buffer') and sys.stdin.buffer is not None:
                 line_bytes = sys.stdin.buffer.readline()
                 if not line_bytes:

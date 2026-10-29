@@ -2,6 +2,7 @@
 import time
 import copy
 import hashlib
+from .activity_log import record as record_action
 from .process import run as run_process
 from .audio_levels import channel_peaks
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot, Qt, QMetaObject, QThreadPool
@@ -48,6 +49,7 @@ class TimelineTransport(QObject):
             if base is not None:output.setVolume(float(base)*self.monitor_gain)
 
     def seek(self, position):
+        record_action('seek',throttle=.1,position=position,playing=self.playing)
         self._scrub_timer.stop(); self.scrubbing=False; self._scrub_pending_pos=None
         self._scrub_decoder_targets.clear(); self._scrub_retry_timer.stop()
         if self.playing and position>=self.window.project.duration:self.pause()
@@ -55,6 +57,7 @@ class TimelineTransport(QObject):
         self.sync(True); self.changed.emit(self.position)
 
     def scrub(self, position):
+        record_action('scrub.move' if self.scrubbing else 'scrub.start',throttle=.25 if self.scrubbing else 0.,position=position,playing=self.playing)
         if self.playing:self.pause()
         self.scrubbing=True
         self.position=max(0.,position); self.origin=self.position; self.started=time.monotonic()
@@ -85,6 +88,7 @@ class TimelineTransport(QObject):
         self.sync(True)
 
     def finish_scrub(self):
+        record_action('scrub.end',position=self.position)
         self._scrub_timer.stop()
         self.scrubbing=False
         self._scrub_pending_pos=None
@@ -94,6 +98,7 @@ class TimelineTransport(QObject):
         if self.scrubbing and not self.closed and self._scrub_decoder_targets:self._flush_scrub()
 
     def play(self):
+        record_action('play',position=self.position)
         if self.position>=self.window.project.duration:self.position=0.
         self.origin=self.position; self.started=time.monotonic(); self.playing=True
         # A paused decoder is already at the timeline position. Forcing another
@@ -103,6 +108,7 @@ class TimelineTransport(QObject):
         self.sync(); self.timer.start(); self._meter_timer.start(); self.stateChanged.emit(True)
 
     def pause(self):
+        if self.playing:record_action('pause',position=self.position)
         if self.playing:self.tick()
         self.playing=False; self.timer.stop(); self._meter_timer.stop()
         for player,_,_ in self.decoders.values():player.pause()

@@ -49,6 +49,21 @@ def run(output):
             assert target.stat().st_size>1000
             report['render_complete']=True
             ui=client.value('inspect_ui'); assert any(c['text']=='Connect to Codex' for c in ui['controls'])
+            assert any(c['text']=='Connect to Claude Desktop' for c in ui['controls'])
+            assert any(c['text']=='Copy Claude Code command' for c in ui['controls'])
+            # Exercise the actual packaged stdio entry point used by Claude.
+            import subprocess
+            from .assistant import claude_config
+            entry=claude_config()
+            messages=[dict(jsonrpc='2.0',id=501,method='initialize',params=dict(protocolVersion='2025-11-25',clientInfo=dict(name='Claude Desktop',version='verification'),capabilities={})),dict(jsonrpc='2.0',method='notifications/initialized'),dict(jsonrpc='2.0',id=502,method='tools/list'),dict(jsonrpc='2.0',id=503,method='tools/call',params=dict(name='get_state',arguments={}))]
+            payload=('\n'.join(json.dumps(v) for v in messages)+'\n').encode('utf-8')
+            child=subprocess.run([entry['command'],*entry['args']],input=payload,capture_output=True,timeout=30)
+            assert child.returncode==0,child.stderr
+            replies=[json.loads(line) for line in child.stdout.splitlines()]
+            assert [v['id'] for v in replies]==[501,502,503] and all('result' in v for v in replies)
+            assert replies[0]['result']['serverInfo']['name']=='Kinetic Cut'
+            assert any(t['name']=='apply_edits' for t in replies[1]['result']['tools'])
+            report['claude_stdio_initialize_tools_state_eof']=True
             frame=client.call('get_preview',area='workspace'); (output/'mcp-workspace.png').write_bytes(base64.b64decode(frame['content'][1]['data']))
             report['passed']=True
         except Exception:report.update(passed=False,error=traceback.format_exc())
@@ -58,5 +73,17 @@ def run(output):
     def poll():
         if finished.is_set():
             timer.stop(); connection.dialog.grab().save(str(output/'mcp-panel.png'))
+            from .theme import PALETTES,get_theme_stylesheet
+            from PySide6.QtWidgets import QPushButton
+            try:
+                for theme in PALETTES:
+                    app.setStyleSheet(get_theme_stylesheet(theme))
+                    for width in (640,520):
+                        connection.dialog.resize(width,740); app.processEvents()
+                        for button in connection.dialog.findChildren(QPushButton):
+                            assert button.width()>=button.minimumSizeHint().width(),button.text()
+                        connection.dialog.grab().save(str(output/f'claude-{theme}-{width}.png'))
+                report['claude_three_theme_layouts']=True
+            except Exception:report.update(passed=False,error=traceback.format_exc())
             (output/'report.json').write_text(json.dumps(report,indent=2),encoding='utf-8'); window.close(); app.exit(0 if report.get('passed') else 1)
     timer.timeout.connect(poll); timer.start(); QTimer.singleShot(90000,lambda:app.exit(2)); return app.exec()

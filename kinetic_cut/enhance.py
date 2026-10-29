@@ -321,7 +321,7 @@ def export_key(project,item):
     return hashlib.sha256(json.dumps([cache_path(project,media,item,active(item)[-1][0]).name,item.effects,item.crop_softness,[[r['key'] for r in ranges(project,media,item,index)] for index,_ in active(item)]],sort_keys=True).encode()).hexdigest()
 
 
-def prepare_export(project,ffmpeg,progress,cancel):
+def prepare_export(project,ffmpeg,progress,cancel,cached_only=False):
     """Bake only enhanced clips into existing prepared-video export substitution."""
     import av,numpy as np
     from .config import CACHE_DIR
@@ -335,6 +335,7 @@ def prepare_export(project,ffmpeg,progress,cancel):
         key=export_key(project,item)
         target=CACHE_DIR/'ai-enhance'/(key+'.mkv')
         if not target.is_file():
+            if cached_only:continue
             pending=target.with_suffix('.pending.mkv');stream=None
             try:
                 with av.open(str(pending),'w') as output:

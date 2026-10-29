@@ -98,6 +98,9 @@ class CacheManagerTests(unittest.TestCase):
                     QThreadPool.globalInstance().waitForDone(10000)
                     QApplication.processEvents()
                     self.assertEqual(media.thumbnail,str(thumb))
-                    make.assert_called_once_with(str(source),'video')
+                    self.assertEqual(make.call_count,1)
+                    self.assertEqual(make.call_args.args,(str(source),'video',window.settings.get('ffmpeg','ffmpeg')))
+                    self.assertEqual(make.call_args.kwargs['timeout'],20)
+                    self.assertTrue(callable(make.call_args.kwargs['cancel_check']))
             finally:
                 window.close()

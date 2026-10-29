@@ -36,13 +36,20 @@ class GpuExportTests(unittest.TestCase):
         self.p.media[0].has_alpha=True
         self.assertTrue(recipe(self.p,self.preset,self.root,False)['layers'][0]['cpu'])
     def test_unsupported_pixel_operation_is_an_exact_layer_not_silently_omitted(self):
-        item=self.p.timeline[0];item.transform.pitch=20
-        with self.assertRaises(Unsupported):recipe(self.p,self.preset,self.root,False)
-        with patch('kinetic_cut.export_process.render',return_value=(0,[])) as render:
+        item=self.p.timeline[0];item.transform.pitch=20;item.transform.rotation=10
+        item.effects=[dict(name='Gaussian Blur',horizontal=12,vertical=12)]
+        layer=recipe(self.p,self.preset,self.root,False)['layers'][0]
+        self.assertEqual(layer['operations'][0]['kind'],'blur');self.assertEqual(len(layer['geometry'][0]),15)
+        original=recipe
+        def unavailable(project,*args,**kwargs):
+            if project.timeline:raise Unsupported('simulated unavailable GPU operation')
+            return original(project,*args,**kwargs)
+        with patch('kinetic_cut.gpu_export.recipe',side_effect=unavailable),patch('kinetic_cut.export_process.render',return_value=(0,[])) as render:
             job=prepare_recipe(self.p,self.preset,self.root,False,{},'ffmpeg',None,None)
         self.assertEqual(len(job['layers']),1);self.assertEqual(len(job['cpu_islands']),1)
         self.assertTrue(job['layers'][0]['cpu']);self.assertEqual(job['layers'][0]['in_point'],0)
-        args=render.call_args.args[0];self.assertIn('ffv1',args);self.assertIn('perspective=',args[args.index('-filter_complex')+1])
+        render.assert_not_called()
+        args=job['raw_sources'][job['layers'][0]['path']]['command'];self.assertNotIn('ffv1',args);self.assertIn('perspective=',args[args.index('-filter_complex')+1])
         self.assertEqual((job['layers'][0]['start'],job['layers'][0]['end']),(1,3))
     def test_mux_reuses_exact_audio_graph_and_does_not_encode_video_again(self):
         self.p.audio_tracks=['audio_1'];audio=copy.deepcopy(self.p.timeline[0]);audio.id='a';audio.track='audio_1';audio.gain_db=-3;audio.pan=.2;audio.speed=1.25;audio.fade_in=.2;self.p.timeline.append(audio)

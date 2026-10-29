@@ -302,6 +302,10 @@ class Project(IndexedProject):
         from .keyframes import shift
         shift(right,offset)
         item.duration = offset
+        # A blade cut does not add another pair of fade handles. Keep the
+        # owner's fades on the original fragment, bounded by its new length.
+        item.fade_in=min(item.fade_in,offset);item.fade_out=min(item.fade_out,offset)
+        right.fade_in=right.fade_out=0.
         self.timeline.append(right)
         # The new right fragment owns the original outgoing edge. Incoming
         # transitions remain attached to the original left fragment.

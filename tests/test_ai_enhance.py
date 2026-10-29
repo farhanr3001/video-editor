@@ -23,6 +23,11 @@ class EnhanceTests(unittest.TestCase):
             image=QImage(160,120,QImage.Format_RGB32);image.fill(QColor(color));image.save(str(root/'frames'/f'{n:08d}.png'))
         (root/'info.json').write_text(json.dumps(dict(key=root.name,family=enhance.signature(self.media,self.item,0,10,False),source_start=self.item.in_point,frames=2,fps=10,backend='test')))
         return root
+    def test_cache_only_export_never_builds_an_intermediate_movie(self):
+        self.ready_frames()
+        with patch('kinetic_cut.enhance._source_frames',side_effect=AssertionError('serial pixel prepass')),patch('av.open',side_effect=AssertionError('intermediate encoder')):
+            self.assertEqual(enhance.prepare_export(self.project,'unused',None,None,cached_only=True),{})
+
     def test_parameters_are_bounded_and_zero_bypasses(self):
         effect=enhance.default_effect();effect.update(denoise=float('nan'),mix=-10,detail_recovery=500,upscale=8,quality_mode='invalid')
         values=enhance.parameters(effect);self.assertEqual(values['denoise'],35);self.assertEqual(values['mix'],0);self.assertEqual(values['detail_recovery'],100);self.assertEqual(values['upscale'],1);self.assertEqual(values['quality_mode'],'Balanced')

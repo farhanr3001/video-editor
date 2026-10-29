@@ -90,7 +90,12 @@ class GpuTimeline(Surface):
                 import logging
                 logging.exception('Timeline peak texture preparation failed');continue
             samples=self.timeline.waveforms.get(media_id)
-            if identity!=id(samples):continue
+            if identity!=id(samples):
+                # _wave could not enqueue the replacement while this job was
+                # pending. Wake refresh even on a paused, otherwise idle view.
+                self.signature=None
+                changed=True
+                continue
             previous=self.waveforms.get(media_id)
             if previous:
                 for level in range(len(previous[1])):self.images.remove(f'wave:{media_id}:{previous[0]}:{level}')

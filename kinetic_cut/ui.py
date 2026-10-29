@@ -9,6 +9,7 @@ import threading
 import traceback
 import copy
 import logging
+from .activity_log import record as record_action
 from dataclasses import asdict
 from pathlib import Path
 
@@ -60,20 +61,25 @@ class Worker(QRunnable):
 
     @Slot()
     def run(self):
+        label=getattr(self.function,'__qualname__',getattr(self.function,'__name__','task'))
+        if not getattr(self,'maintenance',False):record_action('job.start',function=label)
         try:
             value=self.function(*self.args, **self.kwargs)
             try:self.signals.result.emit(value)
             except RuntimeError:return
         except InterruptedError:
+            record_action('job.cancelled',function=label)
             # Existing consumers use error as a terminal callback (including
             # render queue unlock). Keep that contract without a crash log.
             try:self.signals.error.emit('Operation cancelled.')
             except RuntimeError:pass
         except Exception:
+            record_action('job.failed',function=label,error_type=sys.exc_info()[0].__name__)
             logging.exception("Background task failed: %s",getattr(self.function,"__name__","task"))
             try:self.signals.error.emit(traceback.format_exc())
             except RuntimeError:return
         finally:
+            if not getattr(self,'maintenance',False):record_action('job.finished',function=label)
             try:self.signals.finished.emit()
             except RuntimeError:pass
 
@@ -337,6 +343,7 @@ class MainWindow(QMainWindow):
             action.setShortcut(QKeySequence(self.settings.get("shortcuts",{}).get(logical,"")))
 
     def set_project(self,project:Project):
+        record_action('project.switch',name=project.name,path=project.path,items=len(project.timeline),captions=len(project.captions))
         self.flush_text_edit()
         if getattr(self,"current_page",0):
             from .workspace import set_page
@@ -423,6 +430,7 @@ class MainWindow(QMainWindow):
             if field.name not in {'playhead','modified_at','render_history'} and not equal:changed=True
             setattr(snapshot,field.name,value)
         if not changed:return
+        record_action('edit.commit',items=len(self.project.timeline),captions=len(self.project.captions),selected=self.timeline.selected_id)
         self._history=self._history[:self._history_index+1]; self._history.append(snapshot)
         if len(self._history)>100:self._history.pop(0)
         self._history_index=len(self._history)-1
@@ -464,14 +472,17 @@ class MainWindow(QMainWindow):
         for media in self.project.media:self.request_waveform(media)
     @edit_only
     def undo(self):
+        record_action('undo',index=self._history_index)
         if self._restoring:return
         self.flush_text_edit(); self._restore_history(self._history_index-1)
     @edit_only
     def redo(self):
+        record_action('redo',index=self._history_index)
         if self._restoring:return
         self._restore_history(self._history_index+1)
 
     def start_worker(self,worker:Worker,*,shutdown=False):
+        if not getattr(worker,'maintenance',False):record_action('job.queued',function=getattr(worker.function,'__qualname__','task'))
         if getattr(self, '_closing', False) and not (shutdown and getattr(worker,'maintenance',False)):
             worker.cancel()
             worker.signals.deleteLater()
@@ -1337,6 +1348,7 @@ class MainWindow(QMainWindow):
         field.ensureCursorVisible()
 
     def select_item(self,item_id:str):
+        record_action('selection.clip',throttle=.1,item_id=item_id)
         item=self.project.item_by_id(item_id)
         if item_id:
             if item_id not in self.timeline.selected_ids:
@@ -1378,6 +1390,7 @@ class MainWindow(QMainWindow):
         self.transport.pause(); dialog=MotionEditor(self,item); dialog.setAttribute(Qt.WA_DeleteOnClose); dialog.show(); self._motion_dialog=dialog
 
     def select_caption(self,caption_id):
+        record_action('selection.caption',throttle=.1,caption_id=caption_id)
         if hasattr(self,'keyframe_button'):self.keyframe_button.setEnabled(False)
         self.timeline.selected_transition_id=""
         if not caption_id:
@@ -1394,6 +1407,7 @@ class MainWindow(QMainWindow):
         self.retime_button.update_state()
 
     def select_transition(self,transition_id:str):
+        record_action('selection.transition',transition_id=transition_id)
         if hasattr(self,'keyframe_button'):self.keyframe_button.setEnabled(False)
         self.timeline.selected_transition_id=transition_id
         if transition_id:
@@ -1983,6 +1997,7 @@ class MainWindow(QMainWindow):
 
     @edit_only
     def split_selected(self):
+        record_action('edit.split',position=self.project.playhead,selected=self.timeline.selected_id)
         if self.timeline.selected_caption:self.timeline.split_caption(); return
         item=self.project.item_by_id(self.timeline.selected_id)
         if not item:return
@@ -1992,6 +2007,7 @@ class MainWindow(QMainWindow):
 
     @edit_only
     def delete_selected(self,ripple=False):
+        record_action('edit.delete',ripple=ripple,position=self.project.playhead,selected=self.timeline.selected_id)
         timeline=self.timeline
         if getattr(timeline, "selected_transition_id", ""):
             tid=timeline.selected_transition_id
@@ -2279,6 +2295,7 @@ class MainWindow(QMainWindow):
             self.inspector.select(self.timeline.selected_id or self.inspector.item_id)
 
     def model_changed(self):
+        record_action('edit.change',throttle=.15,position=self.project.playhead,selected=self.timeline.selected_id)
         self.project.touch(); self.preview.update()
         if getattr(self,'_property_scrubbing',False):self.timeline._range(); self.timeline.viewport().update(); return
         self.project.ensure_track_model(); self.timeline.set_project(self.project)
@@ -2295,6 +2312,7 @@ class MainWindow(QMainWindow):
     def dropEvent(self,event):self.add_media_paths([u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]); event.acceptProposedAction()
 
     def closeEvent(self,event:QCloseEvent):
+        record_action('application.close.wait' if getattr(self,'_closing',False) else 'application.close',throttle=2.,workers=len(self._workers))
         from .close_guard import confirm_close
         if getattr(self,'_closing',False):
             from .dialog_jobs import active_dialog_threads

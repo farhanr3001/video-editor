@@ -138,10 +138,9 @@ def export(project: Project, output: str, preset: ExportPreset,
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     from .compounds import prepare as prepare_compounds
     project=prepare_compounds(project,ffmpeg,progress,cancel)
-    from .native_animation import prepared
     from .tracking_effect import prepared as tracking_prepared
-    with tracking_prepared(project), prepared(project,progress,cancel) as native_project:
-        return _export_prepared(native_project,output,preset,burn_captions,hardware,ffmpeg,progress,cancel,export_audio,lossless)
+    with tracking_prepared(project):
+        return _export_prepared(project,output,preset,burn_captions,hardware,ffmpeg,progress,cancel,export_audio,lossless)
 
 def _export_prepared(project,output,preset,burn_captions,hardware,ffmpeg,progress,cancel,export_audio,lossless):
     automatic=hardware=="Auto"
@@ -150,7 +149,7 @@ def _export_prepared(project,output,preset,burn_captions,hardware,ffmpeg,progres
         hardware=automatic_encoder(ffmpeg,preset.codec)
     if progress:progress(0,"Preparing export · "+hardware+" encoder")
     from .vision_effects import prepare_export
-    prepared=prepare_export(project,ffmpeg,progress,cancel)
+    prepared=prepare_export(project,ffmpeg,progress,cancel,cached_only=True) if os.name=='nt' and hardware=='NVIDIA' and not lossless else {}
     with tempfile.TemporaryDirectory(prefix=".kinetic-export-",dir=str(Path(output).parent)) as directory:
         if os.name=='nt' and hardware=='NVIDIA' and not lossless:
             from .gpu_export import prepare_recipe,render_native,mux_command,Unsupported
@@ -178,28 +177,31 @@ def _export_prepared(project,output,preset,burn_captions,hardware,ffmpeg,progres
                         logs=CACHE_DIR/'render-logs';logs.mkdir(parents=True,exist_ok=True)
                         (logs/(str(time.time_ns())+'-gpu-fallback.json')).write_text(json.dumps(dict(error=str(error),encoder=hardware,composition='CPU compatibility fallback'),indent=2),encoding='utf-8')
                         if progress:progress(0,'Native GPU path unavailable; using compatibility rendering with '+hardware+' encoding…')
-        from .transition_export import prepare as prepare_transitions
-        project=prepare_transitions(project,directory,preset,ffmpeg,prepared,progress,cancel)
-        from .render_batches import needed,prepare
-        batched=needed(project)
-        render_project=prepare(project,directory,preset,ffmpeg,prepared,progress,cancel,transparent=lossless) if batched else project
-        ass_path = str(Path(directory) / "captions.ass")
-        pending_output=str(Path(directory)/('render.mkv' if lossless else 'render.mp4'))
-        if (burn_captions and project.captions) or any(item.role in {"title","graphic"} for item in project.timeline):
-            write_ass(project, ass_path,burn_captions)
-        command = build_command(render_project, pending_output, preset, burn_captions, hardware, ffmpeg, ass_path,export_audio,prepared,transparent=lossless)
-        if lossless:
-            threads=str(os.cpu_count() or 4)
-            command=command[:command.index('-c:v')]+['-c:v','ffv1','-level','3','-slices','16','-pix_fmt','bgra','-threads',threads]+(['-c:a','pcm_s16le'] if export_audio else [])+['-t',f'{project.duration:.6f}','-progress','pipe:1','-nostats',pending_output]
-        from .export_process import render
-        final_progress=(lambda value,text:progress(.8+.2*value,'Finalising captions and audio · '+text)) if batched and progress else progress
-        code,log_tail=render(command,project.duration,final_progress,cancel)
-        if code:
-            detail="\n".join(log_tail)
-            if automatic and hardware!="CPU" and any(message in detail.lower() for message in ("error while opening encoder","cannot load","no capable devices","initializeencoder failed","device failed")):
-                if progress:progress(0,"Hardware encoder unavailable for this output; retrying with CPU…")
-                return export(project,output,preset,burn_captions,"CPU",ffmpeg,progress,cancel,export_audio)
-            raise RuntimeError("FFmpeg export failed:\n" + "\n".join(log_tail)[-3000:])
-        if cancel and cancel.is_set():raise RuntimeError('Export cancelled. Previous output is unchanged.')
-        os.replace(pending_output,output)
-        if progress:progress(1.0, "Export complete")
+        prepared=prepare_export(project,ffmpeg,progress,cancel)
+        from .native_animation import prepared as prepare_native
+        with prepare_native(project,progress,cancel) as project:
+            from .transition_export import prepare as prepare_transitions
+            project=prepare_transitions(project,directory,preset,ffmpeg,prepared,progress,cancel)
+            from .render_batches import needed,prepare
+            batched=needed(project)
+            render_project=prepare(project,directory,preset,ffmpeg,prepared,progress,cancel,transparent=lossless) if batched else project
+            ass_path = str(Path(directory) / "captions.ass")
+            pending_output=str(Path(directory)/('render.mkv' if lossless else 'render.mp4'))
+            if (burn_captions and project.captions) or any(item.role in {"title","graphic"} for item in project.timeline):
+                write_ass(project, ass_path,burn_captions)
+            command = build_command(render_project, pending_output, preset, burn_captions, hardware, ffmpeg, ass_path,export_audio,prepared,transparent=lossless)
+            if lossless:
+                threads=str(os.cpu_count() or 4)
+                command=command[:command.index('-c:v')]+['-c:v','ffv1','-level','3','-slices','16','-pix_fmt','bgra','-threads',threads]+(['-c:a','pcm_s16le'] if export_audio else [])+['-t',f'{project.duration:.6f}','-progress','pipe:1','-nostats',pending_output]
+            from .export_process import render
+            final_progress=(lambda value,text:progress(.8+.2*value,'Finalising captions and audio · '+text)) if batched and progress else progress
+            code,log_tail=render(command,project.duration,final_progress,cancel)
+            if code:
+                detail="\n".join(log_tail)
+                if automatic and hardware!="CPU" and any(message in detail.lower() for message in ("error while opening encoder","cannot load","no capable devices","initializeencoder failed","device failed")):
+                    if progress:progress(0,"Hardware encoder unavailable for this output; retrying with CPU…")
+                    return export(project,output,preset,burn_captions,"CPU",ffmpeg,progress,cancel,export_audio)
+                raise RuntimeError("FFmpeg export failed:\n" + "\n".join(log_tail)[-3000:])
+            if cancel and cancel.is_set():raise RuntimeError('Export cancelled. Previous output is unchanged.')
+            os.replace(pending_output,output)
+            if progress:progress(1.0, "Export complete")

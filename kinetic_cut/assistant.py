@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from PySide6.QtCore import QObject, Signal, Slot, Qt, QTimer
 from PySide6.QtWidgets import (QApplication,QDialog,QVBoxLayout,QHBoxLayout,QLabel,
-    QPushButton,QPlainTextEdit,QCheckBox,QMessageBox)
+    QPushButton,QPlainTextEdit,QCheckBox,QMessageBox,QGridLayout)
 from .assistant_api import EditorAPI, TOOLS
 from .assistant_server import MCPServer
 
@@ -111,6 +111,45 @@ def register_antigravity(path=None, command=None, args=None, cwd=None):
     return updated_paths[0] if updated_paths else str(targets[0])
 
 
+def claude_config(command=None, args=None):
+    """Claude's local stdio entry; no shell, Node install or copied access token."""
+    entry = antigravity_config(command, args)
+    if 'cwd' in entry:
+        entry['args'] = [str(Path(__file__).resolve().parent.parent/'main.py'), '--mcp-bridge']
+        entry.pop('cwd')
+    return entry
+
+
+def claude_snippet(command=None, args=None):
+    return json.dumps({'mcpServers': {'kinetic-cut': claude_config(command, args)}}, indent=2)
+
+
+def claude_code_command(command=None, args=None):
+    # PowerShell single-quoted JSON preserves Windows paths and embedded quotes.
+    entry = dict(type='stdio', **claude_config(command, args))
+    return "claude mcp add-json --scope user kinetic-cut '"+json.dumps(entry).replace("'", "''")+"'"
+
+
+def register_claude(path=None, command=None, args=None):
+    """Merge Claude Desktop configuration; reject malformed files without changes."""
+    target = Path(path) if path else Path(os.environ.get('APPDATA', str(Path.home()/'AppData/Roaming')))/'Claude/claude_desktop_config.json'
+    original = target.read_text(encoding='utf-8-sig') if target.exists() else ''
+    data = json.loads(original) if original.strip() else {}
+    if not isinstance(data, dict) or not isinstance(data.get('mcpServers', {}), dict):
+        raise ValueError('Invalid Claude configuration. Fix its JSON before connecting Kinetic Cut.')
+    entry = claude_config(command, args)
+    servers = data.setdefault('mcpServers', {})
+    if servers.get('kinetic-cut') == entry:return str(target)
+    servers['kinetic-cut'] = entry
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        backup = target.with_name(target.stem+'.before-kinetic-cut-'+time.strftime('%Y%m%d-%H%M%S')+'-'+secrets.token_hex(3)+'.json')
+        backup.write_bytes(target.read_bytes())
+    pending = target.with_name(target.name+'.kinetic-cut.tmp')
+    pending.write_text(json.dumps(data, indent=2)+'\n', encoding='utf-8'); pending.replace(target)
+    return str(target)
+
+
 class AssistantConnection(QObject):
     requested=Signal(object)
     changed=Signal()
@@ -190,7 +229,7 @@ class AssistantConnection(QObject):
 
 def configure_startup_connection(window,arguments):
     """Command-line setup may enable/configure MCP, but never opens its panel."""
-    if not {'--enable-mcp','--connect-codex','--connect-antigravity'}.intersection(arguments):return
+    if not {'--enable-mcp','--connect-codex','--connect-antigravity','--connect-claude'}.intersection(arguments):return
     from .config import save_settings
     connection=window.assistant_connection; connection.start()
     if connection.server:
@@ -201,6 +240,9 @@ def configure_startup_connection(window,arguments):
         if '--connect-antigravity' in arguments:
             path=register_antigravity()
             connection.note('Antigravity configured ('+path+'). Reload MCP servers / restart Antigravity to load tools.')
+        if '--connect-claude' in arguments:
+            path=register_claude()
+            connection.note('Claude Desktop configured ('+path+'). Fully quit and restart Claude to load tools.')
 
 
 class ConnectionDialog(QDialog):
@@ -208,23 +250,26 @@ class ConnectionDialog(QDialog):
         super().__init__(connection.w); self.c=connection; self.setWindowTitle('AI Assistant — MCP Connection'); self.resize(640,540)
         root=QVBoxLayout(self)
         title=QLabel('Connect your AI assistant to Kinetic Cut'); set_ui_style(title, 'font-size:17px;font-weight:600'); root.addWidget(title)
-        intro=QLabel('This is a connection panel, not a built-in chatbot. Keep Kinetic Cut open and give editing instructions in Antigravity, Codex, or another MCP-compatible assistant.'); intro.setWordWrap(True); root.addWidget(intro)
+        intro=QLabel('Keep Kinetic Cut open and give editing instructions in Claude Desktop, Claude Code, Antigravity, Codex, or another MCP-compatible assistant.'); intro.setWordWrap(True); root.addWidget(intro)
         status_row=QHBoxLayout(); self.status_icon=QLabel(); status_row.addWidget(self.status_icon)
         self.status=QLabel(); self.status.setWordWrap(True); status_row.addWidget(self.status,1); root.addLayout(status_row)
         self.address=QLabel(); self.address.setTextInteractionFlags(Qt.TextSelectableByMouse); root.addWidget(self.address)
         
-        row=QHBoxLayout(); self.toggle=QPushButton(); self.toggle.clicked.connect(self.toggle_connection); row.addWidget(self.toggle)
-        install_ag=QPushButton('Connect to Antigravity'); install_ag.clicked.connect(self.install_antigravity); row.addWidget(install_ag)
-        install=QPushButton('Connect to Codex'); install.clicked.connect(self.install); row.addWidget(install)
+        row=QGridLayout(); self.toggle=QPushButton(); self.toggle.clicked.connect(self.toggle_connection); row.addWidget(self.toggle,0,0)
+        install_ag=QPushButton('Connect to Antigravity'); install_ag.clicked.connect(self.install_antigravity); row.addWidget(install_ag,0,1)
+        install=QPushButton('Connect to Codex'); install.clicked.connect(self.install); row.addWidget(install,1,0)
+        install_claude=QPushButton('Connect to Claude Desktop'); install_claude.clicked.connect(self.install_claude); row.addWidget(install_claude,1,1)
         root.addLayout(row)
 
-        copy_row=QHBoxLayout()
-        copy_ag=QPushButton('Copy Antigravity JSON'); copy_ag.clicked.connect(self.copy_antigravity); copy_row.addWidget(copy_ag)
-        copy_button=QPushButton('Copy Codex TOML'); copy_button.clicked.connect(self.copy_config); copy_row.addWidget(copy_button)
+        copy_row=QGridLayout()
+        copy_ag=QPushButton('Copy Antigravity JSON'); copy_ag.clicked.connect(self.copy_antigravity); copy_row.addWidget(copy_ag,0,0)
+        copy_button=QPushButton('Copy Codex TOML'); copy_button.clicked.connect(self.copy_config); copy_row.addWidget(copy_button,0,1)
+        copy_claude=QPushButton('Copy Claude Desktop JSON'); copy_claude.clicked.connect(self.copy_claude); copy_row.addWidget(copy_claude,1,0)
+        copy_code=QPushButton('Copy Claude Code command'); copy_code.clicked.connect(self.copy_claude_code); copy_row.addWidget(copy_code,1,1)
         root.addLayout(copy_row)
 
         self.auto=QCheckBox('Enable this connection whenever Kinetic Cut opens'); self.auto.setChecked(connection.w.settings.get('assistant_enabled',False)); self.auto.toggled.connect(self.automatic); root.addWidget(self.auto)
-        guide=QLabel('1. Enable the connection above.\n2. Choose Connect to Antigravity (or Connect to Codex), or copy the configuration into your MCP client.\n3. Reload MCP servers / restart the client if needed, then ask it to inspect Kinetic Cut.\n\nThe status below shows a real handshake and recent tool activity. A configuration entry alone does not mean an assistant is connected.'); guide.setWordWrap(True); root.addWidget(guide)
+        guide=QLabel('1. Enable the connection above.\n2. Connect your desktop assistant, or copy its configuration. For Claude Code, paste the copied command into PowerShell, then check /mcp.\n3. Fully quit and restart Claude Desktop, or reload your other client, then ask it to inspect Kinetic Cut.\n\nStatus becomes verified after a real handshake or tool request.'); guide.setWordWrap(True); root.addWidget(guide)
         privacy=QLabel('Local access only. Tools can edit the project and use editor controls; timeline edits are undoable. Preview images and project information requested by your assistant are shared with that assistant.'); privacy.setWordWrap(True); root.addWidget(privacy)
         self.log=QPlainTextEdit(); self.log.setReadOnly(True); root.addWidget(self.log,1)
         close=QPushButton('Close'); close.clicked.connect(self.close); root.addWidget(close,0,Qt.AlignRight)
@@ -258,6 +303,23 @@ class ConnectionDialog(QDialog):
             self.c.note('Codex configuration saved. Reload MCP servers or restart Codex to load the tools.')
             QMessageBox.information(self,'MCP configured','Kinetic Cut was added to Codex.\n\nReload MCP servers or restart Codex, then ask it to inspect Kinetic Cut.\n\nConfiguration: '+path)
         except Exception as error:QMessageBox.warning(self,'Connection setup',str(error))
+    def install_claude(self):
+        self.c.start()
+        if not self.c.server:return
+        try:
+            path=register_claude(); self.auto.setChecked(True)
+            self.c.note('Claude Desktop configuration saved. Fully quit and restart Claude Desktop to load tools.')
+            QMessageBox.information(self,'MCP configured','Kinetic Cut was added to Claude Desktop.\n\nFully quit Claude Desktop (including its tray icon) and reopen it, then enable Kinetic Cut in your chat tools. Keep the editor open.\n\nConfiguration: '+path)
+        except Exception as error:QMessageBox.warning(self,'Connection setup',str(error))
+    def copy_claude(self):
+        self.c.start()
+        if self.c.server:
+            QApplication.clipboard().setText(claude_snippet()); self.c.note('Claude Desktop MCP configuration copied.')
+    def copy_claude_code(self):
+        self.c.start()
+        if self.c.server:
+            QApplication.clipboard().setText(claude_code_command()); self.auto.setChecked(True)
+            self.c.note('Claude Code command copied. Paste into PowerShell, then use /mcp in Claude Code.')
     def copy_antigravity(self):
         self.c.start()
         QApplication.clipboard().setText(antigravity_snippet())

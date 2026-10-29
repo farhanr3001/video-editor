@@ -6,6 +6,10 @@ from kinetic_cut.process import install_desktop_process_policy
 
 
 if __name__ == "__main__":
+    if len(sys.argv)==3 and sys.argv[1]=='--preview-effect-source':
+        install_desktop_process_policy()
+        from kinetic_cut.export_preview_source import worker
+        sys.exit(worker(sys.argv[2]))
     if len(sys.argv)==3 and sys.argv[1]=='--caption-worker':
         install_desktop_process_policy()
         from kinetic_cut.caption_process import worker
@@ -110,6 +114,9 @@ if __name__ == "__main__":
     elif len(sys.argv) == 4 and sys.argv[1] == '--timeline-selftest':
         from kinetic_cut.timeline_diagnostics import run
         sys.exit(run(sys.argv[2], sys.argv[3]))
+    elif len(sys.argv) == 4 and sys.argv[1] == '--stability-selftest':
+        from kinetic_cut.stability_diagnostics import run
+        sys.exit(run(sys.argv[2],sys.argv[3]))
     elif len(sys.argv) == 4 and sys.argv[1] == '--interaction-selftest':
         from kinetic_cut.interaction_diagnostics import run
         sys.exit(run(sys.argv[2], sys.argv[3]))

@@ -30,6 +30,7 @@ class SceneContext:
     def _prepare_layer_image(self,item,image,target,rect):
         from .preview_raster import RasterContext, prepare_layer_image
         context=RasterContext(self.project,self.interactive,self.raster_scale,self.effect_cache,self.crop_cache)
+        context.strict_export=getattr(self,'strict_export',False)
         return prepare_layer_image(context,item,image,target,rect)
 
 

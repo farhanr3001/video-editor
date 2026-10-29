@@ -48,3 +48,18 @@ class ExportWorkflowTests(unittest.TestCase):
         self.assertEqual(other.render_history,[]);self.assertEqual(d.jobs,[]);self.assertEqual(len(Project.load(self.path).render_history),1)
     def test_unrendered_jobs_do_not_survive_reload(self):
         d=self.w.delivery;d.jobs=[self.job()];self.w.project.save(self.path);self.w.set_project(Project.load(self.path));self.assertEqual(d.jobs,[])
+
+    def test_project_activation_resets_form_and_progress_even_same_format(self):
+        d=self.w.delivery;d.name.setText('Previous output');d.name.setModified(True);d.progress.setValue(100)
+        d.codec.setCurrentIndex(1);d.hardware.setCurrentText('CPU');d.quality.setCurrentIndex(1);d.bitrate.setValue(42);d.audio.setChecked(False)
+        d.fps.setCurrentText('30');d.resolution.setCurrentIndex(1)
+        other=Project(name='Fresh document');self.w.set_project(other)
+        self.assertEqual(d.name.text(),'Fresh document');self.assertFalse(d.name.isModified());self.assertEqual(d.progress.value(),0)
+        self.assertEqual(d.codec.currentIndex(),0);self.assertEqual(d.hardware.currentText(),'Auto');self.assertEqual(d.preset().quality,'auto')
+        self.assertEqual(float(d.fps.currentText()),other.settings.fps);self.assertEqual(d.resolution.currentData(),(other.settings.width,other.settings.height))
+        self.assertTrue(d.audio.isChecked());self.assertFalse(d.jobs)
+    def test_same_project_page_navigation_keeps_typed_name(self):
+        from kinetic_cut.workspace import set_page
+        d=self.w.delivery;d.name.setText('My custom name');d.name.setModified(True)
+        set_page(self.w,1);set_page(self.w,0);set_page(self.w,1)
+        self.assertEqual(d.name.text(),'My custom name')

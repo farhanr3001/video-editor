@@ -40,7 +40,11 @@ def prepare(project,directory,preset,ffmpeg,prepared,progress,cancel,transparent
         if token.is_set():raise RuntimeError('Export cancelled')
         start,end=spans[number]
         target=directory/f'part-{number:04d}.mkv'
-        args=command(copy.deepcopy(project),str(target),preset,False,'CPU',ffmpeg,None,False,prepared,window=(start,end),transparent=transparent)
+        stage=copy.deepcopy(project)
+        # IndexedProject intentionally excludes private runtime fields from
+        # deepcopy. These export-owned ranges are rendering data, not a cache.
+        stage._transition_exclusions=copy.deepcopy(getattr(project,'_transition_exclusions',{}))
+        args=command(stage,str(target),preset,False,'CPU',ffmpeg,None,False,prepared,window=(start,end),transparent=transparent)
         # Lossless intermediate: no extra lossy generation before final encoding.
         threads=str(os.cpu_count() or 4)
         codec=['-c:v','ffv1','-level','3','-slices','16','-pix_fmt','bgra'] if transparent else ['-c:v','libx264','-preset','ultrafast','-crf','0']

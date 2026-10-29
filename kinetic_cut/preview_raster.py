@@ -57,7 +57,7 @@ def prepare_layer_image(self, item, layer_source, target, frame_rect):
         # Read/blend at the physical display size only when the enhancement is
         # the final pixel operation. Full-resolution export uses render_frame.
         last=enhance_active(item)[-1][0]
-        eligible=(item.role!='background' and not item.crop_softness
+        eligible=(not getattr(self,'strict_export',False) and item.role!='background' and not item.crop_softness
                   and not any(e.get('enabled',True) for e in item.effects[last+1:]))
         image=QImage()
         if eligible:
@@ -65,7 +65,7 @@ def prepare_layer_image(self, item, layer_source, target, frame_rect):
             size=QSize(max(1,math.ceil(abs(target.width())*self.raster_scale)),
                        max(1,math.ceil(abs(target.height())*self.raster_scale)))
             image=frame(self.project,media,item,last,at,size)
-        if image.isNull():image=render_frame(self.project,item,layer_source,at)
+        if image.isNull():image=render_frame(self.project,item,layer_source,at,strict=getattr(self,'strict_export',False))
         baked=copy.copy(item);baked.effects=[];baked.crop=Crop();baked.grayscale=False;baked.brightness=0.;baked.contrast=baked.saturation=1.;baked.sharpen=0.
         result=prepare_layer_image(self,baked,image,target,frame_rect)
         if len(self.effect_cache)>=16:self.effect_cache.pop(next(iter(self.effect_cache)))

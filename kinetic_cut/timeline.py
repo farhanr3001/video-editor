@@ -293,6 +293,8 @@ class TimelineWidget(BaseTimeline):
         super().set_project(project)
 
     def set_zoom(self,value:float,anchor_x:float|None=None):
+        from .activity_log import record
+        record('timeline.zoom',throttle=.25,zoom=value)
         self._navigation_pending=True
         super().set_zoom(value,anchor_x)
 
@@ -302,6 +304,13 @@ class TimelineWidget(BaseTimeline):
         self._clip_surfaces.clear()
         self._waveform_pixmaps.clear()
         super().set_waveform(media_id,values)
+
+    def refresh_thumbnails(self):
+        """Publish rebuilt media artwork without creating a document edit."""
+        self._paint_generation+=1
+        self.thumbnails.clear();self._scaled_thumbnails.clear()
+        self._clip_surfaces.clear();self._view_rasters.clear()
+        self.viewport().update()
 
     def scrollContentsBy(self,dx,dy):
         # QAbstractScrollArea's default scrolls the widget backing store and can
@@ -1399,6 +1408,8 @@ class TimelineWidget(BaseTimeline):
 
     def mousePressEvent(self,event):
         if not self.project:return
+        from .activity_log import record
+        record('timeline.press',tool=self.tool,position=self.time_for_x(event.position().x()),y=event.position().y())
         if event.button()==Qt.MiddleButton:
             self.manual_playback_navigation=True
             if self.drag_mode:self.cancel_drag()
