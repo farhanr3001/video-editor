@@ -1,0 +1,31 @@
+#version 440
+layout(location=0) in vec2 qt_TexCoord0;
+layout(location=0) out vec4 fragColor;
+layout(std140,binding=0) uniform buf {mat4 qt_Matrix;float qt_Opacity;float effectTime;vec4 p1;vec4 p2;};
+layout(binding=1) uniform sampler2D sourceA;
+layout(binding=2) uniform sampler2D sourceB;
+void main(){vec2 uv=qt_TexCoord0,uvA=uv,uvB=uv;float weight=effectTime;
+bool t0=(1e-06>effectTime);
+float t1=(t0?uv.x:uv.x);
+float t2=(t0?uv.y:uv.y);
+bool t3=(effectTime>0.999999);
+float t4=(t3?uv.x:uv.x);
+float t5=(t3?uv.y:uv.y);
+bool t6=(effectTime>0.8);
+bool t7=(0.2>effectTime);
+float t8=floor(p1.y);
+float t9=(effectTime*t8);
+float t10=floor(t9);
+float t11=(t9-t10);
+bool t12=(t11>0.5);
+float t13=(t12?1.0:0.0);
+float t14=(t7?0.0:t13);
+float t15=(t6?1.0:t14);
+float t16=(t0?0.0:t15);
+float t17=(t3?1.0:t16);
+float t18=max(t17,0.0);
+float t19=min(t18,1.0);
+uvA=vec2(t1,t2);
+uvB=vec2(t4,t5);
+weight=t19;
+fragColor=mix(texture(sourceA,clamp(uvA,vec2(0),vec2(1))),texture(sourceB,clamp(uvB,vec2(0),vec2(1))),weight)*qt_Opacity;}

@@ -34,7 +34,7 @@ def counter_text(node,t):
 
 @lru_cache(maxsize=32)
 def _rolling_layout(text,font_name,size,bold,tracking,alignment):
-    font=QFont(font_name); font.setPixelSize(max(1,round(size))); font.setBold(bold); font.setLetterSpacing(QFont.AbsoluteSpacing,tracking)
+    font=QFont(font_name); font.setPixelSize(max(1,round(size)));font.setHintingPreference(QFont.PreferNoHinting); font.setBold(bold); font.setLetterSpacing(QFont.AbsoluteSpacing,tracking)
     metrics=QFontMetricsF(font); lines=text.split('\n'); height=metrics.height(); baseline=metrics.ascent()-len(lines)*height/2
     fixed=QPainterPath(); cells=[]; digits=[]
     for digit in range(10):
@@ -66,7 +66,7 @@ def draw_rolling(painter,node,t):
 
 def draw_typewriter(painter,node,t):
     from .motion import curve
-    size=curve(node,'font_size',t); font=QFont(node.get('font','Arial')); font.setPixelSize(max(1,round(size))); font.setBold(bool(node.get('bold',True))); font.setLetterSpacing(QFont.AbsoluteSpacing,curve(node,'tracking',t))
+    size=curve(node,'font_size',t); font=QFont(node.get('font','Arial')); font.setPixelSize(max(1,round(size)));font.setHintingPreference(QFont.PreferNoHinting);font.setItalic(bool(node.get('italic',False))); font.setBold(bool(node.get('bold',True))); font.setLetterSpacing(QFont.AbsoluteSpacing,curve(node,'tracking',t))
     metrics=QFontMetricsF(font); complete=node.get('text','').split('\n'); visible=revealed_text(node,t).split('\n')
     baseline=metrics.ascent()-len(complete)*metrics.height()/2; alignment=node.get('text_align','center'); caret=QPointF()
     for row,line in enumerate(visible):

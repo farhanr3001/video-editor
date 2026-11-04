@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 from .process import run as run_process
 from pathlib import Path
@@ -135,7 +136,7 @@ def make_thumbnail(path: str | Path, kind: str, ffmpeg: str = "ffmpeg", *, timeo
 
 
 def proxy_path(media: MediaItem, *, compatibility=False, seek_cache=False):
-    profile = 'seek-full-v2' if seek_cache else 'compat-h264-full-v1' if compatibility else 'seek-proxy-v3'
+    profile = 'seek-full-v3' if seek_cache else 'compat-h264-full-v1' if compatibility else 'seek-proxy-v3'
     stat=Path(media.path).stat()
     digest = hashlib.sha1((media.path + str(stat.st_mtime_ns)+(str(stat.st_size) if seek_cache else '')+profile).encode()).hexdigest()[:16]
     return CACHE_DIR / "proxies" / f"{'full-seek-' if seek_cache else ''}{digest}.mp4"
@@ -145,9 +146,12 @@ def generate_proxy(media: MediaItem, ffmpeg: str = "ffmpeg", cancel=None,
                    compatibility: bool = False, progress=None, seek_cache: bool = False, protected=()) -> str:
     target=proxy_path(media,compatibility=compatibility,seek_cache=seek_cache)
     if target.exists():
+        # Mark it as used: playback copies idle for a day are pruned at startup.
+        try:os.utime(target)
+        except OSError:pass
         return str(target)
     if seek_cache:
-        import av,shutil,os
+        import av,shutil
         if target.parent.is_symlink() or not target.parent.resolve().is_relative_to(CACHE_DIR.resolve()):
             raise ValueError('Keeping original preview for linked cache directory')
         protected={os.path.normcase(str(Path(path).resolve())) for path in protected}
@@ -170,7 +174,8 @@ def generate_proxy(media: MediaItem, ffmpeg: str = "ffmpeg", cancel=None,
         if total>1536*1024**2 or shutil.disk_usage(target.parent).free<768*1024**2:
             raise ValueError('Keeping original preview: seek-cache storage budget reached')
     if seek_cache:
-        codec=['-c:v','libx264','-preset','veryfast','-crf','14','-threads','2']
+        # CRF 18 is visually lossless for a viewer copy at roughly half the size of CRF 14.
+        codec=['-c:v','libx264','-preset','veryfast','-crf','18','-threads','2']
     else:
         from .exporter import automatic_encoder
         codec=['-c:v','h264_nvenc','-preset','p2','-cq','18','-b:v','0'] if automatic_encoder(ffmpeg,'h264')=='NVIDIA' else ['-c:v','libx264','-preset','ultrafast','-crf','18']

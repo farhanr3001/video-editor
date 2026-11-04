@@ -1,4 +1,5 @@
 """Transactional sound-cue authoring and independent dialog audition."""
+from .motion_audio import MAX_CUES
 import copy
 import threading
 from pathlib import Path
@@ -166,7 +167,7 @@ class SoundCuePanel(QWidget):
         finally:dialog.deleteLater()
     def add_path(self,path):
         if self.pending:return
-        if len(self.editor.scene.get('sound_cues',[]))>=32:self.status.setText('Maximum 32 cues per composition.'); return
+        if len(self.editor.scene.get('sound_cues',[]))>=MAX_CUES:self.status.setText('Maximum %d cues per composition.'%MAX_CUES); return
         from .ui import Worker
         cancel=threading.Event(); self.pending=cancel; self.add.setEnabled(False); self.status.setText('Reading audible sound region…')
         settings=copy.deepcopy(self.editor.owner.settings); position=self.editor.position

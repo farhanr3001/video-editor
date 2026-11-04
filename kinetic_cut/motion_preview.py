@@ -11,7 +11,69 @@ class MotionPreview(QWidget):
     def __init__(self,editor):
         super().__init__(editor); self.editor=editor; self.drag=None; self.guides=set(); self.view_scale=1.; self.pan=QPointF(); self._frame_key=None; self._frame=None
         self.setMinimumSize(220,210); self.setMouseTracking(True); self.setFocusPolicy(Qt.StrongFocus)
+        self.setAcceptDrops(True)
         self.setObjectName('motion_preview'); self.setAccessibleName('Composition preview with layer transform handles')
+        self.gpu=None; self.gpu_item=None; self.gpu_failed=False; self.gpu_serial=0; self._gpu_key=None
+        editor.finished.connect(self.release_gpu) if hasattr(editor,'finished') else None
+
+    # ---- GPU canvas -------------------------------------------------------------------------------------------------
+    def gpu_wanted(self):
+        import os
+        from .quick_surface import enabled
+        return not self.gpu_failed and (enabled() or os.environ.get('KINETIC_MOTION_EDITOR_GPU')=='1')
+    def ensure_gpu(self):
+        """Create the Qt Quick surface once. The editor canvas then draws the composition on the GPU, like playback/export."""
+        if self.gpu is not None or not self.gpu_wanted():return self.gpu is not None
+        try:
+            from .quick_surface import Surface
+            from .motion_video import install
+            surface=Surface(self,'GpuMotionEditor.qml'); install(surface.view.engine())
+            item=surface.create('GpuMotion.qml',surface.item('canvas'))
+            self.gpu,self.gpu_item=surface,item
+            from .theme_widgets import ui_color
+            surface.root.setProperty('color',ui_color('bg_main'))
+        except Exception:
+            import logging; logging.exception('Motion editor GPU canvas unavailable; using the painter canvas')
+            self.gpu_failed=True; self.gpu=None
+        return self.gpu is not None
+    def release_gpu(self,*args):
+        if self.gpu is not None:
+            try:self.gpu.close()
+            except Exception:pass
+        self.gpu=None; self.gpu_item=None
+    def update(self,*args):
+        if args and isinstance(args[0],bool):args=()  # connected directly to toggled(bool) signals
+        if self.ensure_gpu():self.safe_publish()
+        super().update(*args)
+    def safe_publish(self):
+        try:self.publish()
+        except Exception:
+            import logging; logging.exception('Motion editor GPU canvas failed; switching to the painter canvas')
+            self.release_gpu(); self.gpu_failed=True; super().update()
+    def resizeEvent(self,event):
+        super().resizeEvent(event)
+        if self.gpu is not None:self.safe_publish()
+    def publish(self):
+        from PySide6.QtGui import QImage
+        from . import motion_frame as F
+        d=self.editor; r=self.canvas_rect(); surface=self.gpu; item=self.gpu_item
+        if surface is None or surface.closed:return
+        surface.geometry(self.rect())
+        board=surface.item('board')
+        if board is not None:board.setX(r.x()); board.setY(r.y()); board.setWidth(r.width()); board.setHeight(r.height())
+        size=(max(2,round(r.width())),max(2,round(r.height())))
+        key=(d.render_revision,d.position,size,d.owner.project.settings.fps)
+        if key!=self._gpu_key:
+            item.setProperty('frame',F.frame(d.scene,d.position,size,d.owner.project.settings.fps)); self._gpu_key=key
+        item.setX(r.x()); item.setY(r.y()); item.setWidth(size[0]); item.setHeight(size[1])
+        item.setProperty('k',size[0]/max(1,d.scene['canvas'][0]))
+        overlay=QImage(max(1,self.width()),max(1,self.height()),QImage.Format_ARGB32_Premultiplied); overlay.fill(0)
+        painter=QPainter(overlay)
+        try:self.paint_overlay(painter)
+        finally:painter.end()
+        self.gpu_serial+=1; surface.images.put('overlay',overlay)
+        target=surface.item('overlay')
+        if target is not None:target.setProperty('source',f'image://prepared/overlay?v={self.gpu_serial}')
     def canvas_rect(self):
         w,h=self.editor.owner.project.settings.width,self.editor.owner.project.settings.height; factor=min(self.width()/w,self.height()/h)
         factor*=self.view_scale
@@ -31,7 +93,7 @@ class MotionPreview(QWidget):
         r=self.canvas_rect(); w,h=self.editor.scene['canvas']; return QPointF((point.x()-r.x())*w/r.width(),(point.y()-r.y())*h/r.height())
     def from_scene(self,point):
         r=self.canvas_rect(); w,h=self.editor.scene['canvas']; return QPointF(r.x()+point.x()*r.width()/w,r.y()+point.y()*r.height()/h)
-    def geometry(self):return layout(self.editor.scene,self.editor.position)
+    def geometry(self,wanted=None):return layout(self.editor.scene,self.editor.position,wanted)
     def handles(self,entry):
         r=entry['world'].mapRect(entry['local'].boundingRect())
         points=[r.topLeft(),r.topRight(),r.bottomRight(),r.bottomLeft()]
@@ -39,6 +101,9 @@ class MotionPreview(QWidget):
         top=self.from_scene(QPointF(r.center().x(),r.top())); result['rotate']=top-QPointF(0,22)
         return result
     def paintEvent(self,event):
+        if self.ensure_gpu():
+            self.safe_publish()
+            if self.gpu is not None:return
         from .theme_widgets import ui_color
         p=QPainter(self); p.fillRect(self.rect(),ui_color('bg_main')); d=self.editor; r=self.canvas_rect()
         p.fillRect(r,QColor('#111317')); factor=min(1,math.sqrt(4_000_000/max(1,r.width()*r.height())))
@@ -52,11 +117,15 @@ class MotionPreview(QWidget):
         key=(d.render_revision,d.position,size,d.owner.project.settings.fps,tuple(assets))
         if key!=self._frame_key:self._frame=draw(d.scene,d.position,size,d.owner.project.settings.fps); self._frame_key=key
         p.drawImage(r,self._frame)
+        self.paint_overlay(p)
+    def paint_overlay(self,p):
+        """Safe area, selection boxes, handles, guides and marquee (drawn over either canvas)."""
+        d=self.editor; r=self.canvas_rect()
         # The safe area is a guide only, never part of the composition/export.
         if d.safe.isChecked():
             p.setPen(QPen(QColor(255,255,255,80),1,Qt.DashLine)); p.setBrush(Qt.NoBrush)
             p.drawRect(self.safe_rect())
-        entries,_=self.geometry(); entry=entries.get(d.node_id)
+        entries,_=self.geometry(set(d.selected_ids)|({d.node_id} if d.node_id else set())); entry=entries.get(d.node_id)
         for node_id in d.selected_ids-{d.node_id}:
             other=entries.get(node_id)
             if other and other['visible'] and not other['local'].isEmpty():
@@ -74,6 +143,18 @@ class MotionPreview(QWidget):
             if 'y' in self.guides:p.drawLine(QPointF(r.left(),r.center().y()),QPointF(r.right(),r.center().y()))
         if self.drag and self.drag['mode']=='marquee':
             p.setPen(QPen(QColor('#63b0ff'),1)); p.setBrush(QColor(61,140,255,35)); p.drawRect(QRectF(self.drag['press'],self.drag['end']).normalized())
+    def dragEnterEvent(self,event):
+        from .motion_assets_ui import MIME
+        if event.mimeData().hasFormat(MIME):event.acceptProposedAction()
+        else:event.ignore()
+    def dragMoveEvent(self,event):
+        from .motion_assets_ui import MIME
+        if event.mimeData().hasFormat(MIME):event.acceptProposedAction()
+    def dropEvent(self,event):
+        from .motion_assets_ui import MIME
+        if not event.mimeData().hasFormat(MIME):event.ignore(); return
+        name=bytes(event.mimeData().data(MIME)).decode('utf-8'); point=self.to_scene(event.position())
+        event.acceptProposedAction(); self.editor.insert_asset(name,point.x(),point.y())
     def mousePressEvent(self,event):
         if event.button()==Qt.MiddleButton:self.drag=dict(mode='pan',press=event.position(),original=QPointF(self.pan)); return
         if event.button()!=Qt.LeftButton:return
@@ -152,7 +233,8 @@ class MotionPreview(QWidget):
         self.drag=None; self.editor.end_edit(); self.editor.select_node(node_id); self.editor.pause()
         rect=entries[node_id]['hit'].boundingRect(); display=QRectF(self.from_scene(rect.topLeft()),self.from_scene(rect.bottomRight())).normalized()
         edit=InlineMotionText(self,self.editor,node_id); self.inline_editor=edit
-        edit.setGeometry(display.adjusted(-4,-4,4,4).toAlignedRect()); edit.setMinimumSize(100,42); edit.show(); edit.setFocus(); edit.selectAll()
+        if self.gpu is not None:edit.setAttribute(Qt.WA_NativeWindow); edit.winId()
+        edit.setGeometry(display.adjusted(-4,-4,4,4).toAlignedRect()); edit.setMinimumSize(100,42); edit.show(); edit.raise_(); edit.setFocus(); edit.selectAll()
 
 class InlineMotionText(QPlainTextEdit):
     def __init__(self,preview,editor,node_id):

@@ -4,7 +4,7 @@ from .model import TimelineItem,Transform,Crop,uid
 
 def source_key(path):return os.path.normcase(os.path.abspath(path)) if path else ""
 
-def plan(project,assets,track,start):
+def plan(project,assets,track,start,layout=None):
     stage=copy.copy(project)
     for field in ("timeline","captions","media","video_tracks","audio_tracks"):setattr(stage,field,list(getattr(project,field)))
     stage.track_names=dict(project.track_names); stage.track_states=copy.deepcopy(project.track_states)
@@ -30,8 +30,12 @@ def plan(project,assets,track,start):
         in_point=max(0,stage.mark_in)
         duration=(stage.mark_out-in_point) if stage.mark_out>in_point else max(.1,media.duration-in_point) if media.kind!="image" else 5.
         group=uid(); role=("content" if not any(i.role=="content" for i in stage.timeline) else "normal") if video else ("music" if media.duration>=20 else "sfx")
-        stage.timeline.append(TimelineItem(uid(),media.id,destination,cursor,duration,in_point,group_id=group,role=role,transform=Transform(.5,.5,1),crop=Crop(),gain_db=0 if video else -10 if role=="music" else -3))
-        placed.add(stage.timeline[-1].id)
+        if layout and media.kind=="video":
+            from .auto_layout import place
+            placed.update(item.id for item in place(stage,media,track,cursor,in_point,duration,group,layout))
+        else:
+            stage.timeline.append(TimelineItem(uid(),media.id,destination,cursor,duration,in_point,group_id=group,role=role,transform=Transform(.5,.5,1),crop=Crop(),gain_db=0 if video else -10 if role=="music" else -3))
+            placed.add(stage.timeline[-1].id)
         if video and media.has_audio:
             audio=track if track in stage.audio_tracks else next((lane for lane in stage.audio_tracks if not stage.track_states.get(lane,{}).get("locked") and not any(i.track==lane and i.start<cursor+duration and i.start+i.duration>cursor for i in stage.timeline)),None)
             if not audio:audio=stage.add_track("audio")

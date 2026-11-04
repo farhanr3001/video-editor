@@ -10,8 +10,10 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VERSIONS = ('2025-03-26', '2025-06-18', '2025-11-25')
-INSTRUCTIONS = ('Kinetic Cut controls the running local editor. Start with get_state and '
-    'get_capabilities. Use revision-checked apply_edits for atomic undoable changes. '
+INSTRUCTIONS = ('Kinetic Cut controls the running local editor. Start with get_editor_guide '
+    'for the neutral MCP manual, then get_state and get_capabilities for live project context. '
+    'The guide contains no personal editing preferences or conversation memory. '
+    'Use revision-checked apply_edits for atomic undoable changes. '
     'Time is in seconds; crop/position coordinates are normalized. Import/render '
     'return jobs: poll get_jobs. Read preview frames to verify edits. Do not claim '
     'a render succeeded until its state is Complete. Source files are never deleted '

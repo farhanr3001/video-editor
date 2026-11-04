@@ -17,6 +17,13 @@ not redistributed. Geometos Soft is offered when already installed; its
 Creative Fabrica listing does not establish permission to redistribute its
 font files with this application, so it is not bundled.
 
+## Motion graphics fonts
+
+Fraunces, Inter and Newsreader are distributed under the SIL Open Font License
+1.1. Their upstream copyright and license notices are in
+`assets/fonts/fraunces-OFL.txt`, `assets/fonts/inter-OFL.txt` and
+`assets/fonts/newsreader-OFL.txt`.
+
 ## Lucide Icons
 
 The interface includes SVG icons from Lucide, distributed under the ISC License.

@@ -18,15 +18,23 @@ def write_pixels(data):
         offset+=done.value
 
 def _worker(path):
-    os.environ['QT_QPA_PLATFORM']='offscreen'
+    spec=json.loads(Path(path).read_text(encoding='utf-8'))
+    # Streams with native graphics keep the real platform on Windows so Qt Quick renders motion graphics with Direct3D 11.
+    os.environ['QT_QPA_PLATFORM']='windows' if os.name=='nt' and (spec.get('native_animation') or spec.get('gpu_transition')) else os.environ.get('QT_QPA_PLATFORM','offscreen') if os.name!='nt' else 'offscreen'
     from PySide6.QtWidgets import QApplication
     from PySide6.QtCore import QRectF,Qt
     from PySide6.QtGui import QImage,QPainter
     from .model import Project
     from .preview_compositor import SceneContext,render
     from .gpu_export_decode import Source
-    spec=json.loads(Path(path).read_text(encoding='utf-8'));project=Project.from_dict(spec['project']);item=project.timeline[0];media=project.media_by_id(item.media_id)
-    app=QApplication.instance() or QApplication([]);reader=None
+    if spec.get('gpu_transition'):
+        app=QApplication.instance() or QApplication([])
+        from .gpu_transition_stage import serve
+        return serve(spec)
+    project=Project.from_dict(spec['project']);item=project.timeline[0];media=project.media_by_id(item.media_id)
+    app=QApplication.instance() or QApplication([]);reader=None;stage=None
+    from .transitions import Transition
+    transitions=[dict(x,trans=Transition.from_dict(x['transition'])) for x in spec.get('graphic_transitions',[])]
     from .caption_fonts import load_fonts
     load_fonts()
     context=SceneContext(project,{},{},{},False,1.,draw_captions=False);context.transparent=True;context.strict_export=bool(spec.get('strict_effects'))
@@ -48,18 +56,43 @@ def _worker(path):
                 data=reader.frame(item.source_time(at));h,w=data.shape[:2];context.frames[item.id]=QImage(data.data,w,h,w*4,QImage.Format_RGBA8888).copy();context.active_frames[item.id]=item.id
             if spec.get('native_animation'):
                 from .native_animation import frame
+                from .motion_gpu import is_motion
                 image=QImage(width,height,QImage.Format_RGBA8888);image.fill(Qt.transparent)
-                painter=QPainter(image)
+                g=spec['first']+n;active=next((x for x in transitions if x['first']<=g<x['last']),None)
+                if active is not None:
+                    # A transition between two motion graphics is composited here on the GPU with the preview's shader, so the
+                    # native exporter never has to pre-render it.
+                    from .animated_transitions import descriptor
+                    from .transitions import apply_easing
+                    left=project.item_by_id(active['transition']['left_item_id']);right=project.item_by_id(active['transition']['right_item_id'])
+                    trans=active['trans'];data=descriptor(trans)
+                    if stage is None:
+                        from .motion_gpu_render import MotionStage
+                        stage=MotionStage(width,height)
+                    clamp=lambda i:min(max(at,i.start),i.start+i.duration-1/fps)-i.start
+                    image=stage.render_transition(left,right,clamp(left),clamp(right),apply_easing(trans.progress(at),data['easing']),data['mode'],data['params'],project)
+                    image=image.convertToFormat(QImage.Format_RGBA8888);write_pixels(bytes(image.constBits()));continue
+                painter=QPainter(image);gpu_items=[]
                 try:
                     for graphic in project.timeline:
                         if graphic.start<=at<graphic.start+graphic.duration:
                             local=(spec['first']+n-math.ceil(graphic.start*fps-1e-7))/fps
+                            # Motion compositions are drawn by the GPU (same QML as the preview); only other graphics use the painter.
+                            if is_motion(graphic):gpu_items.append((graphic,local));continue
                             painter.drawImage(0,0,frame(project,graphic,local))
                 finally:painter.end()
+                if gpu_items:
+                    if stage is None:
+                        from .motion_gpu_render import MotionStage
+                        stage=MotionStage(width,height)
+                    clock=dict((g.id,l) for g,l in gpu_items)
+                    layer=stage.render([g for g,_ in gpu_items],project,lambda g:clock[g.id])
+                    painter=QPainter(image);painter.drawImage(0,0,layer);painter.end()
             else:image,_,_=render(context,QRectF(0,0,width,height),(width,height),1.)
             image=image.convertToFormat(QImage.Format_RGBA8888);write_pixels(bytes(image.constBits()))
     finally:
         if reader:reader.close()
+        if stage:stage.close()
     return 0
 
 

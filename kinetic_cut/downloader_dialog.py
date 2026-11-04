@@ -85,14 +85,14 @@ def format_views(count: int | None) -> str:
     return f"{count:,} views"
 
 
-def format_subscribers(count: int | None) -> str:
+def format_subscribers(count: int | None, noun: str = "subscribers") -> str:
     if not count:
         return ""
     if count >= 1_000_000:
-        return f"{count / 1_000_000:.1f}M subscribers"
+        return f"{count / 1_000_000:.1f}M {noun}"
     if count >= 1_000:
-        return f"{count / 1_000:.1f}K subscribers"
-    return f"{count} subscribers"
+        return f"{count / 1_000:.1f}K {noun}"
+    return f"{count} {noun}"
 
 
 def format_upload_date(date_str: str | None) -> str:
@@ -321,6 +321,8 @@ def resolve_tiktok_sound(url: str, cancel_check=None) -> dict:
 
 def detect_platform(url: str) -> str:
     u = url.lower().strip()
+    if "twitch.tv" in u:
+        return "twitch"
     if "tiktok.com" in u:
         return "tiktok"
     if "instagram.com" in u:
@@ -422,7 +424,7 @@ class _FetchMetadataWorker(_DownloaderTask):
                     if oembed_data and not self._cancel.is_set():
                         if "not a bot" in err_msg.lower() or "sign in" in err_msg.lower():
                             oembed_data["needs_cookies"] = True
-                            oembed_data["bot_warning"] = "YouTube bot check detected. Use Cookies button to select cookies.txt."
+                            oembed_data["bot_warning"] = "YouTube bot check detected. Download may ask for a cookies.txt file."
                         self.finished.emit(oembed_data)
                         return
 
@@ -571,7 +573,7 @@ class _DownloadWorker(_DownloaderTask):
             if self._proc.returncode != 0:
                 combined_err = " ".join(list(raw_output)[-6:])
                 if "not a bot" in combined_err.lower() or "sign in" in combined_err.lower():
-                    self.error.emit("YouTube requires authentication ('Sign in to confirm you're not a bot'). Click 'Cookies' to select your cookies.txt file.")
+                    self.error.emit("YouTube requires authentication ('Sign in to confirm you're not a bot'). Select your cookies.txt file when prompted.")
                 else:
                     self.error.emit(f"Download failed with exit code {self._proc.returncode}: {combined_err[:120]}")
                 return
@@ -685,6 +687,7 @@ class MediaDownloaderDialog(QDialog):
             ("tiktok", "TikTok", "tiktok", "#00f2fe"),
             ("instagram", "Instagram", "instagram", "#e1306c"),
             ("twitter", "Twitter / X", "twitter", "#ffffff"),
+            ("twitch", "Twitch clips", "twitch", "#a970ff"),
         ]
         for key, label, icon_name, icon_color in platform_configs:
             btn = QPushButton(f"  {label}")
@@ -712,7 +715,7 @@ class MediaDownloaderDialog(QDialog):
 
         self.url_input = QLineEdit()
         self.url_input.setObjectName("urlInput")
-        self.url_input.setPlaceholderText("https://www.youtube.com/... (videos or shorts), tiktok, instagram, x.com link")
+        self.url_input.setPlaceholderText("https://www.youtube.com/... (videos or shorts), twitch.tv clip, tiktok, instagram, x.com link")
         self.url_input.textChanged.connect(self._on_url_changed)
         self.url_input.returnPressed.connect(self._on_fetch_clicked)
         input_layout.addWidget(self.url_input, 1)
@@ -725,18 +728,15 @@ class MediaDownloaderDialog(QDialog):
         self.clear_btn.clicked.connect(lambda: self.url_input.clear())
         input_layout.addWidget(self.clear_btn)
 
-        # Cookies button
-        self.cookies_btn = QPushButton("  Cookies")
-        self.cookies_btn.setObjectName("cookiesButton")
-        self.cookies_btn.setIcon(lucide_icon("key", "#a0aec0", 14))
-        self.cookies_btn.setIconSize(QSize(14, 14))
-        self.cookies_btn.setFixedHeight(36)
-        self.cookies_btn.setToolTip("Select or configure cookies.txt file for YouTube authentication")
-        self.cookies_btn.clicked.connect(self._select_cookie_file)
-        if find_cookie_file():
-            self.cookies_btn.setText("  Cookies (Active)")
-            set_ui_style(self.cookies_btn, 'color: @success; border-color: @accent;')
-        input_layout.addWidget(self.cookies_btn)
+        # Paste button
+        self.paste_btn = QPushButton("  Paste")
+        self.paste_btn.setObjectName("pasteButton")
+        self.paste_btn.setIcon(lucide_icon("clipboard-paste", None, 14))
+        self.paste_btn.setIconSize(QSize(14, 14))
+        self.paste_btn.setFixedHeight(36)
+        self.paste_btn.setToolTip("Paste the link from your clipboard")
+        self.paste_btn.clicked.connect(self._paste_link)
+        input_layout.addWidget(self.paste_btn)
 
         self.fetch_btn = QPushButton("  Fetch")
         self.fetch_btn.setObjectName("fetchButton")
@@ -924,7 +924,7 @@ class MediaDownloaderDialog(QDialog):
         self.cancel_download_btn.hide(); root.addWidget(self.cancel_download_btn,0,Qt.AlignRight)
 
     def _apply_theme(self):
-        set_ui_style(self, '\n            QDialog {\n                background-color: @bg_panel;\n                color: @text_main;\n                font-family: \'Segoe UI\', Inter, sans-serif;\n            }\n            #headerTitle {\n                font-size: 20px;\n                font-weight: 700;\n                color: @text_main;\n            }\n            #headerSubtitle {\n                font-size: 12px;\n                color: @text_sub;\n            }\n            #platformPill {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 8px;\n                color: @text_main;\n                font-size: 13px;\n                font-weight: 600;\n                padding: 10px 14px;\n                text-align: center;\n            }\n            #platformPill:hover {\n                background-color: @bg_hover;\n                border-color: @border_subtle;\n            }\n            #platformPill:checked {\n                background-color: @bg_selected;\n                border: 2px solid @accent;\n                color: @text_selected;\n            }\n            #inputContainer {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 8px;\n            }\n            #urlInput {\n                background: transparent;\n                border: none;\n                color: @text_main;\n                font-size: 13px;\n                padding: 4px;\n            }\n            #urlInput:focus {\n                outline: none;\n            }\n            #clearButton {\n                background: transparent;\n                border: none;\n                color: @text_sub;\n                font-size: 12px;\n                font-weight: bold;\n                border-radius: 11px;\n            }\n            #clearButton:hover {\n                background-color: @bg_hover;\n                color: @text_main;\n            }\n            #cookiesButton {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 6px;\n                color: @text_sub;\n                font-size: 12px;\n                font-weight: 600;\n                padding: 0 12px;\n            }\n            #cookiesButton:hover {\n                background-color: @bg_hover;\n                color: @text_main;\n                border-color: @border_subtle;\n            }\n            #fetchButton {\n                background-color: @accent;\n                border: none;\n                border-radius: 6px;\n                color: @accent_text;\n                font-size: 13px;\n                font-weight: 700;\n                padding: 0 18px;\n            }\n            #fetchButton:hover {\n                background-color: @accent;\n            }\n            #fetchButton:pressed {\n                background-color: @accent;\n            }\n            #fetchButton:disabled {\n                background-color: @danger_bg;\n                color: @text_disabled;\n            }\n            #previewCard {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 12px;\n            }\n            #thumbImage {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 8px;\n                color: @text_sub;\n                font-size: 12px;\n            }\n            #durationBadge {\n                background-color: rgba(0, 0, 0, 0.78);\n                border-radius: 4px;\n                color: @text_main;\n                font-size: 11px;\n                font-weight: 700;\n            }\n            #videoTitle {\n                font-size: 15px;\n                font-weight: 700;\n                color: @text_main;\n                line-height: 1.3;\n            }\n            #platformIndicator {\n                color: @text_sub;\n                font-size: 12px;\n                font-weight: 600;\n            }\n            #authorName {\n                color: @text_main;\n                font-size: 12px;\n                font-weight: 600;\n            }\n            #authorSubs {\n                color: @text_sub;\n                font-size: 12px;\n            }\n            #statsText {\n                color: @text_sub;\n                font-size: 12px;\n            }\n            #formLabel {\n                color: @text_sub;\n                font-size: 11px;\n                font-weight: 600;\n                text-transform: uppercase;\n                letter-spacing: 0.5px;\n            }\n            #styledCombo {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 6px;\n                color: @text_main;\n                font-size: 12px;\n                padding: 6px 10px;\n                min-height: 24px;\n            }\n            #styledCombo:hover {\n                border-color: @border_subtle;\n            }\n            #downloadProgress {\n                background-color: @bg_panel;\n                border: none;\n                border-radius: 4px;\n            }\n            #downloadProgress::chunk {\n                background-color: @accent;\n                border-radius: 4px;\n            }\n            #statusLabel {\n                color: @info;\n                font-size: 12px;\n                font-weight: 600;\n            }\n            #btnDownloadVideo {\n                background-color: @accent;\n                border: none;\n                border-radius: 8px;\n            }\n            #btnDownloadVideo:hover {\n                background-color: @accent;\n            }\n            #btnDownloadVideo:pressed {\n                background-color: @accent;\n            }\n            #btnDownloadVideo:disabled {\n                background-color: @danger_bg;\n            }\n            #btnDownloadAudio {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 8px;\n            }\n            #btnDownloadAudio:hover {\n                background-color: @bg_hover;\n                border-color: @border_subtle;\n            }\n            #btnDownloadAudio:pressed {\n                background-color: @bg_panel;\n            }\n            #btnDownloadAudio:disabled {\n                background-color: @bg_panel;\n                border-color: @border_subtle;\n            }\n            #btnDownloadAudio[primarySound="true"] {\n                background-color: @accent;\n                border: none;\n            }\n            #btnDownloadAudio[primarySound="true"]:hover {\n                background-color: @accent;\n            }\n            #btnDownloadAudio[primarySound="true"]:pressed {\n                background-color: @accent;\n            }\n            #btnMainText {\n                color: @text_main;\n                font-size: 14px;\n                font-weight: 700;\n            }\n            #btnSubTextLight {\n                color: @text_main;\n                font-size: 11px;\n            }\n            #btnSubTextMuted {\n                color: @text_sub;\n                font-size: 11px;\n            }\n        ')
+        set_ui_style(self, '\n            QDialog {\n                background-color: @bg_panel;\n                color: @text_main;\n                font-family: \'Segoe UI\', Inter, sans-serif;\n            }\n            #headerTitle {\n                font-size: 20px;\n                font-weight: 700;\n                color: @text_main;\n            }\n            #headerSubtitle {\n                font-size: 12px;\n                color: @text_sub;\n            }\n            #platformPill {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 8px;\n                color: @text_main;\n                font-size: 13px;\n                font-weight: 600;\n                padding: 10px 14px;\n                text-align: center;\n            }\n            #platformPill:hover {\n                background-color: @bg_hover;\n                border-color: @border_subtle;\n            }\n            #platformPill:checked {\n                background-color: @bg_selected;\n                border: 2px solid @accent;\n                color: @text_selected;\n            }\n            #inputContainer {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 8px;\n            }\n            #urlInput {\n                background: transparent;\n                border: none;\n                color: @text_main;\n                font-size: 13px;\n                padding: 4px;\n            }\n            #urlInput:focus {\n                outline: none;\n            }\n            #clearButton {\n                background: transparent;\n                border: none;\n                color: @text_sub;\n                font-size: 12px;\n                font-weight: bold;\n                border-radius: 11px;\n            }\n            #clearButton:hover {\n                background-color: @bg_hover;\n                color: @text_main;\n            }\n            #pasteButton {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 6px;\n                color: @text_sub;\n                font-size: 12px;\n                font-weight: 600;\n                padding: 0 12px;\n            }\n            #pasteButton:hover {\n                background-color: @bg_hover;\n                color: @text_main;\n                border-color: @border_subtle;\n            }\n            #fetchButton {\n                background-color: @accent;\n                border: none;\n                border-radius: 6px;\n                color: @accent_text;\n                font-size: 13px;\n                font-weight: 700;\n                padding: 0 18px;\n            }\n            #fetchButton:hover {\n                background-color: @accent;\n            }\n            #fetchButton:pressed {\n                background-color: @accent;\n            }\n            #fetchButton:disabled {\n                background-color: @danger_bg;\n                color: @text_disabled;\n            }\n            #previewCard {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 12px;\n            }\n            #thumbImage {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 8px;\n                color: @text_sub;\n                font-size: 12px;\n            }\n            #durationBadge {\n                background-color: rgba(0, 0, 0, 0.78);\n                border-radius: 4px;\n                color: @text_main;\n                font-size: 11px;\n                font-weight: 700;\n            }\n            #videoTitle {\n                font-size: 15px;\n                font-weight: 700;\n                color: @text_main;\n                line-height: 1.3;\n            }\n            #platformIndicator {\n                color: @text_sub;\n                font-size: 12px;\n                font-weight: 600;\n            }\n            #authorName {\n                color: @text_main;\n                font-size: 12px;\n                font-weight: 600;\n            }\n            #authorSubs {\n                color: @text_sub;\n                font-size: 12px;\n            }\n            #statsText {\n                color: @text_sub;\n                font-size: 12px;\n            }\n            #formLabel {\n                color: @text_sub;\n                font-size: 11px;\n                font-weight: 600;\n                text-transform: uppercase;\n                letter-spacing: 0.5px;\n            }\n            #styledCombo {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 6px;\n                color: @text_main;\n                font-size: 12px;\n                padding: 6px 10px;\n                min-height: 24px;\n            }\n            #styledCombo:hover {\n                border-color: @border_subtle;\n            }\n            #downloadProgress {\n                background-color: @bg_panel;\n                border: none;\n                border-radius: 4px;\n            }\n            #downloadProgress::chunk {\n                background-color: @accent;\n                border-radius: 4px;\n            }\n            #statusLabel {\n                color: @info;\n                font-size: 12px;\n                font-weight: 600;\n            }\n            #btnDownloadVideo {\n                background-color: @accent;\n                border: none;\n                border-radius: 8px;\n            }\n            #btnDownloadVideo:hover {\n                background-color: @accent;\n            }\n            #btnDownloadVideo:pressed {\n                background-color: @accent;\n            }\n            #btnDownloadVideo:disabled {\n                background-color: @danger_bg;\n            }\n            #btnDownloadAudio {\n                background-color: @bg_panel;\n                border: 1px solid @border_subtle;\n                border-radius: 8px;\n            }\n            #btnDownloadAudio:hover {\n                background-color: @bg_hover;\n                border-color: @border_subtle;\n            }\n            #btnDownloadAudio:pressed {\n                background-color: @bg_panel;\n            }\n            #btnDownloadAudio:disabled {\n                background-color: @bg_panel;\n                border-color: @border_subtle;\n            }\n            #btnDownloadAudio[primarySound="true"] {\n                background-color: @accent;\n                border: none;\n            }\n            #btnDownloadAudio[primarySound="true"]:hover {\n                background-color: @accent;\n            }\n            #btnDownloadAudio[primarySound="true"]:pressed {\n                background-color: @accent;\n            }\n            #btnMainText {\n                color: @text_main;\n                font-size: 14px;\n                font-weight: 700;\n            }\n            #btnSubTextLight {\n                color: @text_main;\n                font-size: 11px;\n            }\n            #btnSubTextMuted {\n                color: @text_sub;\n                font-size: 11px;\n            }\n        ')
 
     def _set_platform(self, key: str):
         self.active_platform = key
@@ -939,12 +939,20 @@ class MediaDownloaderDialog(QDialog):
         detected = detect_platform(text)
         if detected in self.platform_buttons:
             self._set_platform(detected)
-        u = text.strip().lower()
-        valid=u.startswith(('http://','https://'))
         busy=self._download_thread and self._download_thread.isRunning()
-        self.btn_download_video.setEnabled(valid and not busy)
-        self.btn_download_audio.setEnabled(valid and not busy)
+        # Downloads unlock only after Fetch has read the link.
+        self.btn_download_video.setEnabled(False)
+        self.btn_download_audio.setEnabled(False)
         if not busy:self.fetch_btn.setEnabled(True)
+
+    def _paste_link(self):
+        from PySide6.QtWidgets import QApplication
+        text = (QApplication.clipboard().text() or "").strip()
+        if text:
+            self.url_input.setText(text)
+            self.url_input.setFocus()
+        else:
+            self.status_lbl.setText("Clipboard is empty.")
 
     def _start_task(self,worker,attribute,callbacks):
         job=RetainedThread(worker)
@@ -961,7 +969,7 @@ class MediaDownloaderDialog(QDialog):
             self.cancel_download_btn.hide()
             if cancelled:
                 self.progress_bar.hide(); self.status_lbl.setText('Download cancelled.')
-                self._on_url_changed(self.url_input.text())
+                self.btn_download_video.setEnabled(True); self.btn_download_audio.setEnabled(True); self.fetch_btn.setEnabled(True)
         elif job is self._fetch_thread:self._fetch_thread=None; self._fetch_worker=None
         elif job is self._thumb_thread:self._thumb_thread=None; self._thumb_worker=None
 
@@ -1003,10 +1011,15 @@ class MediaDownloaderDialog(QDialog):
         title = data.get("title") or "Untitled Video"
         self.title_lbl.setText(title)
 
-        uploader = data.get("uploader") or data.get("channel") or "Unknown Creator"
+        is_twitch = "twitch" in str(data.get("extractor_key") or "").lower()
+        if is_twitch:
+            # yt-dlp's "uploader" is whoever clipped it; the channel is the streamer.
+            uploader = data.get("channel") or data.get("uploader") or "Unknown Creator"
+        else:
+            uploader = data.get("uploader") or data.get("channel") or "Unknown Creator"
         self.author_lbl.setText(uploader)
 
-        subs = format_subscribers(data.get("channel_follower_count"))
+        subs = format_subscribers(data.get("channel_follower_count"), "followers" if is_twitch else "subscribers")
         self.subs_lbl.setText(f"• {subs}" if subs else "")
 
         views = format_views(data.get("view_count"))
@@ -1023,7 +1036,10 @@ class MediaDownloaderDialog(QDialog):
 
         # Platform name
         extractor = str(data.get("extractor_key") or "").lower()
-        if "tiktok" in extractor:
+        if "twitch" in extractor:
+            self.platform_ind.setText("Twitch Clip" if "clip" in extractor else "Twitch Video")
+            self._set_platform("twitch")
+        elif "tiktok" in extractor:
             self.platform_ind.setText("TikTok Video")
             self._set_platform("tiktok")
         elif "instagram" in extractor:
@@ -1109,7 +1125,7 @@ class MediaDownloaderDialog(QDialog):
         self.btn_download_audio.setEnabled(True)
 
         if data.get("needs_cookies"):
-            self.status_lbl.setText("⚠️ YouTube bot check detected. Use 'Cookies' button if download is blocked.")
+            self.status_lbl.setText("⚠️ YouTube bot check detected. You will be asked for a cookies.txt file if the download is blocked.")
             set_ui_style(self.status_lbl, 'color: @warning; font-size: 11px;')
         else:
             self.status_lbl.setText("✓ Media info fetched successfully.")
@@ -1182,8 +1198,6 @@ class MediaDownloaderDialog(QDialog):
         )
         if path and Path(path).is_file():
             os.environ["YTDLP_COOKIES"] = str(Path(path).resolve())
-            self.cookies_btn.setText("  Cookies (Active)")
-            set_ui_style(self.cookies_btn, 'color: @success; border-color: @accent;')
             self.status_lbl.setText(f"✓ Using cookies: {Path(path).name}")
             return True
         return False
@@ -1266,7 +1280,7 @@ class MediaDownloaderDialog(QDialog):
         self.fetch_btn.setEnabled(True)
         self.progress_bar.hide()
         if "not a bot" in err_msg.lower() or "sign in" in err_msg.lower():
-            self.status_lbl.setText("⚠️ YouTube requires authentication. Click 'Cookies' to add cookies.txt.")
+            self.status_lbl.setText("⚠️ YouTube requires authentication. A cookies.txt file is needed.")
             if not getattr(self, "_headless", False):
                 reply = QMessageBox.question(
                     self,

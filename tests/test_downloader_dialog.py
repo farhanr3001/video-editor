@@ -86,6 +86,8 @@ class MediaDownloaderDialogTests(unittest.TestCase):
         self.assertEqual(detect_platform("https://www.instagram.com/reel/C12345/"), "instagram")
         self.assertEqual(detect_platform("https://twitter.com/user/status/1234567"), "twitter")
         self.assertEqual(detect_platform("https://x.com/user/status/1234567"), "twitter")
+        self.assertEqual(detect_platform("https://www.twitch.tv/xqc/clip/VibrantPerfectCardOneHand-EBEr6u291yeKiukG"), "twitch")
+        self.assertEqual(detect_platform("https://clips.twitch.tv/VibrantPerfectCardOneHand"), "twitch")
         self.assertEqual(detect_platform("https://example.com/video.mp4"), "generic")
 
     def test_dialog_ui_initialization(self):
@@ -118,6 +120,11 @@ class MediaDownloaderDialogTests(unittest.TestCase):
         dialog.url_input.setText("https://x.com/tech/status/11223344")
         self.assertEqual(dialog.active_platform, "twitter")
         self.assertTrue(dialog.platform_buttons["twitter"].isChecked())
+
+        dialog.url_input.setText("https://www.twitch.tv/xqc/clip/VibrantPerfectCardOneHand-EBEr6u291yeKiukG")
+        self.assertEqual(dialog.active_platform, "twitch")
+        self.assertTrue(dialog.platform_buttons["twitch"].isChecked())
+        self.assertFalse(dialog.platform_buttons["twitch"].icon().isNull())
         dialog.deleteLater()
 
     def test_dialog_metadata_population(self):
@@ -237,13 +244,33 @@ class MediaDownloaderDialogTests(unittest.TestCase):
         self.assertIn("1080 × 1920", dialog.res_combo.currentText())
         dialog.deleteLater()
 
-    def test_url_input_immediately_enables_download_buttons(self):
+    def test_download_buttons_wait_for_fetch(self):
         dialog = MediaDownloaderDialog(None)
+        dialog.url_input.setText("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
         self.assertFalse(dialog.btn_download_video.isEnabled())
         self.assertFalse(dialog.btn_download_audio.isEnabled())
-        dialog.url_input.setText("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        dialog._on_metadata_loaded({"title": "t", "extractor_key": "Youtube", "duration": 100})
         self.assertTrue(dialog.btn_download_video.isEnabled())
-        self.assertTrue(dialog.btn_download_audio.isEnabled())
+        dialog.url_input.setText("https://www.youtube.com/watch?v=other")
+        self.assertFalse(dialog.btn_download_video.isEnabled())
+        self.assertFalse(dialog.btn_download_audio.isEnabled())
+        dialog.deleteLater()
+
+    def test_paste_button_fills_link(self):
+        from PySide6.QtWidgets import QApplication
+        dialog = MediaDownloaderDialog(None)
+        QApplication.clipboard().setText("  https://www.twitch.tv/xqc/clip/Abc  ")
+        dialog.paste_btn.click()
+        self.assertEqual(dialog.url_input.text(), "https://www.twitch.tv/xqc/clip/Abc")
+        self.assertFalse(hasattr(dialog, "cookies_btn"))
+        dialog.deleteLater()
+
+    def test_twitch_clip_shows_channel_and_followers(self):
+        dialog = MediaDownloaderDialog(None)
+        dialog._on_metadata_loaded({"title": "ff", "extractor_key": "TwitchClips", "uploader": "farhan3001",
+                                    "channel": "xQc", "channel_follower_count": 12_600_000, "duration": 58})
+        self.assertEqual(dialog.author_lbl.text(), "xQc")
+        self.assertIn("12.6M followers", dialog.subs_lbl.text())
         dialog.deleteLater()
 
 

@@ -10,8 +10,10 @@ from pathlib import Path
 from .model import MediaItem,TimelineItem
 
 
+MAX_CUES=128
+
 def validate(cues):
-    if not isinstance(cues,list) or len(cues)>32:raise ValueError('A composition supports at most 32 sound cues.')
+    if not isinstance(cues,list) or len(cues)>MAX_CUES:raise ValueError('A composition supports at most %d sound cues.'%MAX_CUES)
     result=[]; ids=set()
     for raw in cues:
         if not isinstance(raw,dict) or set(raw)-{'id','source','time','in_point','duration','source_duration','gain_db','enabled','name','event','node_id','channel','key_time'}:

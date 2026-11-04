@@ -1,4 +1,6 @@
 import copy,json,tempfile,threading,unittest
+from contextlib import closing
+from itertools import islice
 from pathlib import Path
 from unittest.mock import patch
 import av,numpy as np
@@ -9,7 +11,7 @@ from kinetic_cut.model import Project,TimelineItem,MediaItem,Transform
 from kinetic_cut.motion import validate,draw,geometry,curve
 from kinetic_cut.easing import MODES,ease,controls
 from kinetic_cut.keyframes import put,evaluated,shift,stretch
-from kinetic_cut.native_animation import frame,prepare
+from kinetic_cut.native_animation import frame,gpu_frames,prepare
 
 def pixels(image):
     image=image.convertToFormat(QImage.Format_RGBA8888)
@@ -82,8 +84,10 @@ class MotionRenderTests(unittest.TestCase):
             stage=prepare(p,None,None); path=Path(stage.media[-1].path); stamp=path.stat().st_mtime_ns
             self.assertTrue(stage.media[-1].has_alpha); self.assertEqual(p.to_dict(),original)
             self.assertEqual(Path(prepare(p,None,None).media[-1].path).stat().st_mtime_ns,stamp)
+            with closing(gpu_frames(p,p.timeline[0],6,directory,lambda: None)) as producer:
+                expected=next(islice(producer,5,6))
             with av.open(str(path)) as container:
-                decoded=list(container.decode(video=0)); np.testing.assert_array_equal(decoded[5].to_ndarray(format='rgba'),pixels(frame(p,p.timeline[0],.5)))
+                decoded=list(container.decode(video=0)); np.testing.assert_array_equal(decoded[5].to_ndarray(format='rgba'),expected)
             cancel=threading.Event(); cancel.set(); p.timeline[0].duration=2
             with self.assertRaisesRegex(RuntimeError,'cancelled'):prepare(p,None,cancel)
             self.assertFalse(list(Path(directory).rglob('pending-*'))); self.assertEqual(scan(Path(directory))['motion-renders'][0],1)

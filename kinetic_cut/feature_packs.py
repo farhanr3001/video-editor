@@ -7,6 +7,13 @@ from pathlib import Path
 from .updates import trusted_download
 
 ROOTS = {"vision": "vision-v1", "vocals": "vocal-only-v1", "enhance": "ai-enhance-v1"}
+SPEECH = "speech"  # caption model download: stored under models/, not components/
+
+
+def size_label(value):
+    """Windows Explorer style sizes: MB under 1000 MB, otherwise GB with one decimal."""
+    mib = value / 1024 ** 2
+    return f'{mib:.0f} MB' if mib < 1000 else f'{value / 1024 ** 3:.1f} GB'
 
 def effect_component(name):
     if name=='AI Enhance':return 'enhance'
@@ -19,6 +26,9 @@ def available(key, settings=None):
 
 
 def remove(key):
+    if key == SPEECH:
+        from .caption_runtime import remove_model
+        return remove_model()
     root = component_root(key)
     if root.is_symlink() or root.resolve().parent != root.parent.resolve():
         raise ValueError('Unsafe component storage path')
@@ -44,6 +54,9 @@ def component_root(key):
 
 
 def installed(key):
+    if key == SPEECH:
+        from .caption_runtime import app_copy_ready
+        return app_copy_ready()
     root = component_root(key)
     if key == 'enhance':
         from .enhance_component import ready
@@ -76,6 +89,9 @@ def extract(archive, destination, cancel):
 
 
 def install(key, progress, cancel, local_source=None):
+    if key == SPEECH:
+        from .caption_runtime import install_model
+        return install_model(progress, cancel)
     if installed(key):
         progress((100, "Already installed")); return component_root(key)
     if key=='enhance':

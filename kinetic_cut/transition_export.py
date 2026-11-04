@@ -1,6 +1,6 @@
 """Pair recipe construction and exact, temporary compatibility preparation."""
 import copy,math
-from .animated_transitions import NAMES,descriptor
+from .animated_transitions import NAMES,ALL_NAMES,descriptor,native_names
 
 def exact_names():
  """Legacy motion/wipe compositors cannot be represented by a generic fade."""
@@ -22,7 +22,7 @@ def legacy_frame(project,transition,images,size):
 
 def configure_layers(project,layers,error):
  """Add bounded pair passes without changing the document or source clocks."""
- new=[t for t in project.transitions if t.name in NAMES and t.track in project.video_tracks and project.track_states.get(t.track,{}).get('visible',True)]
+ new=[t for t in project.transitions if t.name in native_names() and t.track in project.video_tracks and project.track_states.get(t.track,{}).get('visible',True)]
  if not new:
   from .legacy_transition_gpu import configure_layers as legacy
   return legacy(project,layers,error)
@@ -48,6 +48,15 @@ def configure_layers(project,layers,error):
  from .legacy_transition_gpu import configure_layers as legacy
  return legacy(project,sorted([*layers,*pairs],key=lambda v:(order.get(v.get('track'),0),bool(v.get('pair')),v.get('pair',{}).get('start',v['start']),v.get('pair',{}).get('side',0))),error)
 
+
+def _note(directory,stage):
+ """Record why GPU transition blending fell back to the CPU."""
+ import traceback
+ try:
+  with (Path(directory)/'gpu-transition-error.log').open('a',encoding='utf-8') as log:log.write('stage: '+stage+'\n'+traceback.format_exc()+'\n')
+ except OSError:pass
+
+
 def prepare(project,directory,preset,ffmpeg,prepared,progress,cancel):
  """Raster only unsupported pair windows; all files belong to this export job."""
  names=exact_names()
@@ -71,7 +80,7 @@ def prepare(project,directory,preset,ffmpeg,prepared,progress,cancel):
   if cancel and cancel.is_set():raise RuntimeError('Export cancelled. Transition processing stopped safely.')
   if shutil.disk_usage(directory).free<256*1024**2:raise RuntimeError('Not enough free space for exact transition preparation')
  for number,trans in enumerate(transitions):
-  check();sides=[];paths=[]
+  check();sides=[];paths=[];gpu=None;gpu_failed=False
   first=math.ceil(trans.start*fps-1e-7);last=math.ceil(trans.end*fps-1e-7)
   if first>=last:continue
   try:
@@ -80,7 +89,7 @@ def prepare(project,directory,preset,ffmpeg,prepared,progress,cancel):
     if not item or item.muted:sides.append(None);continue
     low=min(max(first/fps,item.start),max(item.start,item.start+item.duration-1/fps))
     high=max(low+1/fps,min(last/fps,item.start+item.duration))
-    if trans.name not in NAMES:
+    if trans.name not in ALL_NAMES:
      media=project.media_by_id(item.media_id)
      if media.kind=='image':sides.append((None,low,item));continue
      sides.append((Source(media.path,item.in_point+(low-item.start)*item.speed),low,item));continue
@@ -99,11 +108,29 @@ def prepare(project,directory,preset,ffmpeg,prepared,progress,cancel):
      for side in sides:
       if side is None:images.append(None);continue
       reader,low,item=side;seconds=max(0,min(at,item.start+item.duration-1/fps)-low)
-      if trans.name not in NAMES:
+      if trans.name not in ALL_NAMES:
        if reader is None:images.append(QImage(project.media_by_id(item.media_id).path));continue
        seconds=item.in_point+(low-item.start+seconds)*item.speed
       data=reader.frame(seconds);h,w=data.shape[:2];images.append(QImage(data.data,w,h,w*4,QImage.Format_RGBA8888).copy())
-     if trans.name in NAMES:image=composite(*images,trans,trans.progress(at),(width,height))
+     if trans.name in ALL_NAMES:
+      # Same Qt Quick transition shaders as the preview, drawn by the GPU in a producer process; CPU blending is only a fallback.
+      if gpu is None and not gpu_failed:
+       try:
+        from .gpu_transition_stage import Client
+        gpu=Client(project,trans,directory)
+       except Exception:
+        gpu_failed=True;_note(directory,'start');progress and progress(0,'GPU transition renderer unavailable; using CPU blending')
+      image=None
+      if gpu is not None:
+       try:
+        from .transitions import apply_easing
+        image=gpu.composite(images[0],images[1],apply_easing(trans.progress(at),(trans.properties or {}).get('easing','Ease In-Out')))
+       except Exception:
+        gpu_failed=True;_note(directory,'frame')
+        try:gpu.close()
+        except Exception:pass
+        gpu=None
+      if image is None:image=composite(*images,trans,trans.progress(at),(width,height))
      else:
       view=copy.copy(project);view.playhead=at
       image=legacy_frame(view,trans,images,(width,height))
@@ -119,6 +146,9 @@ def prepare(project,directory,preset,ffmpeg,prepared,progress,cancel):
    for identifier in (trans.left_item_id,trans.right_item_id):
     if identifier:stage._transition_exclusions.setdefault(identifier,[]).append((first/fps,last/fps))
   finally:
+   if gpu is not None:
+    try:gpu.close()
+    except Exception:pass
    for side in sides:
     if side and side[0]:side[0].close()
    for path in paths:path.unlink(missing_ok=True)

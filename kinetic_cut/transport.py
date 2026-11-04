@@ -705,20 +705,42 @@ class TimelineTransport(QObject):
         if not cached or cached[:2]!=(id(media),source):
             cached=(id(media),source,source_key(source)); self._audio_source_signatures[media.id]=cached
         signature=repr((cached[2],item.in_point,item.duration,item.speed,item.pan,item.pitch_semitones,item.pitch_cents,max(0,item.gain_db),effects))
-        key=hashlib.sha1(signature.encode()).hexdigest(); target=CACHE_DIR/("audio-preview-"+key+".wav")
-        if target.exists():return str(target)
+        key=hashlib.sha1(signature.encode()).hexdigest(); target=CACHE_DIR/("audio-preview-"+key+".flac")
+        if target.exists():self.remember_audio_preview(item.id,target); return str(target)
         if key in self.audio_pending or key in self.audio_failed or len(self.audio_pending)>=2:return ""
         self.audio_pending.add(key); snapshot=copy.deepcopy(item); snapshot.gain_db=max(0,item.gain_db); snapshot.fade_in=snapshot.fade_out=0
         def prepare():
             from .rendergraph import audio_filters
-            pending=target.with_suffix(".pending.wav")
-            run_process([ffmpeg,"-hide_banner","-loglevel","error","-y","-ss",str(snapshot.in_point),"-t",str(snapshot.source_duration),"-i",source,"-vn","-af",audio_filters(snapshot),"-c:a","pcm_s16le",str(pending)],check=True,capture_output=True)
+            pending=target.with_suffix(".pending.flac")
+            run_process([ffmpeg,"-hide_banner","-loglevel","error","-y","-ss",str(snapshot.in_point),"-t",str(snapshot.source_duration),"-i",source,"-vn","-af",audio_filters(snapshot),"-c:a","flac","-sample_fmt","s16","-compression_level","5","-frame_size","1152",str(pending)],check=True,capture_output=True)
             pending.replace(target); return key
         def failed(detail):
             self.audio_pending.discard(key); self.audio_failed.add(key)
             self.window.statusBar().showMessage("Audio effect preview could not be prepared; export still applies the effect. Check FFmpeg settings.",7000)
-        worker=Worker(prepare); worker.signals.result.connect(lambda _:self.audio_ready(key)); worker.signals.error.connect(failed); self.window.start_worker(worker)
+        item_id=item.id
+        def ready(_):
+            self.remember_audio_preview(item_id,target); self.audio_ready(key)
+        worker=Worker(prepare); worker.signals.result.connect(ready); worker.signals.error.connect(failed); self.window.start_worker(worker)
         return ""
+
+    def remember_audio_preview(self,item_id,target):
+        """Mark a processed preview as used and drop the one it replaced for this clip.
+
+        Previews are lossless FLAC (bit-identical to the old WAVs, about half the
+        size; 1152-sample frames keep seeks within ~24 ms). Each trim or effect
+        change makes a new file, so the superseded file is removed unless another
+        clip still uses it. A file still open in a player cannot be removed on
+        Windows; it is left for the exit/startup cache cleanup.
+        """
+        import os
+        previews=getattr(self,'_item_audio_previews',None)
+        if not isinstance(previews,dict):previews={};self._item_audio_previews=previews
+        try:os.utime(target,None)
+        except OSError:pass
+        old=previews.get(item_id); previews[item_id]=target
+        if old is not None and old!=target and old not in previews.values():
+            try:old.unlink()
+            except OSError:pass
 
     def audio_ready(self,key):
         self.audio_pending.discard(key)

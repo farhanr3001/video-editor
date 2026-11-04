@@ -39,8 +39,8 @@ def shader_supported(item):
     return all(e.get('name')=='Gaussian Blur' or e.get('category')=='Visual FX' or e.get('name') in CREATIVE_NAMES for e in effects) and sum(e.get('name')=='Gaussian Blur' for e in effects)<=1
 
 def transition_supported(project,transition):
-    from .animated_transitions import NAMES
-    if transition.name not in NAMES:return False
+    from .animated_transitions import ALL_NAMES
+    if transition.name not in ALL_NAMES:return False
     items=[project.item_by_id(v) for v in (transition.left_item_id,transition.right_item_id) if v]
     return all(i and not i.muted and shader_supported(i) for i in items)
 
@@ -76,6 +76,8 @@ class GpuPreview(Surface):
         self.result_timer=QTimer(self);self.result_timer.setInterval(8);self.result_timer.timeout.connect(self.publish)
         self.geometry(canvas.rect());self.identity_image=QImage(1,1,QImage.Format_ARGB32_Premultiplied)
         self.identity_image.fill(Qt.white)
+        from .motion_gpu import MotionLayers
+        self.motion=MotionLayers(self)
         self.overlay=self.create('GpuImage.qml');self.overlay.setProperty('visible',True);self.overlay.setZ(100000)
         self.schedule()
     def schedule(self):
@@ -236,6 +238,9 @@ class GpuPreview(Surface):
         legacy=[i for i in items if i.role in ('title','graphic') and not native_required(i) and not i.muted
                 and i.track in p.video_tracks and p.track_states.get(i.track,{}).get('visible',True)]
         legacy_ids={i.id for i in legacy}
+        from .motion_gpu import is_motion
+        gpu_motion=[i for i in legacy if is_motion(i)]
+        legacy=[i for i in legacy if not is_motion(i)]
         whole_ids={i.id for i in active.values()}|legacy_ids
         whole_items=[i for i in items if i.id in whole_ids]
         for transition in transitions:
@@ -360,6 +365,9 @@ class GpuPreview(Surface):
             if item.fade_out:alpha*=min(1.,max(0.,(item.duration-elapsed)/item.fade_out))
             layer=self._place(key,texture,target,matrix,uv,item,alpha,blur,z)
             layer.setParentItem(pair_parent or self.item('canvas'));shown.add(key)
+        if not whole and gpu_motion:
+            shown.update(self.motion.update(gpu_motion,p,at,local,len(tracks)+1))
+        elif self.motion.layers:self.motion.update([],p,at,local,0)
         if not whole and legacy:
             jobs.append(('legacy-overlays',legacy,[],[],len(tracks)+1,True));shown.add('legacy-overlays')
         if not whole and captions and p.track_states.get('subtitle_1',{}).get('visible',True):
@@ -532,7 +540,7 @@ class GpuPreview(Surface):
                     hardware_decode=True if True in hardware else False if hardware and all(value is False for value in hardware) else None,decoded_frame_handles=handles,
                     source_codecs={key:media.video_codec for key in active_ids if (media:=project.media_by_id(key))},
                     hardware_decode_note='RhiTextureHandle confirms a Qt FFmpeg hardware-backed frame; missing texture handles alone do not identify decoder hardware status. Software-worker status is reported per decoder.',
-                    gpu_source_frames=self.gpu_frames,cpu_source_frames=self.cpu_frames,
+                    gpu_motion_layers=self.motion.count,gpu_motion_ms=round(self.motion.frame_ms,2),gpu_source_frames=self.gpu_frames,cpu_source_frames=self.cpu_frames,
                     effect_helper_pid=self.worker.process.pid if self.worker and self.worker.process else None,
                     pending_effect_batches=int(self.future is not None),dropped_effect_batches=self.dropped+self.mailbox.dropped,
                     asynchronous_effect_ms=self.preparation_ms,gui_scene_publish_ms=self.publish_ms,
@@ -549,7 +557,7 @@ class GpuPreview(Surface):
         self.suspend()
         for record in [*self.sources.values(),*self.retired_sources]:
             if record.get('probe'):record['probe'].close()
-        self.sources.clear();super().close()
+        self.motion.close();self.sources.clear();super().close()
     def suspend(self):
         self.suspended=True;self.container.hide()
         self.timer.stop();self.result_timer.stop()

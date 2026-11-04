@@ -22,6 +22,13 @@ def run(output):
             client=Client(connection.server.url,connection.config['token']); info=client.initialize('Codex MCP verification')
             report['server']=info['serverInfo']; report['tools']=[t['name'] for t in client.request('tools/list')['tools']]
             state=client.value('get_state'); initial=state['revision']
+            guide=client.value('get_editor_guide');assert '## 1. Connect' in guide['markdown'] and 'get_editor_guide' in guide['markdown']
+            sections=guide['sections']
+            for section in sections:
+                response=client.value('get_editor_guide',section=section);assert response['markdown'] and response['section']==section
+            assert client.value('get_state')['revision']==initial
+            assert client.value('get_capabilities')['editor_guide']['tool']=='get_editor_guide'
+            report['neutral_guide_http_sections_no_project_edit']=True
             result=client.value('apply_edits',revision=initial,operations=[dict(op='add',collection='timeline',values=dict(title_text='MCP connected',duration=1,fade_in=.2,fade_out=.2)),dict(op='settings',values=dict(width=320,height=180,fps=20))])
             changed=client.value('get_state'); assert changed['project']['timeline'][0]['title_text']=='MCP connected'
             client.value('history',direction='undo'); assert not client.value('get_state')['project']['timeline']
@@ -55,12 +62,14 @@ def run(output):
             import subprocess
             from .assistant import claude_config
             entry=claude_config()
-            messages=[dict(jsonrpc='2.0',id=501,method='initialize',params=dict(protocolVersion='2025-11-25',clientInfo=dict(name='Claude Desktop',version='verification'),capabilities={})),dict(jsonrpc='2.0',method='notifications/initialized'),dict(jsonrpc='2.0',id=502,method='tools/list'),dict(jsonrpc='2.0',id=503,method='tools/call',params=dict(name='get_state',arguments={}))]
+            messages=[dict(jsonrpc='2.0',id=501,method='initialize',params=dict(protocolVersion='2025-11-25',clientInfo=dict(name='Claude Desktop',version='verification'),capabilities={})),dict(jsonrpc='2.0',method='notifications/initialized'),dict(jsonrpc='2.0',id=502,method='tools/list'),dict(jsonrpc='2.0',id=503,method='tools/call',params=dict(name='get_state',arguments={})),dict(jsonrpc='2.0',id=504,method='tools/call',params=dict(name='get_editor_guide',arguments={'section':'connection'}))]
             payload=('\n'.join(json.dumps(v) for v in messages)+'\n').encode('utf-8')
             child=subprocess.run([entry['command'],*entry['args']],input=payload,capture_output=True,timeout=30)
             assert child.returncode==0,child.stderr
             replies=[json.loads(line) for line in child.stdout.splitlines()]
-            assert [v['id'] for v in replies]==[501,502,503] and all('result' in v for v in replies)
+            assert [v['id'] for v in replies]==[501,502,503,504] and all('result' in v for v in replies)
+            assert '48765' in json.loads(replies[3]['result']['content'][0]['text'])['markdown']
+            report['neutral_guide_claude_stdio']=True
             assert replies[0]['result']['serverInfo']['name']=='Kinetic Cut'
             assert any(t['name']=='apply_edits' for t in replies[1]['result']['tools'])
             report['claude_stdio_initialize_tools_state_eof']=True

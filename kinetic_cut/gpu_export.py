@@ -36,7 +36,8 @@ def recipe(project, preset, directory, burn_captions=True, prepared=None):
     from .effects import MATRICES
     from .creative_effects import NAMES as CREATIVE_NAMES, descriptor
     if burn_captions and project.captions:raise Unsupported('caption rasterization')
-    from .animated_transitions import NAMES as paired_names
+    from .animated_transitions import native_names
+    paired_names=native_names()
     from .legacy_transition_gpu import NAMES as legacy_names
     from .transition_export import exact_names
     if any(t.name in exact_names()-set(paired_names)-set(legacy_names) and t.track in project.video_tracks and project.track_states.get(t.track,{}).get('visible',True) for t in project.transitions):
@@ -115,7 +116,8 @@ def recipe(project, preset, directory, burn_captions=True, prepared=None):
         if tx.flip_vertical and item.role!='background':cy+=ch;ch=-ch
         transitions=[]
         for transition in project.transitions_for_item(item.id):
-            from .animated_transitions import NAMES as paired_names
+            from .animated_transitions import native_names
+            paired_names=native_names()
             if transition.name in paired_names or transition.name in legacy_names:continue
             length=min(item.duration,transition.duration);local_start=max(0.,transition.start-item.start)
             if length<=0:continue
@@ -174,6 +176,17 @@ def prepare_recipe(project,preset,directory,burn_captions,prepared,ffmpeg,progre
         result['cpu_islands']=[]
         return result
     except Unsupported:pass
+    # A transition between two motion graphics on one track is composited by the GPU inside the graphics stream itself
+    # (see export_preview_source), so it neither needs exact pre-rendering nor a paired video layer.
+    from .animated_transitions import ALL_NAMES as _gpu_transitions
+    from .motion_gpu import is_motion as _is_motion
+    def _graphic_pair(t):
+        a=project.item_by_id(t.left_item_id) if t.left_item_id else None;b=project.item_by_id(t.right_item_id) if t.right_item_id else None
+        return bool(a and b and t.name in _gpu_transitions and _is_motion(a) and _is_motion(b) and a.track==b.track==t.track and not a.muted and not b.muted
+            and t.track in project.video_tracks and project.track_states.get(t.track,{}).get('visible',True))
+    graphic_pairs=[t for t in project.transitions if _graphic_pair(t)]
+    if graphic_pairs:
+        project=copy.copy(project);project.transitions=[t for t in project.transitions if t not in graphic_pairs]
     if any(i.composite_mode!='Normal' and not i.muted and i.track in project.video_tracks and project.track_states.get(i.track,{}).get('visible',True) for i in project.timeline):raise Unsupported('non-normal scene blend parity')
     # Text rasterization must not force otherwise eligible transition pairs
     # through the compatibility prepass. Build the complete visual scene first.
@@ -308,7 +321,7 @@ def prepare_recipe(project,preset,directory,burn_captions,prepared,ffmpeg,progre
         result['layers']=configure_layers(project,result['layers'],Unsupported)
     if native_items:
         from .motion_export_stream import layers as graphic_layers
-        extra,sources=graphic_layers(project,native_items,directory)
+        extra,sources=graphic_layers(project,native_items,directory,graphic_pairs)
         result['layers'].extend(extra);result.setdefault('raw_sources',{}).update(sources)
         result['cpu_islands'].extend('motion graphics - streamed '+layer['track'] for layer in extra)
     if titles or burn_captions and project.captions:

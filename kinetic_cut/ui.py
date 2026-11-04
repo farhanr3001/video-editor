@@ -222,8 +222,9 @@ class MainWindow(QMainWindow):
         progress=startup_progress or (lambda *_:None)
         progress(45,"Loading preferences and project services")
         super().__init__(); self.settings=load_settings(); self.project=Project(); self.thread_pool=QThreadPool.globalInstance(); self.current_media_id=""; self.current_play_item:TimelineItem|None=None; self.loading=False; self.shortcut_actions={}; self.proxies={}; self._workers=set(); self._history=[]; self._history_index=-1; self._restoring=False
-        from .cache_manager import clear_waveforms_on_exit
-        self.shutdownFinished.connect(clear_waveforms_on_exit)
+        from .cache_manager import clear_on_exit, prune_idle_playback
+        prune_idle_playback()  # before any project can pick up a playback copy
+        self.shutdownFinished.connect(lambda *_: clear_on_exit(self.settings))
         self.setWindowTitle("Kinetic Cut"); self.resize(1480,900); self.setMinimumSize(1100,700); self.setAcceptDrops(True)
         from .icons import resource_path
         self.setWindowIcon(QIcon(str(resource_path("assets","kinetic-cut.svg"))))
@@ -270,7 +271,7 @@ class MainWindow(QMainWindow):
             SESSION_LOCK_PATH.write_text(f"pid={os.getpid()}\ntime={time.time()}\n",encoding="utf-8")
         except Exception:logging.exception("Could not write active session lock")
 
-        if crashed_previous:QTimer.singleShot(350,self.check_crash_recovery)
+        if crashed_previous:self.when_app_loaded(self.check_crash_recovery)
         active_theme = self.settings.get("ui_theme", "default")
         self.apply_theme(active_theme, save=False)
 
@@ -306,6 +307,8 @@ class MainWindow(QMainWindow):
         act_themes = QAction("UI Themes…", self); act_themes.triggered.connect(self.open_ui_themes_dialog); file_menu.addAction(act_themes)
         from .playback_diagnostics_ui import show as show_playback_diagnostics
         diagnostics=QAction('Playback Diagnostics…',self);diagnostics.triggered.connect(lambda:show_playback_diagnostics(self));file_menu.insertAction(act_cache,diagnostics)
+        file_menu.addSeparator()
+        act_exit = QAction("Exit", self); act_exit.setMenuRole(QAction.QuitRole); act_exit.setShortcut(QKeySequence("Ctrl+Q")); act_exit.triggered.connect(self.close); file_menu.addAction(act_exit)    # same path as the window's close button, so unsaved-work prompts still apply
 
         # Preserved application shortcuts (removed from File menu per design)
         act_import = QAction("Import Media", self); act_import.triggered.connect(self.import_media); act_import.setShortcut(QKeySequence(self.settings.get("shortcuts", {}).get("import", "Ctrl+I"))); self.addAction(act_import); self.shortcut_actions["import"]=act_import; self.editing_actions.append(act_import)
@@ -405,7 +408,10 @@ class MainWindow(QMainWindow):
         worker.signals.result.connect(ready); worker.signals.error.connect(failed); worker.signals.finished.connect(finished); self.start_worker(worker)
 
     def _history_key(self,project):
-        payload=project.to_dict(); payload.pop("modified_at",None); payload.pop("playhead",None); payload.pop('render_history',None); return json.dumps(payload,sort_keys=True,default=str)
+        payload=project.to_dict(); payload.pop("modified_at",None); payload.pop("playhead",None); payload.pop('render_history',None)
+        for media in payload.get('media',[]):
+            for derived in ('thumbnail','video_codec','stream_durations'):media.pop(derived,None)    # filled in by background probing; not an edit
+        return json.dumps(payload,sort_keys=True,default=str)
     def commit_history(self):
         if self._restoring or getattr(self,"_property_scrubbing",False):return
         if hasattr(self,'_text_history_timer'):self._text_history_timer.stop()
@@ -512,6 +518,18 @@ class MainWindow(QMainWindow):
         # queued result/error handlers have run. Never destroy them in Worker.run.
         signals.deleteLater()
         self.update_job_status()
+
+    def when_app_loaded(self,callback,settle=500):
+        """Run a startup prompt only after the workspace is visible and the splash screen has closed (never over the splash)."""
+        timer=QTimer(self); timer.setInterval(250)
+        def ready():
+            splash=any(w.isVisible() and type(w).__name__=='StartupSplash' for w in QApplication.topLevelWidgets())
+            return self.isVisible() and not self.isMinimized() and not splash
+        def poll():
+            if not ready(): return
+            timer.stop(); timer.deleteLater()
+            QTimer.singleShot(settle,lambda:callback() if self.isVisible() else None)
+        timer.timeout.connect(poll); timer.start()
 
     def check_crash_recovery(self):
         if os.environ.get("QT_QPA_PLATFORM") == "offscreen" or (QApplication.instance() and QApplication.platformName() == "offscreen"):
@@ -1156,13 +1174,24 @@ class MainWindow(QMainWindow):
         assets=[self.media_panel.resolve_media(id) for id in dict.fromkeys(ids) if id]; assets=[m for m in assets if m]
         self.insert_media_assets(assets,track,start)
 
+    def set_auto_layout(self,checked:bool):
+        self.statusBar().showMessage("Auto 3-layer layout on · new video drops get blurred background, content and webcam layers" if checked else "Auto 3-layer layout off",3500)
+
+    def auto_layout_enabled(self):
+        tool=getattr(self,"auto_layout_tool",None)
+        return bool(tool and tool.isChecked() and not getattr(self,"_restoring",False))
+
     @edit_only
-    def insert_media_assets(self,assets,track="",start=None):
+    def insert_media_assets(self,assets,track="",start=None,auto_layout=None):
+        """auto_layout: None = decide from the toolbar toggle; False = place normally; dict = layout options."""
         from .media_insert import plan,commit
         if not assets:return
+        if auto_layout is None and self.auto_layout_enabled() and any(a.kind=="video" and not a.timeline_preset for a in assets):
+            # Ask after the drag-and-drop gesture has finished, never inside the drop event.
+            QTimer.singleShot(0,lambda a=list(assets),t=track,s=start:self.begin_auto_layout(a,t,s)); return
         initial=self.project.duration if start is None else max(0.,float(start))
         try:
-            stage,added,captions=plan(self.project,assets,track,initial)
+            stage,added,captions=plan(self.project,assets,track,initial,auto_layout or None)
         except (ValueError,KeyError,TypeError) as error:self.statusBar().showMessage(str(error),4500); return
         commit(self.project,stage)
         for media in self.project.media:
@@ -1173,6 +1202,11 @@ class MainWindow(QMainWindow):
         if self.page_group.checkedId()==0:self.inspector_toggle.setChecked(True)
         self.model_changed(); self.refresh_media(); self.seek(initial)
         self.statusBar().showMessage(f"Placed {len(assets)} media items consecutively in pool order",4000)
+
+    def begin_auto_layout(self,assets,track="",start=None):
+        from .auto_layout import ask
+        options=ask(self,assets)
+        self.insert_media_assets(assets,track,start,auto_layout=options or False)
 
     @edit_only
     def add_media_to_track(self,media_id:str,track="",start=None):
@@ -2043,15 +2077,18 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Closed {len(gaps)} gap(s), removing {removed:.2f}s. Later clips retain their relative timing.",6000)
 
     @edit_only
-    def generate_captions(self, headless: bool = False, words_per_card: int | None = None, style_override: dict | None = None):
+    def generate_captions(self, headless: bool = False, words_per_card: int | None = None, style_override: dict | None = None, selection_only: bool = False):
         if getattr(self,'_caption_cancel',None) is not None:
             self.statusBar().showMessage('Caption generation is already running; wait or cancel it first.',4000)
+            self._caption_report=dict(state='refused',reason='Caption generation is already running.')
             return None
         if self.project.track_states.get("subtitle_1",{}).get("locked"):
             self.statusBar().showMessage("Unlock the subtitle track before generating captions.",4000)
+            self._caption_report=dict(state='refused',reason='The subtitle track is locked.')
             return None
         main=self.active_main()
         if not main:
+            self._caption_report=dict(state='refused',reason='No video clip on the timeline.')
             if not headless and not QApplication.activeModalWidget():
                 QMessageBox.information(self,"Generate captions","Add a video clip to the timeline first.")
             return None
@@ -2085,8 +2122,12 @@ class MainWindow(QMainWindow):
 
         destination_project=self.project
         snapshot=copy.deepcopy(self.project)
-        selected=self.timeline.selected_ids
-        speech_items=[i for i in snapshot.timeline if i.track in snapshot.audio_tracks and i.role in {"source_audio","dialogue"}]
+        selected=self.timeline.selected_ids if (selection_only or not headless) else set()
+        def is_speech(i):
+            media=snapshot.media_by_id(i.media_id)
+            return i.role in {"source_audio","dialogue"} or bool(media and media.kind=='video')    # a video file's own audio is speech, whatever its role
+        audio_items=[i for i in snapshot.timeline if i.track in snapshot.audio_tracks]
+        speech_items=[i for i in audio_items if is_speech(i)]
         targets=[i for i in speech_items if not i.muted and not snapshot.track_states.get(i.track,{}).get('muted')]
         if selected:
             related=set(selected)
@@ -2099,9 +2140,17 @@ class MainWindow(QMainWindow):
         if not targets:
             if speech_items:
                 self.statusBar().showMessage('Unmute speech audio before generating captions.',4000)
+                self._caption_report=dict(state='refused',reason='All speech audio is muted.')
                 return None
             targets=[copy.deepcopy(main)]
+        chosen_ids={i.id for i in targets}
+        skipped=[dict(item_id=i.id,track=i.track,start=round(i.start,3),end=round(i.start+i.duration,3),
+                      reason='muted' if (i.muted or snapshot.track_states.get(i.track,{}).get('muted')) else 'not speech (music or sound effect)')
+                 for i in audio_items if i.id not in chosen_ids][:20]
+        sources=[dict(item_id=i.id,track=i.track,start=round(i.start,3),end=round(i.start+i.duration,3)) for i in targets][:40]
+        self._caption_report=dict(state='running')
         offset=min(i.start for i in targets)
+        from .caption_chunks import jump_cuts
         duration=max(i.start+i.duration for i in targets)-offset
         settings=copy.deepcopy(self.settings)
         settings['caption_measure_emphasis']=style.animation=='smart highlight'
@@ -2142,7 +2191,7 @@ class MainWindow(QMainWindow):
                 args += ["-filter_complex",";".join(filters),"-map","[out]","-ac","1","-ar","16000","-t",str(duration),wav]
                 run_cancellable(args,check=True,capture_output=True,cancel_check=cancel.is_set)
                 worker.signals.progress.emit((20,"Audio prepared · loading speech model…"))
-                return transcribe(wav,settings,offset,lambda value:worker.signals.progress.emit(value if isinstance(value,tuple) else (45,value)),caption_word_count,.08,cancel_check=cancel.is_set)
+                return transcribe(wav,settings,offset,lambda value:worker.signals.progress.emit(value if isinstance(value,tuple) else (45,value)),caption_word_count,.08,cancel_check=cancel.is_set,cut_points=jump_cuts(targets,offset),join_points=jump_cuts(targets,offset,continuous_joins=True))
         worker=Worker(work)
         worker.cancel_callback=cancel.set
         def caption_progress(value):
@@ -2177,18 +2226,28 @@ class MainWindow(QMainWindow):
             from .caption_quality import review
             generated_ids={c.id for c in captions}; concerns=sum(r['caption_id'] in generated_ids for r in review(self.project)['issues'])
             self.statusBar().showMessage(f"Generated {len(captions)} captions locally with {backend}"+(f" · {concerns} timing/alignment checks worth reviewing" if concerns else ''),7000)
+            span=[round(offset,3),round(offset+duration,3)]; warnings=[]
+            if self.project.duration-span[1]>1.5 or span[0]>1.5:
+                warnings.append(f'Captioned speech covers {span[0]:.1f}-{span[1]:.1f}s of a {self.project.duration:.1f}s timeline.')
+            if captions and max(c.end for c in captions)<span[1]-3:warnings.append('No speech was found in the last '+f'{span[1]-max(c.end for c in captions):.1f}s of the captioned range.')
+            if skipped:warnings.append(f'{len(skipped)} audio clip(s) were not captioned; see skipped.')
+            self._caption_report=dict(state='complete',captions=len(captions),backend=backend,
+                first_start=round(min((c.start for c in captions),default=0),3),last_end=round(max((c.end for c in captions),default=0),3),
+                audio_range=span,sources=sources,skipped=skipped,warnings=warnings,timing_concerns=concerns)
             if not headless and style.animation in ('fade every word','word highlight','word reveal') and any(not c.word_timings for c in captions):
                 QMessageBox.information(self,'Estimated word timing','This speech engine did not provide individual word timestamps. Word animation timing is estimated. Generate with local Whisper for speech-aligned word timings.')
         worker.signals.result.connect(ready)
         def failed(detail):
             if cancel.is_set() or getattr(self,'_closing',False):return
             settled[0]=True
+            self._caption_report=dict(state='failed',error=str(detail)[-400:])
             if not headless and not QApplication.activeModalWidget():QMessageBox.warning(self,'Caption engine',detail[-1800:])
             else:logging.error('Caption engine error: %s',detail)
         def finished():
             settled[0]=True
             if progress_dialog:progress_dialog.close(); progress_dialog.deleteLater()
             if getattr(self,'_caption_cancel',None) is cancel:self._caption_cancel=None
+            if getattr(self,'_caption_report',{}).get('state')=='running':self._caption_report=dict(state='cancelled' if cancel.is_set() else 'discarded',reason='The project changed or the run was cancelled.')
             if cancel.is_set() and not getattr(self,'_closing',False):self.statusBar().showMessage('Caption generation cancelled',4000)
         worker.signals.error.connect(failed)
         worker.signals.finished.connect(finished)
@@ -2266,18 +2325,11 @@ class MainWindow(QMainWindow):
         self.preview.effect_cache.clear(); self.delivery.sync_project_settings()
 
     def open_settings(self):
-        dialog=QDialog(self); dialog.setWindowTitle("Kinetic Cut settings"); dialog.resize(610,740); form=QFormLayout(dialog); ffmpeg=QLineEdit(self.settings.get("ffmpeg","ffmpeg")); ffprobe=QLineEdit(self.settings.get("ffprobe","ffprobe")); whisper_size=QComboBox(); whisper_size.addItems(["tiny.en","base.en","small.en"]); whisper_size.setCurrentText(self.settings.get("whisper_model","base.en")); whisper=QLineEdit(self.settings.get("whisper_cli","")); model=QLineEdit(self.settings.get("whisper_model_path","")); sfx=QLineEdit(self.settings.get("sfx_folder","")); buttons=QDialogButtonBox(QDialogButtonBox.Cancel|QDialogButtonBox.Save); buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow("FFmpeg command",ffmpeg); form.addRow("ffprobe command",ffprobe); form.addRow("Whisper model",whisper_size); form.addRow("whisper-cli override",whisper); form.addRow("whisper.cpp model",model); form.addRow("Auto-index SFX folder",sfx)
-        from .playback_config import MODES
-        decoder=QComboBox(); decoder.addItems(MODES); decoder.setCurrentText(self.settings.get('playback_decoder',MODES[0])); form.addRow('Playback decoder',decoder)
-        note=QLabel('Restart after changing decoder. GPU decoding depends on codec/driver support.\nSee File → Playback Diagnostics for the active preview backend. Export encoder is selected in Deliver.'); note.setWordWrap(True); form.addRow(note)
-        shortcut_box=QGroupBox("KEYBOARD SHORTCUTS"); shortcut_grid=QGridLayout(shortcut_box); shortcut_edits={}; labels={"import":"Import media","save":"Save project","export":"Export","undo":"Undo","redo":"Redo","selection_mode":"Selection mode","blade_mode":"Cut/Split","snapping":"Toggle snapping","play_pause":"Play / pause","shuttle_back":"Shuttle back","shuttle_stop":"Stop","shuttle_forward":"Shuttle forward","mark_in":"Mark in","mark_out":"Mark out","cut":"Split clip","delete":"Lift","ripple_delete":"Ripple delete","vertical_layout":"Vertical layout","captions":"Generate captions","remove_silence":"Remove silence","instant_package":"Instant package"}
-        for index,(logical,label) in enumerate(labels.items()):
-            edit=QLineEdit(self.settings.get("shortcuts",{}).get(logical,"")); edit.setPlaceholderText("e.g. Ctrl+Shift+K"); shortcut_edits[logical]=edit; shortcut_grid.addWidget(QLabel(label),index//2,index%2*2); shortcut_grid.addWidget(edit,index//2,index%2*2+1)
-        form.addRow(shortcut_box); form.addRow(buttons)
+        from .settings_dialog import SettingsDialog
+        dialog=SettingsDialog(self)
         if dialog.exec():
-            self.settings['playback_decoder']=decoder.currentText()
-            self.settings.update(ffmpeg=ffmpeg.text(),ffprobe=ffprobe.text(),whisper_model=whisper_size.currentText(),whisper_cli=whisper.text(),whisper_model_path=model.text(),sfx_folder=sfx.text()); self.settings["shortcuts"].update({key:edit.text().strip() for key,edit in shortcut_edits.items()}); save_settings(self.settings); self.apply_shortcuts()
-            folder=Path(sfx.text())
+            dialog.apply(); save_settings(self.settings); self.apply_shortcuts()
+            folder=Path(self.settings.get("sfx_folder",""))
             if folder.is_dir():self.add_media_paths([str(x) for x in folder.iterdir() if x.suffix.lower() in AUDIO_EXTENSIONS])
 
     def open_export(self):

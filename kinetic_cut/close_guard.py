@@ -10,7 +10,8 @@ def document_key(project):
         for field in ('modified_at', 'playhead', 'path', 'render_history'):
             body.pop(field, None)
         for media in body.get('media', []):
-            media.pop('thumbnail', None)
+            for derived in ('thumbnail', 'video_codec', 'stream_durations'):
+                media.pop(derived, None)        # filled in by background probing; not an edit
             if media.get('compound'):
                 media.pop('path', None)  # Regenerated preview, not the source.
                 clean(media['compound'])
@@ -22,16 +23,26 @@ def mark_saved(window, document=None):
     window._saved_close_key = document_key(document or window.compounds.root())
 
 
+def has_unsaved(window):
+    """True when closing now would lose work: a saved project that changed, or an unsaved one with content."""
+    window.flush_text_edit()
+    document = window.compounds.root()
+    if not document.path and not (document.timeline or document.captions):
+        return False
+    if document.path and getattr(window, '_saved_close_key', None) == document_key(document):
+        return False
+    return True
+
+
 def confirm_close(window):
     # Explicit fixture cleanup only; normal launches never set this property.
     if DIAGNOSTIC_CLEANUP or QApplication.instance().property('kineticTestDiscardUnsaved'):
         return True
-    window.flush_text_edit()
+    if getattr(window, '_exit_confirmed', False):      # an exit the user's assistant already checked (saved or explicitly discarded)
+        return True
+    if not has_unsaved(window):
+        return True
     document = window.compounds.root()
-    if not document.path and not (document.timeline or document.captions):
-        return True
-    if document.path and getattr(window, '_saved_close_key', None) == document_key(document):
-        return True
     box = QMessageBox(window)
     box.setWindowTitle('Save changes before closing?')
     box.setIcon(QMessageBox.Warning)

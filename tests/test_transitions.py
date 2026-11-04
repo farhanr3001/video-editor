@@ -41,14 +41,15 @@ class TestTransitionsCatalog(unittest.TestCase):
         self.assertIn("Glitch & Stylized", TRANSITION_SUBSECTIONS)
 
         # Preserve the original 25 and register the 24 paired-image transitions.
-        from kinetic_cut.animated_transitions import NAMES
-        self.assertEqual(len(TRANSITION_NAMES), 49)
-        self.assertEqual(len(set(TRANSITION_NAMES)-set(NAMES)),25)
+        from kinetic_cut.animated_transitions import NAMES,EXTRA_NAMES
+        paired=set(NAMES)|set(EXTRA_NAMES)
+        self.assertEqual(len(TRANSITION_NAMES), 66)
+        self.assertEqual(len(set(TRANSITION_NAMES)-set(NAMES)-set(EXTRA_NAMES)),25)
         for name in TRANSITION_NAMES:
             self.assertIn(name, TRANSITION_SET)
             self.assertIn(name, TRANSITION_ICONS)
             self.assertIn(name, TRANSITION_DESCRIPTIONS)
-            if name not in NAMES:
+            if name not in paired:
                 self.assertIn(name, XFADE_MAP)
                 self.assertTrue(bool(xfade_name(name)))
             else:self.assertNotIn(name,XFADE_MAP,'Paired transitions must never export as a substitute fade')

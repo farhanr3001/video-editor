@@ -19,3 +19,7 @@ exit /b %errorlevel%
 "@ | Set-Content -LiteralPath $script -Encoding ASCII
 & cmd.exe /d /c $script
 if($LASTEXITCODE -ne 0){throw 'Native GPU export compilation failed.'}
+
+# Record the highest paired-transition mode this DLL contains, so Python only routes transitions here that it can render.
+$modes=[regex]::Matches((Get-Content -Raw -LiteralPath "$workspace/native/gpu_export.cpp"),'KINETIC_TRANSITION_MODE == (\d+)') | ForEach-Object {[int]$_.Groups[1].Value} | Measure-Object -Maximum
+Set-Content -LiteralPath (Join-Path $output 'gpu_export.modes') -Value ([string]$modes.Maximum) -Encoding ASCII

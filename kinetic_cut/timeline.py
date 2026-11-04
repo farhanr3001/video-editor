@@ -5,7 +5,7 @@ from collections import OrderedDict
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal, QTimer
 from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetrics, QImage, QKeySequence, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRegion
 from PySide6.QtWidgets import QApplication, QMenu, QScrollBar, QToolTip
-from .widgets import TimelineWidget as BaseTimeline
+from .widgets import TimelineWidget as BaseTimeline, ruler_label
 from .model import uid
 from .icons import lucide_icon
 from .editing import edit_only
@@ -1082,7 +1082,7 @@ class TimelineWidget(BaseTimeline):
     def _paint_ruler(self,p,pal,w,dirty):
         p.fillRect(QRectF(0,0,w,self.RULER_HEIGHT+1),QColor(pal.get("timeline_ruler_bg", "#26272c")))
         p.fillRect(QRectF(0,0,self.LABEL_WIDTH-2,self.RULER_HEIGHT),QColor(pal.get("timeline_header_bg", "#202126")))
-        p.setFont(QFont("Segoe UI",8)); major=next((step for step in (1,5,10,15,30,60,120,300,600) if step*self.pixels_per_second>=75),600); divisions=max(2,min(20,round(major*self.pixels_per_second/8))); minor=major/divisions
+        p.setFont(QFont("Segoe UI",8)); major=next((step for step in (1,5,10,15,30,60,120,300,600,900,1800,3600,7200) if step*self.pixels_per_second>=75),7200); divisions=max(2,min(20,round(major*self.pixels_per_second/8))); minor=major/divisions
         # Retain the preceding major label and hard-clip at the header. This
         # makes ruler pixels translate exactly with their timeline time, even
         # when a label is partly visible at the left edge during navigation.
@@ -1098,7 +1098,7 @@ class TimelineWidget(BaseTimeline):
             tick_height=12 if major_tick else 8 if middle_tick else 4
             p.setPen(QColor(pal.get("timeline_text", "#858990") if major_tick else pal.get("icon_sub_color", "#4e5158"))); p.drawLine(round(x),self.RULER_HEIGHT-tick_height,round(x),self.RULER_HEIGHT)
             if major_tick:
-                second=max(0,round(moment)); p.setPen(QColor(pal.get("timeline_text", "#b7bac1"))); p.drawText(round(x)+4,13,f"{second//60:02d}:{second%60:02d}")
+                second=max(0,round(moment)); p.setPen(QColor(pal.get("timeline_text", "#b7bac1"))); p.drawText(round(x)+4,13,ruler_label(second))
         p.restore()
         p.fillRect(QRectF(self.LABEL_WIDTH-2,0,3,self.RULER_HEIGHT+1),QColor(pal.get("timeline_divider", "#0b0c0e")))
 

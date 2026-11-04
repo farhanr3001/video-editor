@@ -51,7 +51,7 @@ def run_caption_process(command, cancel_check=None, **kwargs):
 
 def _from_segments(segments: list[dict], offset: float = 0.0,
                    style: CaptionStyle | None = None, words_per_caption: int = 5,
-                   hold_seconds: float = .5) -> list[Caption]:
+                   hold_seconds: float = .5, cuts=(), joins=()) -> list[Caption]:
     style = style or CaptionStyle()
     captions = []
     words_per_caption=max(1,int(words_per_caption))
@@ -80,11 +80,8 @@ def _from_segments(segments: list[dict], offset: float = 0.0,
             words=[{"text":word,"start":start+span*n/max(1,len(raw)),"end":start+span*(n+1)/max(1,len(raw))} for n,word in enumerate(raw)]
         from .caption_quality import normalize_words
         words=normalize_words(words)
-        chunks=[]; chunk=[]
-        for word in words:
-            if chunk and (len(chunk)>=words_per_caption or word["start"]-chunk[-1]["end"]>.65):chunks.append(chunk); chunk=[]
-            chunk.append(word)
-        if chunk:chunks.append(chunk)
+        from .caption_chunks import chunk_words,next_cut
+        chunks=chunk_words(words,words_per_caption,cuts,joins)
         for chunk in chunks:
             if not chunk:continue
             captions.append(Caption(uid(),offset+chunk[0]["start"],offset+chunk[-1]["end"],
@@ -92,16 +89,19 @@ def _from_segments(segments: list[dict], offset: float = 0.0,
             if timed:captions[-1].word_timings=[{**({'confidence':word['confidence']} if 'confidence' in word else {}),**dict(text=word['text'],start=word['start']-chunk[0]['start'],end=word['end']-chunk[0]['start'])} for word in chunk]
     captions.sort(key=lambda caption:(caption.start,caption.end))
     for index,caption in enumerate(captions):
+        raw_end=caption.end
         next_start=captions[index+1].start if index+1<len(captions) else None
         desired=caption.end+max(0.,hold_seconds)
         caption.end=desired if next_start is None else min(desired,next_start)
+        wall=next_cut(sorted(set(cuts)|set(joins)),raw_end-offset) if cuts or joins else None
+        if wall is not None:caption.end=max(raw_end,min(caption.end,offset+wall))
     return captions
 
 
 def transcribe(path: str, settings: dict, offset: float = 0.0,
                progress=None, words_per_caption: int = 5,
                hold_seconds: float = .5, require_word_timestamps: bool = False,
-               cancel_check=None) -> tuple[list[Caption], str]:
+               cancel_check=None, cut_points=(), join_points=()) -> tuple[list[Caption], str]:
     """Transcribe locally, preferring faster-whisper, then whisper.cpp, then Windows Speech."""
     faster_error = ""
     recognition_started=False
@@ -185,13 +185,16 @@ def transcribe(path: str, settings: dict, offset: float = 0.0,
                         if not require_word_timestamps:refine_speech_edges(audio,words,speech)
                     # Whisper segment endpoints are estimates, not the limits
                     # of the audio. CTC can correctly place words beyond them.
+                    if not require_word_timestamps:
+                        from .caption_chunks import unstretch_repeats,trim_stretched_tails
+                        unstretch_repeats(words,audio);trim_stretched_tails(words,audio,join_points)
                     words=usable_words(words,origin,end,require_word_timestamps)
                     if texts:data.append(dict(start=origin,end=end,text=' '.join(texts),words=words))
                     completed+=1
                     if progress:progress((45+round(45*min(1,end/max(.01,len(audio)/16000))),f'Transcribing… {end:.1f}s / {len(audio)/16000:.1f}s'))
                 _check_cancel(cancel_check)
                 usable_words([w for segment in data for w in segment['words']],0,len(audio)/16000,require_word_timestamps)
-                result=_from_segments(data,offset,words_per_caption=words_per_caption,hold_seconds=hold_seconds)
+                result=_from_segments(data,offset,words_per_caption=words_per_caption,hold_seconds=hold_seconds,cuts=cut_points,joins=join_points)
                 if settings.get('caption_measure_emphasis') and not require_word_timestamps:
                     from .caption_emphasis import measure_emphasis
                     measure_emphasis(result,audio,offset,cancel_check=cancel_check)
@@ -243,7 +246,7 @@ def transcribe(path: str, settings: dict, offset: float = 0.0,
                 segments.append({"start": timestamps.get("from", 0) / 1000,
                                  "end": timestamps.get("to", 0) / 1000,
                                  "text": item.get("text", "")})
-            return _from_segments(segments,offset,words_per_caption=words_per_caption,hold_seconds=hold_seconds), "whisper.cpp"
+            return _from_segments(segments,offset,words_per_caption=words_per_caption,hold_seconds=hold_seconds,cuts=cut_points,joins=join_points), "whisper.cpp"
 
     if __import__("sys").platform == "win32":
         try:

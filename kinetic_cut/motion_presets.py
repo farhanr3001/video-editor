@@ -86,7 +86,7 @@ def build(name,canvas=(1080,1920),duration=4,values=None):
     def text(node_id,label,text,y,size,color,**extra):
         # Fit the longest line without forcing a second price line.
         from PySide6.QtGui import QFont,QFontMetricsF
-        font=QFont('Arial'); font.setPixelSize(max(1,round(size))); font.setBold(True)
+        font=QFont('Arial'); font.setPixelSize(max(1,round(size)));font.setHintingPreference(QFont.PreferNoHinting); font.setBold(True)
         measured=max((QFontMetricsF(font).horizontalAdvance(line) for line in text.split('\n')),default=1)
         size=min(size,size*text_width/max(1,measured))
         return dict(id=node_id,name=label,kind='text',parent='card',text=text,x=text_x,y=y,font='Arial',font_size=size,fill=color,bold=True,**extra)

@@ -34,7 +34,7 @@ class MotionEditor(MotionInputRouter,QDialog):
         self.kind=QComboBox(left); self.kind.addItems(KINDS); layout.addWidget(self.kind)
         from .icons import lucide_icon
         layer_tools=QHBoxLayout(); layer_tools.setSpacing(2)
-        for label,icon,fn in [('Add layer','plus',self.add),('Duplicate branch','layers',self.duplicate),('Remove branch','trash-2',self.remove),('Move up','chevron-up',lambda:self.reorder(-1)),('Move down','chevron-down',lambda:self.reorder(1)),('Load template…','folder-open',self.load_template),('Save template…','save',self.save_template)]:
+        for label,icon,fn in [('Add layer','plus',self.add),('Motion assets (drag onto the canvas)','shapes',self.open_assets),('Duplicate branch','layers',self.duplicate),('Remove branch','trash-2',self.remove),('Move up','chevron-up',lambda:self.reorder(-1)),('Move down','chevron-down',lambda:self.reorder(1)),('Load template…','folder-open',self.load_template),('Save template…','save',self.save_template)]:
             button=QPushButton(left); button.setIcon(lucide_icon(icon)); button.setToolTip(label); button.setAccessibleName(label); button.setFixedWidth(26); button.clicked.connect(fn); layer_tools.addWidget(button)
         layout.addLayout(layer_tools)
         split.addWidget(left)
@@ -128,6 +128,9 @@ class MotionEditor(MotionInputRouter,QDialog):
         self.property_tabs=tabs; right.deleteLater(); split.addWidget(tabs); split.setSizes([190,570,360])
         from .motion_audio_ui import SoundCuePanel
         self.sound_panel=SoundCuePanel(self); tabs.addTab(self.sound_panel,'Sound')
+        from .motion_assets_ui import AssetBrowser
+        self.asset_browser=AssetBrowser(tabs); tabs.addTab(self.asset_browser,'Assets')
+        self.asset_browser.insert_requested.connect(self.insert_asset); self.asset_browser.save_requested.connect(self.save_asset); self.asset_picker=None
         from .motion_timeline import MotionTimeline
         bottom=QWidget(workspace); bottom_layout=QVBoxLayout(bottom); bottom_layout.setContentsMargins(0,0,0,0)
         tools=QHBoxLayout(); self.undo_button=QPushButton('Undo',bottom); self.redo_button=QPushButton('Redo',bottom)
@@ -245,8 +248,9 @@ class MotionEditor(MotionInputRouter,QDialog):
         stack.append((scene,len(json.dumps(scene,separators=(',',':'))))); total=sum(size for _,size in stack)
         while len(stack)>1 and (len(stack)>50 or total>16*1024**2):total-=stack.pop(0)[1]
     def choose_image(self):
-        if not self.node() or self.node()['kind']!='image':return
-        path,_=QFileDialog.getOpenFileName(self,'Choose layer image','','Images (*.png *.jpg *.jpeg *.webp *.bmp)')
+        if not self.node() or self.node()['kind'] not in ('image','video'):return
+        video=self.node()['kind']=='video'
+        path,_=QFileDialog.getOpenFileName(self,'Choose layer video' if video else 'Choose layer image','','Videos (*.mp4 *.mov *.mkv *.webm *.m4v)' if video else 'Images (*.png *.jpg *.jpeg *.webp *.bmp)')
         if path:self.change('source',path); self.refresh()
     def refresh(self):
         self.updating=True; node=self.node() or {}
@@ -256,10 +260,12 @@ class MotionEditor(MotionInputRouter,QDialog):
         self.scale_link.setChecked(node.get('scale_linked',True))
         self.name.setPlainText(node.get('text','')); self.name.setEnabled(node.get('kind')=='text')
         self.layer_name.setText(node.get('name',node.get('id','')))
-        self.image_fit.setCurrentText(node.get('image_fit','stretch'))
+        media=node.get('kind') in ('image','video')
+        self.image_fit.setCurrentText(node.get('image_fit','cover' if node.get('kind')=='video' else 'stretch'))
+        self.image_button.setText('Choose video…' if node.get('kind')=='video' else 'Choose image…')
         for field in (self.image_fit,self.image_button):
-            field.setVisible(node.get('kind')=='image'); label=self.label_for_field(field)
-            if label:label.setVisible(node.get('kind')=='image')
+            field.setVisible(media); label=self.label_for_field(field)
+            if label:label.setVisible(media)
         self.font.setCurrentText(node.get('font','Arial')); self.text_mode.setCurrentText(node.get('text_mode','none'))
         self.text_align.setCurrentText(node.get('text_align','center')); self.caret.setChecked(node.get('caret',False)); self.number_grouping.setChecked(node.get('number_grouping',True))
         for key,edit in self.counter_affixes:edit.setText(node.get(key,''))
@@ -404,6 +410,29 @@ class MotionEditor(MotionInputRouter,QDialog):
         if not self.node():return
         color=QColorDialog.getColor(QColor(self.node().get(name,'#ffffff')),self,'Layer colour')
         if color.isValid():self.change(name,color.name())
+    def insert_asset(self,name,x=None,y=None):
+        """Add a motion asset as one editable group at (x,y) (default canvas centre), starting at the playhead. One undo step."""
+        from .motion_assets import insert
+        try:
+            self.begin_edit(); scene,group=insert(self.scene,name,x,y,self.position); self.scene=validate(scene)
+        except Exception as error:
+            self._edit_before=None; QMessageBox.warning(self,'Motion asset',str(error)); return
+        self.node_id=group; self.selected_ids={group}; self.end_edit(); self.rebuild(); self.preview.update()
+    def save_asset(self):
+        from PySide6.QtWidgets import QInputDialog
+        from .motion_assets import capture,save
+        ids=set(self.selected_ids) or ({self.node_id} if self.node_id else set())
+        if not ids:QMessageBox.information(self,'Save as asset','Select the layers or group to save first.'); return
+        name,ok=QInputDialog.getText(self,'Save as asset','Asset name:')
+        if not ok or not name.strip():return
+        try:save(capture(self.scene,sorted(ids),name,self.position))
+        except Exception as error:QMessageBox.warning(self,'Save as asset',str(error)); return
+        for browser in (self.asset_browser,getattr(self.asset_picker,'browser',None)):
+            if browser is not None:browser.reload()
+    def open_assets(self):
+        from .motion_assets_ui import AssetPicker
+        if self.asset_picker is None:self.asset_picker=AssetPicker(self)
+        self.asset_picker.show(); self.asset_picker.raise_(); self.asset_picker.activateWindow()
     def add(self):
         from .model import uid
         node=dict(id=uid()[:8],kind=self.kind.currentText(),x=self.owner.project.settings.width/2,y=self.owner.project.settings.height/2,fill='#e8ff69',text='YOUR TEXT')
@@ -419,8 +448,9 @@ class MotionEditor(MotionInputRouter,QDialog):
         from .model import uid
         ids=self.branch(); names={i:uid()[:8] for i in ids}; copies=[]
         cues=[copy.deepcopy(c) for c in self.scene.get('sound_cues',[]) if c.get('event','time')!='time' and c.get('node_id') in ids]
-        if len(cues)+len(self.scene.get('sound_cues',[]))>32:
-            QMessageBox.warning(self,'Sound cue limit','Duplicating this branch would exceed 32 sound cues. Remove a cue first.'); return
+        from .motion_audio import MAX_CUES
+        if len(cues)+len(self.scene.get('sound_cues',[]))>MAX_CUES:
+            QMessageBox.warning(self,'Sound cue limit','Duplicating this branch would exceed %d sound cues. Remove a cue first.'%MAX_CUES); return
         for cue in cues:cue['id']=uid(); cue['node_id']=names[cue['node_id']]
         if cues:self.scene['sound_cues'].extend(cues)
         for node in self.scene['nodes']:

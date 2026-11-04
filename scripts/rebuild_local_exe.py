@@ -10,9 +10,27 @@ import sys
 from PyInstaller.archive.readers import CArchiveReader
 from PyInstaller.archive.writers import CArchiveWriter, ZlibArchiveWriter
 from PyInstaller.loader.pyimod01_archive import PYZ_ITEM_NSPKG, PYZ_ITEM_PKG
-from PyInstaller.utils.win32.winutils import update_exe_pe_checksum
+from PyInstaller.utils.win32.winutils import update_exe_pe_checksum as _windows_checksum
 
 root = Path.cwd().resolve()
+# Optional: restrict to specific modules (e.g. `--only widgets,timeline`). Needed when running on a
+# different Python build than the one that made the exe, which makes unchanged modules compare as different.
+ONLY = None
+if '--only' in sys.argv:
+    ONLY = {name.strip() for name in sys.argv[sys.argv.index('--only') + 1].split(',') if name.strip()}
+
+
+def update_exe_pe_checksum(path):
+    """PyInstaller's helper needs ctypes.windll; fall back to pefile when running off Windows."""
+    try:
+        return _windows_checksum(path)
+    except RuntimeError:
+        import pefile
+        pe = pefile.PE(path, fast_load=True)
+        value = pe.generate_checksum(); offset = pe.OPTIONAL_HEADER.get_field_absolute_offset('CheckSum'); pe.close()
+        with open(path, 'r+b') as handle:
+            handle.seek(offset); handle.write(struct.pack('<I', value))
+
 sys.path.insert(0, str(root))
 from kinetic_cut import update_files as f
 
@@ -44,13 +62,20 @@ def rebuild_exe(exe_path: Path):
             codes[name] = z.extract(name)
 
     targets = []
+    added = []
     for source in (root / 'kinetic_cut').glob('*.py'):
         name = 'kinetic_cut.' + source.stem if source.stem != '__init__' else 'kinetic_cut'
+        if ONLY is not None and source.stem not in ONLY:
+            continue
+        compiled = compile(source.read_bytes(), 'kinetic_cut/' + source.name, 'exec')
         if name in codes:
-            compiled = compile(source.read_bytes(), 'kinetic_cut/' + source.name, 'exec')
             if codes[name] != compiled:
                 targets.append(name)
                 codes[name] = compiled
+        elif name != 'kinetic_cut':
+            # A brand-new plain module of the app package: add it to the archive.
+            entries.append((name, 'module.py', 'PYMODULE'))
+            codes[name] = compiled; targets.append(name); added.append(name)
 
     if not targets:
         print(f"{exe_path} is already completely up to date with source.")
@@ -109,12 +134,9 @@ def rebuild_exe(exe_path: Path):
     new = CArchiveReader(str(pending))
     assert new.options == old.options and set(new.toc) == set(old.toc)
     nz = new.open_embedded_archive(pyz_name)
-    assert set(nz.toc) == set(z.toc)
+    assert set(nz.toc) == set(z.toc) | set(added)
 
-    changed = []
-    for name in z.toc:
-        if z.extract(name) != nz.extract(name):
-            changed.append(name)
+    changed = [name for name in z.toc if z.extract(name) != nz.extract(name)] + added
 
     assert set(changed) == set(targets), (changed, targets)
     for target in targets:
@@ -127,8 +149,13 @@ def rebuild_exe(exe_path: Path):
         if name != pyz_name:
             assert old.extract(name) == new.extract(name), name
 
-    # Atomic swap
-    os.replace(pending, exe_path)
+    # Atomic swap. A running Windows app keeps its exe locked against replacement but allows renaming.
+    try:
+        os.replace(pending, exe_path)
+    except PermissionError:
+        aside = exe_path.with_name(f"{exe_path.stem}.old-{int(__import__('time').time())}{exe_path.suffix}")
+        os.rename(exe_path, aside); os.replace(pending, exe_path)
+        print(f"Original exe was in use; moved to {aside.name} (delete it after restarting the app)")
     print(f"Successfully updated {exe_path} (new SHA: {f.digest(exe_path)})")
     return exe_path, targets
 

@@ -1,8 +1,10 @@
 """Editor-side MCP operations. All entry points run on the Qt GUI thread."""
+from .motion_audio import MAX_CUES
 import copy
 import hashlib
 import json
 import math
+import re
 import time
 from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
@@ -18,7 +20,7 @@ from .motion_presets import PRESETS as MOTION_PRESETS,is_motion
 
 def tool(name, description, properties=None, required=(), readonly=False):
     return dict(name=name,description=description,inputSchema=dict(type='object',properties=properties or {},required=list(required),additionalProperties=False),
-                annotations=dict(readOnlyHint=readonly,destructiveHint=not readonly,openWorldHint=False))
+                annotations=dict(readOnlyHint=readonly,destructiveHint=not readonly,idempotentHint=readonly,openWorldHint=False))
 
 S={'type':'string'}; N={'type':'number'}; B={'type':'boolean'}; O={'type':'object'}
 COMMANDS=('add_title_object','apply_effect_to','viewer_command','timeline_command',
@@ -29,19 +31,36 @@ COMMANDS=('add_title_object','apply_effect_to','viewer_command','timeline_comman
     'toggle_play','stop','mark_in','mark_out','add_video_track','add_audio_track',
     'frame_source','download_media','apply_transition','remove_transition',
     'add_graphic_object','remove_media','open_keyframes','open_motion_composition')
+GUIDE_SECTIONS={
+    'connection':'1. Connect to the actual running editor',
+    'startup':'2. First actions in a new editing chat',
+    'edits':'3. Revisions, transactions and project safety',
+    'media':'4. Media and asynchronous work',
+    'framing':'5. Framing, time and units',
+    'effects':'6. Effects, transitions and motion graphics',
+    'captions':'7. Captions, templates and transcripts',
+    'review':'8. Review and audio',
+    'export':'9. Save, export and confirm delivery',
+    'troubleshooting':'10. UI fallback and recovery',
+    'tools':'11. Complete exposed tool index',
+}
 TOOLS=[
+    tool('get_editor_guide','Read the bundled neutral MCP manual: connection, tools, units, revisions and jobs. No personal editing preferences or private files. Start here, then get_state and get_capabilities for live context.',{'section':{'type':'string','enum':['all',*GUIDE_SECTIONS],'default':'all'}},readonly=True),
     tool('add_motion_sound_cue','Read a short local sound (up to 60s), trim silent edges, and attach it to a motion composition asynchronously as ONE undo step. No audio timeline lane is added. Source time follows graphic moves/trims/re-time. Event may bind to a layer start/end or selected key time. Poll get_jobs; edit_motion_composition scene_settings.sound_cues edits/removes existing cues.',{'revision':S,'item_id':S,'path':S,'time':N,'gain_db':{'type':'number','minimum':-60,'maximum':0},'event':{'type':'string','enum':['time','layer_start','layer_end','keyframe']},'node_id':S,'channel':S,'key_time':N},('revision','item_id','path','time')),
     tool('motion_sound_job_control','Cancel a sound cue import before it commits. No partial scene edit is applied.',{'job_id':S},('job_id',)),
     tool('create_edit_contact_sheet','Create timestamped production-compositor review frames and short audio peak/silence checks asynchronously WITHOUT seeking the editor. Snapshot/revision reported. 1–12 timestamps, 160–640px wide. Poll get_jobs, then get_edit_contact_sheet. Does not prove continuous playback or caption speech sync.',{'timestamps':{'type':'array','items':N,'minItems':1,'maxItems':12},'width':{'type':'integer','minimum':160,'maximum':640}},('timestamps',)),
     tool('get_edit_contact_sheet','Read a completed review report and its image.',{'job_id':S},('job_id',),readonly=True),
     tool('edit_review_job_control','Cancel a running contact-sheet job. The editor/project remains unchanged.',{'job_id':S},('job_id',)),
+    tool('analyze_source_media','Look at and listen to an imported SOURCE video/audio (not the timeline) asynchronously, without touching the project or playhead. kinds: frames (labelled contact sheet of up to 12 source frames: sample=even | shots | loud_moments, or explicit timestamps), audio (loudness curve, silent ranges, unusually loud moments with peak time and rise in dB), shots (scene-change cut times, about 1/12 s precision). Times are source seconds; start/end limit the range (max 1 h). Loud is level only, not meaning: check frames and transcripts. Shot detection is the slow part on long media, so narrow the range or drop it when not needed. Poll get_jobs, then get_source_analysis.',{'media_id':S,'kinds':{'type':'array','items':{'type':'string','enum':['frames','audio','shots']},'minItems':1,'uniqueItems':True},'start':N,'end':N,'sample':{'type':'string','enum':['even','shots','loud_moments']},'count':{'type':'integer','minimum':1,'maximum':12},'timestamps':{'type':'array','items':N,'minItems':1,'maxItems':12},'width':{'type':'integer','minimum':160,'maximum':640},'shot_threshold':{'type':'number','minimum':.1,'maximum':.9}},('media_id',)),
+    tool('get_source_analysis','Read a completed source analysis: JSON report plus the labelled frame sheet image when frames were requested.',{'job_id':S},('job_id',),readonly=True),
+    tool('source_analysis_job_control','Cancel a running source analysis. The project and source files are unchanged.',{'job_id':S}, ('job_id',)),
     tool('anchor_captions_to_video','Place specified captions just INSIDE the bottom of the active webcam clip on a video track. Samples its evaluated crop/transform at each caption midpoint. Atomic/one undo; rejects rotated or undersized regions. Review animated framing separately.',{'revision':S,'track':S,'caption_ids':{'type':'array','items':S,'minItems':1},'margin':N},('revision','track','caption_ids')),
     tool('review_edit','Read missing media, visual coverage gaps, caption bounds/platform margins and timing concerns without seeking or changing edits.',readonly=True),
     tool('review_caption_timing','Read caption timing/text anomalies without changing the project. Flags estimated word timings, overlaps, malformed alignment and unusually long words for audio review.',readonly=True),
     tool('generate_source_transcripts','Generate a reusable local SOURCE transcript index asynchronously without adding captions or changing edits. Poll get_jobs. Sources must already be imported; repeated/trimmed clips share their source index.',{'media_ids':{'type':'array','items':S,'minItems':1,'maxItems':100},'force':B},('media_ids',)),
-    tool('search_transcripts','Search spoken words across indexed imported sources; returns source timestamps, word timings and every matching timeline cut. Missing sources must be generated first. Pagination uses offset/limit.',{'query':S,'media_ids':{'type':'array','items':S},'limit':{'type':'integer','minimum':1,'maximum':500},'offset':{'type':'integer','minimum':0}},readonly=True),
+    tool('search_transcripts','Search spoken words across indexed imported sources; returns source timestamps, word timings and every matching timeline cut. Missing sources must be generated first. Pagination uses offset/limit. start/end limit results to a source-time range; detail=text returns only media_id, segment, start, end and text (much smaller).',{'query':S,'media_ids':{'type':'array','items':S},'limit':{'type':'integer','minimum':1,'maximum':500},'offset':{'type':'integer','minimum':0},'start':{'type':'number','minimum':0},'end':{'type':'number','minimum':0},'detail':{'type':'string','enum':['full','text']}},readonly=True),
     tool('transcript_job_control','Cancel source transcription. Completed source indexes remain reusable; no timeline edits are made.',{'job_id':S},('job_id',)),
-    tool('get_state','Read current project, revision, selection, playback and task status. section=summary omits the full project.',{'section':{'type':'string','enum':['all','summary']}},readonly=True),
+    tool('get_state','Read current project, revision, selection and task status. section=all (default) returns the project with timeline fields still at their defaults omitted (detail=full restores every field) and captions in compact form (a shared caption_styles table and timed-word counts instead of word timings); captions returns full captions with word timings, optionally limited to start/end timeline seconds (section=all also honours start/end for timeline items and captions); summary omits the project; diagnostics is summary plus the playback/renderer diagnostics block, only needed when debugging playback.',{'section':{'type':'string','enum':['all','summary','diagnostics','captions']},'start':{'type':'number','minimum':0},'end':{'type':'number','minimum':0},'detail':{'type':'string','enum':['compact','full']}},readonly=True),
     tool('get_capabilities','Discover every editable data field, edit operation, available effect and tool workflow.',readonly=True),
     tool('apply_edits','Apply an atomic batch as ONE undo step. Requires the revision from get_state. See get_capabilities for operations. All times in seconds.',{'revision':S,'operations':{'type':'array','items':O,'minItems':1,'maxItems':500}},('revision','operations')),
     tool('synthesize_dialogue','Synthesize voiceover speech using local neural TTS (Adam Narrator or other voices) and place it directly on the timeline with waveform and caption-ready role="source_audio".',{'text':S,'voice':{'type':'string','default':'adam-narrator'},'start':N,'track':S,'rate':{'type':'integer','minimum':-50,'maximum':50},'pitch':{'type':'integer','minimum':-20,'maximum':20},'gain_db':N},('text',)),
@@ -59,22 +78,29 @@ TOOLS=[
     tool('tracking_job_control','Cancel one running Object Tracking job. No partial trajectory is applied. Poll get_jobs until Cancelled; source files are unchanged.',{'job_id':S,'operation':{'type':'string','enum':['cancel']}},('job_id','operation')),
     tool('apply_transition','Apply and configure a video transition (Cross Dissolve, Dip to Color / White Flash, Wipe Left/Right/Up/Down, Push Left/Right/Up/Down, Slide In/Out, Zoom In, Digital Glitch, etc.) between clips or on an edit cut in one call.',{'name':S,'track':S,'left_item_id':S,'right_item_id':S,'cut_time':N,'duration':N,'alignment':{'type':'string','enum':['center','start','end']},'properties':O},('name',)),
     tool('add_graphic','Add a vector graphic, motion preset or editable Motion Composition. Preset properties use the fields in get_capabilities.motion_presets; compositions use properties.scene.',{'graphic_type':{'type':'string','enum':['Motion Composition',*MOTION_PRESETS,'Circle','Pointing Arrow','Square','Rectangle','Timer / Countdown','Speech Bubble / Quote Card','Progress Bar','Callout Badge']},'track':S,'start':N,'duration':N,'properties':O},('graphic_type',)),
+    tool('add_story_graphic','Add a ready-made motion graphic template (see get_capabilities.story_templates for names and fields) as an ordinary editable Motion Composition. properties = template fields; duration rescales timing. Returns lint warnings and the scene layer ids to refine with edit_motion_composition.',{'template':S,'properties':O,'track':S,'start':N,'duration':N},('template',)),
     tool('get_motion_composition','Read a composition scene, layer bounds and exact source-time state without seeking playback.',{'item_id':S,'seconds':N},('item_id',),readonly=True),
     tool('get_motion_preview','Render one exact composition frame, including alpha, without seeking or modifying the timeline.',{'item_id':S,'seconds':N,'max_width':{'type':'integer','minimum':160,'maximum':1920}},('item_id',),readonly=True),
-    tool('edit_motion_composition','Atomic one-undo layer/keyframe edits. Requires current project revision. Operations: add_layer(node), update_layer(id,values), remove_layer(id, including descendants), move_layer(id,before), set_key(id,channel,time,value,interpolation,bezier), remove_key(id,channel,time), scene_settings(values). Times are composition SOURCE seconds.',{'revision':S,'item_id':S,'operations':{'type':'array','items':O,'minItems':1,'maxItems':256}},('revision','item_id','operations')),
+    tool('get_motion_contact_sheet','Render several composition frames on the GPU (same renderer as playback/export) into ONE labelled contact sheet image. Use instead of many get_motion_preview calls.',{'item_id':S,'times':{'type':'array','items':N,'minItems':1,'maxItems':36},'columns':{'type':'integer','minimum':1,'maximum':8},'cell_width':{'type':'integer','minimum':120,'maximum':540}},('item_id','times'),readonly=True),
+    tool('motion_scene_file','Load a composition scene from a local .json file (a scene object, or {"scene":...,"duration":...}) into a new Motion Composition or replace an existing one (item_id) as ONE undo step; or save a composition scene to a .json file. Use for large scenes instead of sending them inline.',{'operation':{'type':'string','enum':['load','save']},'path':S,'revision':S,'item_id':S,'track':S,'start':N,'duration':N,'overwrite':B},('operation','path')),
+    tool('list_fonts','List font families available to motion text and captions (bundled and installed), with their styles (italic/bold weights). Filter with query.',{'query':S,'limit':{'type':'integer','minimum':1,'maximum':500}},readonly=True),
+    tool('add_motion_sound_cues','Attach up to 128 sound cues in ONE undo step (each like add_motion_sound_cue: path, time, gain_db, event, node_id, channel, key_time). Asynchronous; poll get_jobs.',{'revision':S,'item_id':S,'cues':{'type':'array','minItems':1,'maxItems':128,'items':O}},('revision','item_id','cues')),
+    tool('motion_assets','Reusable motion assets (text reveals, UI cards, toasts, tab bars, cursors, calendars, lines, devices, stacks, scene hand-offs, and the user\'s saved assets). list returns names/categories/descriptions; insert adds one to a composition as one editable group at canvas x,y and composition time (ONE undo step); save stores layer_ids (sharing one parent) as a new user asset.',{'operation':{'type':'string','enum':['list','insert','save']},'revision':S,'item_id':S,'name':S,'x':N,'y':N,'time':N,'layer_ids':{'type':'array','items':S},'category':S},('operation',)),
+    tool('edit_motion_composition','Atomic one-undo layer/keyframe edits. Requires current project revision. Operations: add_layer(node), update_layer(id,values), remove_layer(id, including descendants), move_layer(id,before), set_key(id,channel,time,value,interpolation,bezier), remove_key(id,channel,time), animate(id,preset,start,duration,amount; presets fade_in, fade_out, pop_in, pop_out, slide_in_left/right/up/down, draw_on, wipe_out, pulse, shake, spin_in), pulse(id,channel,times[],base,peak,attack,decay: use for beat/word sync with times from get_state captions or source analysis), scene_settings(values: canvas, motion_blur, sound_cues, camera, post, floor, background). insert_asset(name,x,y,time: see motion_assets), add_scene(id,start,end,fade_in,fade_out,handoff blur|slide|fade,amount,children[]), sequence(ids[],start,overlap: lay scene groups end to end). Times are composition SOURCE seconds unless an operation sets clock:\"timeline\" (then time/times/start are timeline seconds and are converted using the clip start, in_point and speed).',{'revision':S,'item_id':S,'operations':{'type':'array','items':O,'minItems':1,'maxItems':256}},('revision','item_id','operations')),
     tool('configure_motion_preset','Update an existing motion preset with one undo step. Preserves custom layers and unrelated scene edits. Discover fields using get_capabilities.motion_presets.',{'revision':S,'item_id':S,'properties':O},('revision','item_id','properties')),
     tool('set_caption_style','Apply curated viral subtitle style presets (crime_red, viral_yellow, cyber_cyan, mrbeast_gold, clean_card) or customize font, colors, animation, size, glow, and lower-third position across captions in one call.',{'preset':{'type':'string','enum':['crime_red','viral_yellow','cyber_cyan','mrbeast_gold','clean_card']},'properties':O,'caption_ids':{'type':'array','items':S}}),
     tool('apply_vertical_framing','Format and align clips for 9:16 vertical video shorts: vertically center foreground clips (y=0.5), configure ambient background fill layers (role="background"), and optionally adjust framing scale.',{'mode':{'type':'string','enum':['center_and_fill','fit_width','fill_916']},'foreground_track':S,'background_track':S,'scale':N}),
     tool('get_timeline_summary','Return a concise structured summary of timeline tracks, clips, in/out timings, audio levels, active effects, subtitle cards, and video transitions.',readonly=True),
     tool('import_media','Index local media asynchronously without duplicating source files. Returns a job ID. Poll get_jobs, then use insert_media in apply_edits.',{'paths':{'type':'array','items':S,'minItems':1,'maxItems':100}},('paths',)),
-    tool('download_media','Download video or audio from YouTube, YouTube Shorts, TikTok, TikTok Sounds, Instagram, or Twitter/X and optionally auto-import into the project media bin.',{'url':S,'mode':{'type':'string','enum':['video','audio'],'default':'video'},'target_res':S,'cookies_path':S,'auto_import':B,'wait':B},('url',)),
-    tool('get_jobs','Read import/action jobs and render queue states. Complete is the only successful render terminal state.',readonly=True),
+    tool('download_media','Download video or audio from YouTube, YouTube Shorts, Twitch clips (twitch.tv/<channel>/clip/<id> or clips.twitch.tv/<id>), TikTok, TikTok Sounds, Instagram, or Twitter/X and optionally auto-import into the project media bin.',{'url':S,'mode':{'type':'string','enum':['video','audio'],'default':'video'},'target_res':S,'cookies_path':S,'auto_import':B,'wait':B},('url',)),
+    tool('get_jobs','Read import/action jobs and render queue states. Running jobs are complete; finished jobs are compact (large results are omitted) and only the latest `finished` (default 5) are listed. Pass job_id for one job in full. Complete is the only successful render terminal state.',{'job_id':S,'finished':{'type':'integer','minimum':0,'maximum':100}},readonly=True),
     tool('seek','Seek the timeline in seconds; then request get_preview. Decode may still be pending.',{'seconds':N},('seconds',)),
     tool('get_preview','Return an image of the current viewer or full editor. Includes actual playhead and frame status. Seek separately; sample again if decoding is pending.',{'area':{'type':'string','enum':['preview','workspace']},'max_width':{'type':'integer','minimum':160,'maximum':1920}},readonly=True),
     tool('select_items','Select timeline clips, captions, or transitions for editor commands and inspector controls.',{'ids':{'type':'array','items':S},'caption_ids':{'type':'array','items':S},'transition_id':S}),
     tool('history','Undo or redo an edit.',{'direction':{'type':'string','enum':['undo','redo']}},('direction',)),
     tool('project_file','New/open/save/checkpoint a project. Switches checkpoint current work first. Saves require explicit path; overwrite=false protects existing files.',{'operation':{'type':'string','enum':['new','open','save','checkpoint']},'path':S,'name':S,'overwrite':B},('operation',)),
     tool('queue_export','Queue a snapshot in Deliver. Rendering is asynchronous; poll get_jobs. Does not retry failed jobs.',{'path':S,'encoder':{'type':'string','enum':['Auto','CPU','NVIDIA','AMD','Intel']},'codec':{'type':'string','enum':['h264','h265']},'bitrate_mbps':N,'burn_subtitles':B,'export_audio':B,'start':B,'overwrite':B},('path',)),
+    tool('exit_application','Close the Kinetic Cut app, like File > Exit. Refused while the project has unsaved changes unless discard_unsaved is true (save first with project_file), and while a render is running. The app closes just after this response, so the MCP connection drops; relaunch it to reconnect.',{'discard_unsaved':B}),
     tool('render_control','Start queued renders or cancel the active render.',{'operation':{'type':'string','enum':['start','cancel']}},('operation',)),
     tool('editor_command','Run an existing editor workflow: effects, titles, crop, captions, silence/vocal processing, placement, clipboard or transport. Discover argument names with get_capabilities. Returns a command job; inspect_ui handles any prompts.',{'command':{'type':'string','enum':list(COMMANDS)},'arguments':O},('command',)),
     tool('inspect_ui','Discover live editor controls, menus and open dialogs, with target IDs for ui_control. Includes full effects inspector. No screen coordinates needed.',readonly=True),
@@ -82,8 +108,30 @@ TOOLS=[
 ]
 
 
+def coerce_numbers(name,args):
+    """Clients with an older tool list can send numbers as strings; accept them where the schema says number."""
+    entry=next((t for t in TOOLS if t['name']==name),None)
+    props=(entry or {}).get('inputSchema',{}).get('properties',{})
+    def number(value,kind):
+        if isinstance(value,str) and not isinstance(value,bool):
+            try:
+                parsed=float(value.strip())
+            except ValueError:return value
+            return int(parsed) if kind=='integer' and parsed==int(parsed) else parsed
+        return value
+    result=dict(args)
+    for key,value in args.items():
+        schema=props.get(key,{}); kind=schema.get('type')
+        if kind in ('number','integer'):result[key]=number(value,kind)
+        elif kind=='array' and isinstance(value,list) and schema.get('items',{}).get('type') in ('number','integer'):
+            result[key]=[number(v,schema['items']['type']) for v in value]
+    return result
+
+
 def revision(project):
     data=project.to_dict(); data.pop('playhead',None); data.pop('modified_at',None)
+    for media in data.get('media',[]):
+        for derived in ('thumbnail','video_codec','stream_durations'):media.pop(derived,None)    # filled in by background probing; not an edit
     return hashlib.sha256(json.dumps(data,sort_keys=True,allow_nan=False).encode()).hexdigest()[:20]
 
 
@@ -160,10 +208,10 @@ def validate(project):
                 if item is None or item.track!=tr.track:raise ValueError('Transition references missing or mismatched clips')
 
 
-def edited(project, operations):
+def edited(project, operations, report=None):
     if not isinstance(operations,list) or not 1<=len(operations)<=500:raise ValueError('Provide 1–500 operations')
     finite_numbers(operations)
-    stage=copy.deepcopy(project); created=[]
+    stage=copy.deepcopy(project); created=[]; report=report if report is not None else []
     for op in operations:
         kind=op.get('op'); values=op.get('values',{})
         if kind in {'add','update','remove'}:
@@ -197,7 +245,15 @@ def edited(project, operations):
                         raw['transitions']=[t for t in raw['transitions'] if identifier not in (t.get('left_item_id'),t.get('right_item_id'))]
                 else:
                     if 'id' in values:raise ValueError('Item IDs cannot be changed')
+                    previous=(target.get('text'),copy.deepcopy(target.get('word_timings')),list(target.get('highlighted_words',[]))) if collection=='captions' else None
                     merge(target,values)
+                    if previous and isinstance(values.get('text'),str) and values['text']!=previous[0] and 'word_timings' not in values:
+                        # A text edit keeps measured timing for unchanged words and estimates the rest inside the old span.
+                        from .caption_words import retime
+                        target['word_timings']=retime(previous[0],previous[1] or [],values['text'])
+                        old_words,new_words=previous[0].split(),values['text'].split(); clean=lambda w:re.sub(r'\W','',w).casefold()
+                        if 'highlighted_words' not in values:
+                            target['highlighted_words']=[i for i in previous[2] if i<len(old_words) and i<len(new_words) and clean(old_words[i])==clean(new_words[i])]
             stage=Project.from_dict(raw)
         elif kind=='settings':
             raw=stage.to_dict(); merge(raw['settings'],values); stage=Project.from_dict(raw)
@@ -252,8 +308,26 @@ def edited(project, operations):
                 crop=asdict(new_item.crop); merge(crop,op['crop']); new_item.crop=Crop(**crop)
             if 'transform' in op and isinstance(op['transform'],dict):
                 transform=asdict(new_item.transform); merge(transform,op['transform']); new_item.transform=Transform(**transform)
-            raw=stage.to_dict(); raw['timeline'].append(asdict(new_item))
-            stage=Project.from_dict(raw); created.append(item_id)
+            raw=stage.to_dict(); raw['timeline'].append(asdict(new_item)); created.append(item_id)
+            if op.get('with_audio'):
+                if media.kind!='video' or not media.has_audio:raise ValueError('with_audio needs video media that has an audio stream')
+                audio_track=op.get('audio_track') or next((t for t in stage.audio_tracks if not stage.track_states.get(t,{}).get('locked')),'')
+                if audio_track not in stage.audio_tracks or stage.track_states.get(audio_track,{}).get('locked'):raise ValueError('audio_track must be an unlocked audio track')
+                link=uid(); audio_id=op.get('audio_id') or uid()
+                raw['timeline'][-1]['link_id']=raw['timeline'][-1]['group_id']=link
+                audio=TimelineItem(audio_id,media.id,audio_track,start,duration,in_point,role='source_audio',gain_db=gain_db,fade_in=fade_in,fade_out=fade_out,link_id=link,group_id=link)
+                raw['timeline'].append(asdict(audio)); created.append(audio_id)
+            stage=Project.from_dict(raw)
+        elif kind=='ripple_delete_range':
+            from .range_edit import ripple_delete_range
+            for number in (op.get('start'),op.get('end')):
+                if isinstance(number,bool) or not isinstance(number,(int,float)):raise ValueError('ripple_delete_range needs numeric start and end (timeline seconds)')
+            report.append(dict(op='ripple_delete_range',**ripple_delete_range(stage,float(op['start']),float(op['end']))))
+        elif kind=='fit_region':
+            from .range_edit import fit_region
+            ids=op.get('ids') or ([op['id']] if op.get('id') else [])
+            if not isinstance(ids,list):raise ValueError('ids must be a list of item IDs')
+            report.extend(dict(op='fit_region',**d) for d in fit_region(stage,ids,op.get('source_rect'),op.get('target_rect'),op.get('mode','fit')))
         elif kind=='set_caption_style':
             from .caption_presets import CAPTION_PRESETS
             from .caption_templates import CAPTION_TEMPLATES
@@ -353,13 +427,13 @@ class EditorAPI:
     def dispatch(self,name,args):
         method=getattr(self,'call_'+name,None)
         if method is None:raise ValueError('Unknown editor tool')
-        return method(**args)
+        return method(**coerce_numbers(name,args))
     def call_generate_source_transcripts(self,media_ids,force=False):
         from .transcript_ui import service
         return service(self.w).start(media_ids,force)
-    def call_search_transcripts(self,query='',media_ids=None,limit=200,offset=0):
+    def call_search_transcripts(self,query='',media_ids=None,limit=200,offset=0,start=None,end=None,detail='full'):
         from .transcripts import search
-        return search(self.w.project,self.w.settings,query,media_ids,limit,offset)
+        return search(self.w.project,self.w.settings,query,media_ids,limit,offset,start,end,detail)
     def call_transcript_job_control(self,job_id):
         from .transcript_ui import service
         return service(self.w).cancel(job_id)
@@ -414,6 +488,64 @@ class EditorAPI:
         job=self.jobs.get(job_id); token=getattr(self,'_review_cancels',{}).get(job_id)
         if not job or not token or job['state'] not in ('Running','Cancelling'):raise ValueError('This contact-sheet job is not running.')
         token.set(); job['state']='Cancelling'; return dict(job)
+    def call_analyze_source_media(self,media_id,kinds=None,start=0,end=None,sample='even',count=12,timestamps=None,width=320,shot_threshold=.3):
+        import threading
+        from .config import CACHE_DIR
+        from . import source_analysis as sa
+        from .ui import Worker
+        if getattr(self.w,'_closing',False):raise ValueError('The editor is closing.')
+        media=self.w.project.media_by_id(media_id)
+        if not media:raise ValueError('Unknown media_id. Read get_state for the media pool.')
+        if media.kind not in ('video','audio'):raise ValueError('Only video and audio sources can be analysed.')
+        kinds=list(sa.KINDS if kinds is None else kinds)
+        if not kinds or len(set(kinds))!=len(kinds) or any(k not in sa.KINDS for k in kinds):raise ValueError('kinds must be unique values from frames, audio, shots.')
+        number=lambda v:isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(v)
+        end=media.duration if end is None else end
+        if not number(start) or not number(end) or not 0<=start<end<=media.duration+.01:raise ValueError('Choose 0 <= start < end <= media duration (%.3f s).'%media.duration)
+        end=min(end,media.duration)
+        if end-start>sa.MAX_RANGE:raise ValueError('Analyse at most one hour at a time.')
+        if sample not in sa.SAMPLING:raise ValueError('sample must be even, shots or loud_moments.')
+        if isinstance(count,bool) or not isinstance(count,int) or not 1<=count<=12:raise ValueError('count must be 1-12.')
+        if timestamps is not None and (not isinstance(timestamps,list) or not 1<=len(timestamps)<=12 or any(not number(t) or not start<=t<end for t in timestamps)):raise ValueError('timestamps: 1-12 source times inside the range.')
+        if isinstance(width,bool) or not isinstance(width,int) or not 160<=width<=640:raise ValueError('width must be 160-640.')
+        if not number(shot_threshold) or not .1<=shot_threshold<=.9:raise ValueError('shot_threshold must be 0.1-0.9.')
+        if any(j.get('source_analysis') and j['state'] in ('Running','Cancelling') for j in self.jobs.values()):raise ValueError('A source analysis is already running.')
+        media=copy.deepcopy(media); ffmpeg=self.w.settings.get('ffmpeg','ffmpeg'); cancel=threading.Event()
+        job=self.new_job('Source analysis'); job.update(source_analysis=True,media_id=media_id,cancellable=True,progress=0)
+        for name in ('_source_cancels','_source_reports'):
+            if not hasattr(self,name):setattr(self,name,{})
+        self._source_cancels[job['id']]=cancel
+        directory=CACHE_DIR/'source-analysis'/job['id']
+        worker=Worker(lambda:sa.analyze(media,ffmpeg,kinds,float(start),float(end),sample,count,timestamps,width,float(shot_threshold),cancel,lambda p,m:worker.signals.progress.emit((p,m)),directory)); worker.cancel_callback=cancel.set
+        def progress(value):job.update(progress=value[0],message=value[1])
+        def ready(report):
+            self._source_reports[job['id']]=report
+            if len(self._source_reports)>20:self._source_reports.pop(next(iter(self._source_reports)))
+            job.update(state='Cancelled' if cancel.is_set() else 'Complete',progress=100,result=dict(kinds=kinds,read='get_source_analysis'))
+        def failed(error):job.update(state='Cancelled' if cancel.is_set() else 'Failed',error='' if cancel.is_set() else str(error)[-1800:])
+        def finished():
+            if job['state'] in ('Running','Cancelling'):failed('Source analysis did not complete.')
+            job.update(cancellable=False,finished=time.time()); self._source_cancels.pop(job['id'],None)
+        worker.signals.progress.connect(progress); worker.signals.result.connect(ready); worker.signals.error.connect(failed); worker.signals.finished.connect(finished)
+        try:self.w.start_worker(worker)
+        except Exception:cancel.set(); failed('Could not start analysis.'); finished(); raise
+        return dict(job)
+    def call_get_source_analysis(self,job_id):
+        job=self.jobs.get(job_id)
+        if not job or not job.get('source_analysis'):raise ValueError('Unknown source-analysis job.')
+        if job['state']!='Complete':return dict(job)
+        report=getattr(self,'_source_reports',{}).get(job_id)
+        if report is None:raise ValueError('This report is no longer held. Run the analysis again.')
+        content=[dict(type='text',text=json.dumps(dict(job=dict(job),report=report)))]
+        sheet=(report.get('frames') or {}).get('sheet')
+        if sheet and Path(sheet).is_file():
+            import base64
+            content.append(dict(type='image',data=base64.b64encode(Path(sheet).read_bytes()).decode(),mimeType='image/png'))
+        return {'_mcp_content':content}
+    def call_source_analysis_job_control(self,job_id):
+        job=self.jobs.get(job_id); token=getattr(self,'_source_cancels',{}).get(job_id)
+        if not job or not token or job['state'] not in ('Running','Cancelling'):raise ValueError('This source analysis is not running.')
+        token.set(); job['state']='Cancelling'; return dict(job)
     def call_add_motion_sound_cue(self,revision,item_id,path,time,gain_db=0,event='time',node_id='',channel='',key_time=0):
         import threading
         from .motion_audio_ui import inspect_sound
@@ -429,7 +561,7 @@ class EditorAPI:
         probe_cue=dict(id=uid(),source=str(Path(path).resolve()),time=time,gain_db=gain_db,event=event,node_id=node_id,channel=channel,key_time=key_time)
         validate_cues([probe_cue])
         if at(probe_cue,scene) is None:raise ValueError('The sound cue event does not exist in this composition.')
-        if len(scene.get('sound_cues',[]))>=32:raise ValueError('Maximum 32 sound cues per composition.')
+        if len(scene.get('sound_cues',[]))>=MAX_CUES:raise ValueError('Maximum %d sound cues per composition.'%MAX_CUES)
         cancel=threading.Event(); settings=copy.deepcopy(self.w.settings); job=self.new_job('Motion sound cue'); job.update(cancellable=True,item_id=item_id)
         if not hasattr(self,'_sound_cancels'):self._sound_cancels={}
         self._sound_cancels[job['id']]=cancel
@@ -464,17 +596,62 @@ class EditorAPI:
         try:self.w.set_project(stage)
         finally:self.w._restoring=False
         self.w.model_changed()
-    def call_get_state(self,section='all'):
+    def call_get_state(self,section='all',start=None,end=None,detail='compact'):
         w=self.w
         result=dict(name=w.project.name,revision=revision(w.project),playhead=w.project.playhead,duration=w.project.duration,
             selected_ids=sorted(w.timeline.selected_ids),caption_ids=sorted(w.timeline.selected_caption_ids),
             selected_transition_id=getattr(w.timeline,'selected_transition_id',''),
             background_tasks=sum(not getattr(job,'maintenance',False) for job in w._workers),page={0:'Edit',1:'Deliver'}.get(w.current_page,'Edit'),jobs=self.call_get_jobs())
-        if section!='summary':result['project']=w.project.to_dict()
-        if getattr(w,'event_monitor',None):
+        if section not in ('all','summary','diagnostics','captions'):raise ValueError('Unknown state section; use all, summary, diagnostics or captions.')
+        for bound in (start,end):
+            if bound is not None and (isinstance(bound,bool) or not isinstance(bound,(int,float)) or bound<0):raise ValueError('start and end are nonnegative timeline seconds')
+        if detail not in ('compact','full'):raise ValueError('detail must be compact or full')
+        if section=='all':
+            project=w.project.to_dict(); styles=[]
+            if start is not None or end is not None:
+                lo=0.0 if start is None else start; hi=float('inf') if end is None else end
+                project['timeline']=[row for row in project['timeline'] if row['start']+row['duration']>lo and row['start']<hi]
+                project['captions']=[row for row in project['captions'] if row['end']>lo and row['start']<hi]
+                project['range_note']='Only timeline items and captions overlapping start/end are listed; media, settings, tracks and transitions are complete.'
+            if detail=='compact':
+                from .range_edit import compact_timeline
+                project['timeline']=compact_timeline(project['timeline'])
+                project['timeline_note']='Compact: fields equal to their defaults are omitted (see get_capabilities fields for defaults); detail=full returns every field.'
+            for caption in project['captions']:
+                style=caption.pop('style'); 
+                if style not in styles:styles.append(style)
+                caption['style_id']=styles.index(style); timings=caption.pop('word_timings',[]); caption['timed_words']=len(timings)
+            project['caption_styles']=styles
+            project['captions_note']='Compact: style_id indexes caption_styles; use get_state section=captions for full captions with word timings.'
+            result['project']=project
+        if section=='captions':
+            full=w.project.to_dict(); styles=[]; rows=[]
+            for caption in full['captions']:
+                if (start is None or caption['end']>start) and (end is None or caption['start']<end):
+                    style=caption.pop('style')
+                    if style not in styles:styles.append(style)
+                    caption['style_id']=styles.index(style); rows.append(caption)
+            result.update(captions=rows,caption_styles=styles,subtitle_style=full['subtitle_style'],
+                          captions_note='style_id indexes caption_styles; word_timings are seconds relative to each caption start.')
+        if section=='diagnostics' and getattr(w,'event_monitor',None):
             from .playback_diagnostics_ui import snapshot
             result['playback_diagnostics']=snapshot(w)
         return result
+    def call_get_editor_guide(self,section='all'):
+        if not isinstance(section,str) or section not in {'all',*GUIDE_SECTIONS}:
+            raise ValueError('Unknown guide section; use all or '+', '.join(GUIDE_SECTIONS))
+        from .icons import resource_path
+        from .version import VERSION
+        try:markdown=resource_path('assets','docs','mcp-guide.md').read_text(encoding='utf-8')
+        except OSError as error:
+            raise RuntimeError('Bundled MCP guide is unavailable; update or repair this installation.') from error
+        if section!='all':
+            heading='## '+GUIDE_SECTIONS[section]+'\n'
+            if heading not in markdown:raise RuntimeError('Bundled MCP guide section is missing; update or repair this installation.')
+            start=markdown.index(heading);end=markdown.find('\n## ',start+len(heading))
+            markdown=markdown[start:end if end!=-1 else len(markdown)].strip()
+        return dict(app_version=VERSION,section=section,sections=['all',*GUIDE_SECTIONS],
+                    scope='Neutral technical manual; read get_state and get_capabilities for live editor context.',markdown=markdown)
     def call_get_capabilities(self):
         from .effects import CATALOG
         from .transitions import TRANSITION_SUBSECTIONS
@@ -482,19 +659,22 @@ class EditorAPI:
         from .motion import schema
         from .tracking_effect import default_effect, MODES, LOSS_POLICIES
         import inspect
-        return dict(effects=CATALOG,transitions=TRANSITION_SUBSECTIONS,graphics=list(GRAPHICS_CATALOG.keys()),commands={name:str(inspect.signature(getattr(self.w,name))) for name in COMMANDS},fields={c.__name__:{f.name:str(f.type) for f in fields(c)} for c in (ProjectSettings,TimelineItem,MediaItem,Caption,CaptionStyle,Crop,Transform)},
+        return dict(editor_guide=dict(tool='get_editor_guide',sections=['all',*GUIDE_SECTIONS],scope='Technical MCP context only; no personal preferences or conversation memory.'),effects=CATALOG,transitions=TRANSITION_SUBSECTIONS,graphics=list(GRAPHICS_CATALOG.keys()),commands={name:str(inspect.signature(getattr(self.w,name))) for name in COMMANDS},fields={c.__name__:{f.name:str(f.type) for f in fields(c)} for c in (ProjectSettings,TimelineItem,MediaItem,Caption,CaptionStyle,Crop,Transform)},
             operations={'add/update/remove':'collection: timeline|captions|transitions, id, values (partial fields; nested dictionaries merge). New timeline entries default to title; media clips require role=normal and media_id; transitions require name, duration, track.',
                 'settings/subtitle_style':'values: partial fields','rename_project':'name','add_track':'kind: video|audio','track':'track, optional name, states: locked/visible/muted',
                 'duplicate_track/delete_track':'track','move_track':'track, direction: -1|1','split':'ids, at, linked (default true)',
                 'trim':'ids, delta, edge: left|right','link':'ids, unlink','insert_media':'ids (media pool IDs), start, track',
-                'insert_clip':'media_id, track, start, duration, in_point, role, gain_db, effects, crop, transform',
+                'insert_clip':'media_id, track, start, duration, in_point, role, gain_db, effects, crop, transform; with_audio (video media only) also adds its linked source_audio clip on audio_track (default first unlocked audio track, optional audio_id)',
+                'ripple_delete_range':'start, end (timeline seconds): removes the range from every unlocked track, closes the gap, splits and trims captions to the words outside the range, and fixes transitions, like a manual Ripple Delete. Locked tracks are not shifted (listed in details)',
+                'fit_region':'id or ids, source_rect {x,y,width,height} (normalized to the full source, default whole), target_rect {x,y,width,height} (normalized to the output frame, top-left origin, default whole), mode fit (default, whole region visible) or fill (box covered, region trimmed to its shape): sets crop and transform and reports layer_px',
                 'insert_transition':'name, track, duration, alignment (center/start/end), optional left_item_id, right_item_id, cut_time, properties',
                 'set_caption_style':'preset (crime_red, viral_yellow, cyber_cyan, mrbeast_gold, clean_card), properties (partial dict), optional caption_ids',
                 'apply_vertical_framing':'mode (center_and_fill, fit_width, fill_916), foreground_track, background_track, optional scale'},
             source_transcripts=dict(generate='generate_source_transcripts',search='search_transcripts',cancel='transcript_job_control',ui='Audio > Search transcript',coordinates='Source seconds with timeline cut occurrences; regenerable local index, not project captions.'),
+            source_analysis=dict(analyze='analyze_source_media',result='get_source_analysis',cancel='source_analysis_job_control',kinds=['frames','audio','shots'],sampling=['even','shots','loud_moments'],coordinates='Source seconds of an imported media item; independent of the timeline.'),
             edit_review=dict(structural='review_edit',frames='create_edit_contact_sheet',result='get_edit_contact_sheet',captions='review_caption_timing',placement='anchor_captions_to_video'),
-            motion_sound=dict(add='add_motion_sound_cue',cancel='motion_sound_job_control',storage='scene.sound_cues',events=['time','layer_start','layer_end','keyframe'],gain_db=[-60,0],time='Composition source seconds; up to 32 cues, 60-second sound inputs. Layer/key event must exist. Key dragging follows the bound key; removing the event requires removing/rebinding its cue.'),
-            motion_composition=schema(),motion_presets=__import__('kinetic_cut.motion_presets',fromlist=['catalog']).catalog(),
+            motion_sound=dict(add='add_motion_sound_cue',cancel='motion_sound_job_control',storage='scene.sound_cues',events=['time','layer_start','layer_end','keyframe'],gain_db=[-60,0],time='Composition source seconds; up to 128 cues (add many at once with add_motion_sound_cues), 60-second sound inputs. Layer/key event must exist. Key dragging follows the bound key; removing the event requires removing/rebinding its cue.'),
+            motion_composition=schema(),story_templates=__import__('kinetic_cut.motion_templates',fromlist=['catalog']).catalog(),motion_presets=__import__('kinetic_cut.motion_presets',fromlist=['catalog']).catalog(),
             object_tracking=dict(tool='track_object',cancel_tool='tracking_job_control',
                 coordinates='Full-source normalized [x,y,width,height], before crop/transform; source seconds = in_point + (timeline time - start) * speed',
                 modes=list(MODES),loss_policies=list(LOSS_POLICIES),defaults=default_effect(),
@@ -504,8 +684,10 @@ class EditorAPI:
     def call_apply_edits(self,revision,operations):
         self.editing()
         if revision!=globals()['revision'](self.w.project):raise ValueError('Project changed. Refresh get_state before editing.')
-        stage,created=edited(self.w.project,operations); self.install(stage)
-        return dict(revision=globals()['revision'](stage),created_ids=created,undoable=True)
+        details=[]; stage,created=edited(self.w.project,operations,details); self.install(stage)
+        result=dict(revision=globals()['revision'](stage),created_ids=created,undoable=True)
+        if details:result['details']=details
+        return result
     def call_synthesize_dialogue(self,text,voice='adam-narrator',start=None,track=None,rate=0,pitch=0,gain_db=0.0):
         self.editing()
         if not text or not str(text).strip():raise ValueError('Dialogue text cannot be empty')
@@ -585,6 +767,16 @@ class EditorAPI:
         item=self.w.project.item_by_id(item_id)
         if not item or item.role!='graphic' or not is_motion(item.graphic_type):raise ValueError('Select a Motion Composition item')
         return item
+    def call_add_story_graphic(self,template,properties=None,track='',start=None,duration=None):
+        from . import motion_templates as T
+        from .motion import validate
+        from .motion_fx import lint
+        self.editing(); p=self.w.project.settings
+        scene,params,d=T.build(template,properties,(p.width,p.height),duration)
+        scene=validate(scene); warnings=lint(scene)
+        item=self.w.add_graphic_object(name='Motion Composition',track=track or '',start=start,duration=d,properties={'scene':scene})
+        if item is None:raise ValueError('Could not add the template')
+        return dict(revision=globals()['revision'](self.w.project),item_id=item.id,template=template,parameters=params,track=item.track,start=round(item.start,3),duration=round(item.duration,3),layers=[n['id'] for n in scene['nodes']],warnings=warnings)
     def call_get_motion_composition(self,item_id,seconds=None):
         from .motion import validate
         from .motion_geometry import layout
@@ -594,11 +786,141 @@ class EditorAPI:
         return dict(revision=revision(self.w.project),item_id=item.id,seconds=seconds,source_range=[item.in_point,item.in_point+item.source_duration],preset=item.graphic_data.get('preset'),parameters=copy.deepcopy(item.graphic_data.get('parameters',{})),scene=scene,
                     layers=[dict(id=n['id'],visible=entries[n['id']]['visible'],bounds=[entries[n['id']]['hit'].boundingRect().x(),entries[n['id']]['hit'].boundingRect().y(),entries[n['id']]['hit'].boundingRect().width(),entries[n['id']]['hit'].boundingRect().height()]) for n in scene['nodes']])
     def call_get_motion_preview(self,item_id,seconds=None,max_width=640):
-        from .motion import draw
         state=self.call_get_motion_composition(item_id,seconds); scene=state['scene']; w,h=scene['canvas']; factor=min(max(160,min(1920,int(max_width)))/w,1920/max(w,h))
-        image=draw(scene,state['seconds'],(max(2,round(w*factor)),max(2,round(h*factor))),self.w.project.settings.fps)
+        size=(max(2,round(w*factor)),max(2,round(h*factor))); renderer='gpu'
+        try:
+            from .motion_gpu_render import scene_image
+            image=scene_image(scene,state['seconds'],size,self.w.project.settings.fps)
+        except Exception:
+            from .motion import draw
+            image=draw(scene,state['seconds'],size,self.w.project.settings.fps); renderer='painter fallback'
         buffer=QBuffer(); buffer.open(QIODevice.WriteOnly); image.save(buffer,'PNG')
-        return {'_mcp_content':[dict(type='text',text=json.dumps(dict(item_id=item_id,seconds=state['seconds'],coordinates='composition source seconds',alpha=True))),dict(type='image',data=bytes(buffer.data().toBase64()).decode(),mimeType='image/png')]}
+        return {'_mcp_content':[dict(type='text',text=json.dumps(dict(item_id=item_id,seconds=state['seconds'],coordinates='composition source seconds',alpha=True,renderer=renderer))),dict(type='image',data=bytes(buffer.data().toBase64()).decode(),mimeType='image/png')]}
+    def call_get_motion_contact_sheet(self,item_id,times,columns=4,cell_width=270):
+        from PySide6.QtGui import QImage,QPainter,QColor,QFont
+        from .motion import validate
+        item=self._motion_item(item_id); scene=validate(item.graphic_data['scene']); w,h=scene['canvas']
+        if not isinstance(times,list) or not 1<=len(times)<=36:raise ValueError('times must list 1-36 composition seconds')
+        columns=max(1,min(8,int(columns))); cell=max(120,min(540,int(cell_width))); ch=round(cell*h/max(1,w)); rows=(len(times)+columns-1)//columns
+        sheet=QImage(columns*cell,rows*(ch+22),QImage.Format_ARGB32); sheet.fill(QColor('#202226')); painter=QPainter(sheet); renderer='gpu'
+        try:
+            for n,t in enumerate(times):
+                t=float(t)
+                if not math.isfinite(t) or t<0:raise ValueError('Invalid composition time')
+                try:
+                    from .motion_gpu_render import scene_image
+                    frame=scene_image(scene,t,(cell,ch),self.w.project.settings.fps)
+                except Exception:
+                    from .motion import draw
+                    frame=draw(scene,t,(cell,ch),self.w.project.settings.fps); renderer='painter fallback'
+                x=(n%columns)*cell; y=(n//columns)*(ch+22); painter.fillRect(x,y,cell,ch,QColor('#000000')); painter.drawImage(x,y,frame)
+                painter.setPen(QColor('#ffd84d')); font=QFont('Inter'); font.setPixelSize(14); painter.setFont(font); painter.drawText(x+6,y+ch+16,'%.2fs'%t)
+        finally:painter.end()
+        buffer=QBuffer(); buffer.open(QIODevice.WriteOnly); sheet.save(buffer,'PNG')
+        return {'_mcp_content':[dict(type='text',text=json.dumps(dict(item_id=item_id,times=[float(t) for t in times],columns=columns,renderer=renderer,coordinates='composition source seconds'))),dict(type='image',data=bytes(buffer.data().toBase64()).decode(),mimeType='image/png')]}
+    def call_motion_scene_file(self,operation,path,revision=None,item_id='',track='',start=None,duration=None,overwrite=False):
+        from .motion import validate as validate_scene
+        file=Path(path).expanduser()
+        if file.suffix.lower()!='.json':raise ValueError('Scene files must be .json (project files are never read or written here)')
+        if operation=='save':
+            item=self._motion_item(item_id)
+            if file.exists() and not overwrite:raise ValueError('File exists; pass overwrite=true to replace it')
+            file.parent.mkdir(parents=True,exist_ok=True)
+            file.write_text(json.dumps(dict(scene=item.graphic_data['scene'],duration=item.duration),indent=1),encoding='utf-8')
+            return dict(path=str(file),item_id=item_id,layers=len(item.graphic_data['scene'].get('nodes',[])))
+        if operation!='load':raise ValueError('operation must be load or save')
+        if not file.is_file() or file.stat().st_size>20*1024*1024:raise ValueError('Scene file not found or larger than 20 MB')
+        data=json.loads(file.read_text(encoding='utf-8')); scene=data.get('scene',data) if isinstance(data,dict) else None
+        if not isinstance(scene,dict):raise ValueError('The file must hold a scene object')
+        p=self.w.project.settings; scene.setdefault('canvas',[p.width,p.height]); scene=validate_scene(scene)
+        length=float(duration or (data.get('duration') if isinstance(data,dict) else None) or 5)
+        if item_id:
+            if revision is None:raise ValueError('revision is required to replace a composition')
+            result=self._motion_edit(revision,item_id,lambda graphic:{**graphic,'scene':scene})
+            return dict(result,layers=len(scene['nodes']))
+        self.editing()
+        item=self.w.add_graphic_object(name='Motion Composition',track=track or '',start=start,duration=length,properties={'scene':scene})
+        if item is None:raise ValueError('Could not add the composition')
+        return dict(revision=globals()['revision'](self.w.project),item_id=item.id,track=item.track,start=round(item.start,3),duration=round(item.duration,3),layers=len(scene['nodes']))
+    def call_list_fonts(self,query='',limit=200):
+        from PySide6.QtGui import QFontDatabase
+        from .caption_fonts import load_fonts
+        from .icons import resource_path
+        load_fonts(); bundled=set()
+        for file in resource_path('assets','fonts').iterdir():
+            if file.suffix.lower() in ('.ttf','.otf'):
+                font_id=QFontDatabase.addApplicationFont(str(file))
+                if font_id>=0:bundled.update(QFontDatabase.applicationFontFamilies(font_id))
+        q=(query or '').lower(); out=[]
+        for family in sorted(set(QFontDatabase.families())|bundled):
+            if q and q not in family.lower():continue
+            styles=QFontDatabase.styles(family)
+            out.append(dict(family=family,bundled=family in bundled,styles=styles,italic=any('italic' in s.lower() or 'oblique' in s.lower() for s in styles)))
+        out.sort(key=lambda f:(not f['bundled'],f['family'].lower()))
+        return dict(fonts=out[:max(1,min(500,int(limit)))],total=len(out),note='Use family names in text layers (font) and runs (font). Italic/bold per run: runs=[{text,italic,bold,font,size,fill}].')
+    def call_add_motion_sound_cues(self,revision,item_id,cues):
+        import threading
+        from .motion_audio_ui import inspect_sound
+        from .motion_audio import validate as validate_cues,at
+        from .ui import Worker
+        self.editing(); project=self.w.project
+        if revision!=globals()['revision'](project):raise ValueError('Project changed. Refresh get_state.')
+        item=project.item_by_id(item_id)
+        if not item or item.role!='graphic' or not is_motion(item.graphic_type) or project.track_states.get(item.track,{}).get('locked'):raise ValueError('Choose an unlocked motion composition.')
+        if not isinstance(cues,list) or not 1<=len(cues)<=MAX_CUES:raise ValueError('Provide 1-%d cues'%MAX_CUES)
+        snapshot=copy.deepcopy(item); scene=snapshot.graphic_data.get('scene',{})
+        if len(scene.get('sound_cues',[]))+len(cues)>MAX_CUES:raise ValueError('A composition supports at most %d sound cues.'%MAX_CUES)
+        probes=[]
+        for raw in cues:
+            if not isinstance(raw,dict) or not raw.get('path'):raise ValueError('Every cue needs a path and time')
+            probe=dict(id=uid(),source=str(Path(raw['path']).resolve()),time=float(raw.get('time',0)),gain_db=float(raw.get('gain_db',0)),event=raw.get('event','time'),node_id=raw.get('node_id',''),channel=raw.get('channel',''),key_time=float(raw.get('key_time',0)))
+            validate_cues([probe])
+            if at(probe,scene) is None:raise ValueError('Cue event does not exist: %s'%probe['node_id'])
+            probes.append(probe)
+        cancel=threading.Event(); settings=copy.deepcopy(self.w.settings); job=self.new_job('Motion sound cues'); job.update(cancellable=True,item_id=item_id,count=len(probes))
+        if not hasattr(self,'_sound_cancels'):self._sound_cancels={}
+        self._sound_cancels[job['id']]=cancel
+        def work():
+            results={}; out=[]
+            for probe in probes:
+                if cancel.is_set():break
+                if probe['source'] not in results:results[probe['source']]=inspect_sound(probe['source'],settings,cancel)
+                result=dict(results[probe['source']]); result.pop('peaks',None); out.append({**probe,**result})
+            return out
+        worker=Worker(work); worker.cancel_callback=cancel.set
+        def done(result):
+            try:
+                if cancel.is_set():job['state']='Cancelled'; return
+                if self.w.project is not project or globals()['revision'](project)!=revision or project.item_by_id(item_id)!=snapshot or getattr(self.w,'_closing',False) or self.w.delivery.running or QApplication.activeModalWidget():raise ValueError('The project changed while sounds were read; nothing was added.')
+                stage=copy.deepcopy(project); stage.item_by_id(item_id).graphic_data['scene'].setdefault('sound_cues',[]).extend(result)
+                validate(stage); self.install(stage); job.update(state='Complete',cue_ids=[c['id'] for c in result],revision=globals()['revision'](stage),undoable=True)
+            except Exception as error:job.update(state='Failed',error=str(error)[-1500:])
+        def failed(error):job.update(state='Cancelled' if cancel.is_set() else 'Failed',error='' if cancel.is_set() else str(error)[-1500:])
+        def finished():
+            if job['state'] in ('Running','Cancelling'):failed('Sound cue import did not complete.')
+            job.update(cancellable=False,finished=__import__('time').time()); self._sound_cancels.pop(job['id'],None)
+        worker.signals.result.connect(done); worker.signals.error.connect(failed); worker.signals.finished.connect(finished)
+        try:self.w.start_worker(worker)
+        except Exception:cancel.set(); failed('Could not start sound import.'); finished(); raise
+        return dict(job)
+    def call_motion_assets(self,operation,revision=None,item_id='',name='',x=None,y=None,time=None,layer_ids=None,category=''):
+        from . import motion_assets as A
+        if operation=='list':
+            items=[entry for entry in A.catalogue() if not category or entry['category']==category]
+            return dict(assets=[{k:v for k,v in entry.items() if k!='file'} for entry in items],categories=list(A.CATEGORIES))
+        if operation=='insert':
+            if revision is None or not item_id or not name:raise ValueError('insert needs revision, item_id and name')
+            item=self._motion_item(item_id); at=item.in_point if time is None else float(time)
+            holder={}
+            def change(graphic):
+                scene,group=A.insert(graphic['scene'],name,x,y,at); holder['group']=group; return {**graphic,'scene':scene}
+            result=self._motion_edit(revision,item_id,change); return dict(result,group_id=holder['group'])
+        if operation=='save':
+            item=self._motion_item(item_id)
+            if not name or not layer_ids:raise ValueError('save needs name and layer_ids')
+            at=item.in_point if time is None else float(time)
+            path=A.save(A.capture(item.graphic_data['scene'],list(layer_ids),name,at)); return dict(saved=name,path=str(path))
+        raise ValueError('operation must be list, insert or save')
     def _motion_edit(self,current_revision,item_id,fn):
         self.editing()
         if current_revision!=revision(self.w.project):raise ValueError('Project changed. Refresh get_state before editing.')
@@ -608,8 +930,24 @@ class EditorAPI:
         return dict(revision=revision(self.w.project),item_id=item_id,undoable=True)
     def call_edit_motion_composition(self,revision,item_id,operations):
         from .motion_editing import apply
+        item=self._motion_item(item_id); operations=self._composition_clock(item,operations)
         def change(data):data['scene']=apply(data['scene'],operations); return data
         return self._motion_edit(revision,item_id,change)
+    @staticmethod
+    def _composition_clock(item,operations):
+        """Operations may set clock:'timeline' to give times in timeline seconds; convert them to composition source seconds."""
+        if not isinstance(operations,list):return operations
+        out=[]
+        for op in operations:
+            if isinstance(op,dict) and op.get('clock')=='timeline':
+                op=dict(op); op.pop('clock'); convert=lambda v:item.in_point+(float(v)-item.start)*item.speed
+                for key in ('time','start'):
+                    if key in op:op[key]=convert(op[key])
+                if isinstance(op.get('times'),list):op['times']=[convert(v) for v in op['times']]
+                for key in ('duration','attack','decay'):
+                    if key in op:op[key]=float(op[key])*item.speed
+            out.append(op)
+        return out
     def call_configure_motion_preset(self,revision,item_id,properties):
         from .motion_presets import update
         return self._motion_edit(revision,item_id,lambda data:update(data,properties))
@@ -890,10 +1228,25 @@ class EditorAPI:
             return result_box['data']
         if cancelled():mark_cancelled()
         return dict(job)
-    def call_get_jobs(self):
+    def call_get_jobs(self,job_id=None,finished=5):
         from .render_queue import elapsed
+        if isinstance(finished,bool) or not isinstance(finished,int) or not 0<=finished<=100:raise ValueError('finished must be 0-100')
         transcripts=getattr(self.w,'transcript_service',None)
-        return dict(tasks=list(self.jobs.values())+(list(transcripts.jobs.values()) if transcripts else []),renders=[dict(id=j.setdefault('assistant_id',uid()),state=j['state'],path=j['output'],elapsed=elapsed(j),error=j.get('error','')) for j in self.w.delivery.jobs],
+        every=list(self.jobs.values())+(list(transcripts.jobs.values()) if transcripts else [])
+        if job_id is not None:
+            job=next((j for j in every if j.get('id')==job_id),None)
+            if job is None:raise ValueError('Unknown job ID')
+            return dict(tasks=[job])
+        def compact(job):
+            row={}
+            for key,value in job.items():
+                size=len(json.dumps(value,default=str))
+                row[key]=value if size<=1500 else f'(omitted, {size} bytes; get_jobs job_id={job.get("id")} returns it)'
+            return row
+        running=[j for j in every if j.get('state') in ('Running','Cancelling')]
+        done=[j for j in every if j.get('state') not in ('Running','Cancelling')]
+        tasks=running+[compact(j) for j in done[-finished:]] if finished else running
+        return dict(tasks=tasks,older_finished=max(0,len(done)-finished),renders=[dict(id=j.setdefault('assistant_id',uid()),state=j['state'],path=j['output'],elapsed=elapsed(j),error=j.get('error','')) for j in self.w.delivery.jobs],
                     rendering=self.w.delivery.running,progress=self.w.delivery.progress.value())
     def call_seek(self,seconds):
         if not isinstance(seconds,(int,float)) or not math.isfinite(seconds) or seconds<0:raise ValueError('Invalid seek time')
@@ -961,6 +1314,20 @@ class EditorAPI:
         d.jobs.append(job); d.refresh()
         if start:d.render_all()
         return dict(id=job['assistant_id'],state=job['state'],path=str(output))
+    def call_exit_application(self,discard_unsaved=False):
+        if not isinstance(discard_unsaved,bool):raise ValueError('discard_unsaved must be true or false')
+        w=self.w
+        if getattr(w,'_closing',False):raise ValueError('The app is already closing.')
+        if w.delivery.running:raise ValueError('A render is running; wait for it to finish or cancel it with render_control, then exit.')
+        from .close_guard import has_unsaved
+        unsaved=has_unsaved(w)
+        if unsaved and not discard_unsaved:
+            raise ValueError(f'"{w.compounds.root().name}" has unsaved changes. Save it with project_file, or call exit_application with discard_unsaved=true to close without saving.')
+        w._exit_confirmed=True
+        def close():
+            if not w.close():w._exit_confirmed=False       # something refused (for example a task that must finish first)
+        QTimer.singleShot(400,close)
+        return dict(state='closing',discarded_unsaved=bool(unsaved),note='Kinetic Cut closes in a moment and the connection will drop. Relaunch the app and enable the connection to continue.')
     def call_render_control(self,operation):
         if operation=='start':self.w.delivery.render_all()
         elif operation=='cancel':
@@ -969,14 +1336,34 @@ class EditorAPI:
         else:raise ValueError('Unknown render operation')
         return self.call_get_jobs()
     def call_editor_command(self,command,arguments=None):
-        import inspect
+        import inspect,shiboken6
         self.editing()
         if command not in COMMANDS:raise ValueError('Unknown editor command')
         function=getattr(self.w,command); arguments=arguments or {}; inspect.signature(function).bind(**arguments)
         job=self.new_job(command)
         def invoke():
             try:
-                function(**arguments); job.update(state='Complete',note='Command returned; poll background/render status before claiming work is finished.')
+                before={i.id for i in self.w.project.timeline}; before_captions={c.id for c in self.w.project.captions}
+                result=function(**arguments)
+                def finish():
+                    created=[i.id for i in self.w.project.timeline if i.id not in before]
+                    made_captions=[c.id for c in self.w.project.captions if c.id not in before_captions]
+                    extra=dict(created_ids=created) if created else {}
+                    if command=='generate_captions':
+                        report=dict(getattr(self.w,'_caption_report',{}) or {})
+                        state=report.get('state')
+                        if state in ('refused','failed','cancelled','discarded'):
+                            job.update(state='Failed',error=report.get('reason') or report.get('error') or state,report=report);return
+                        report['caption_ids']=made_captions[:200]; extra['report']=report
+                    job.update(state='Complete',note='Command returned; poll background/render status before claiming work is finished.',**extra)
+                if command=='generate_captions' and result is not None:
+                    def settle():
+                        if not shiboken6.isValid(self.w):return
+                        if (getattr(self.w,'_caption_report',{}) or {}).get('state')=='running':QTimer.singleShot(300,settle);return
+                        try:finish()
+                        except Exception as error:job.update(state='Failed',error=str(error))
+                    settle()
+                else:finish()
             except Exception as error:job.update(state='Failed',error=str(error))
         QTimer.singleShot(0,invoke); return dict(job)
     def call_inspect_ui(self):

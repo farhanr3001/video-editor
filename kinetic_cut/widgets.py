@@ -491,7 +491,7 @@ class PreviewCanvas(QWidget):
         if item_b and unavailable(self.project.media_by_id(item_b.media_id),item_b):item_b=None
 
         from .native_animation import required,frame as native_frame
-        from .animated_transitions import NAMES as animated_names
+        from .animated_transitions import ALL_NAMES as animated_names
         if trans.name in animated_names or any(i and required(i) for i in (item_a,item_b)):
             def raster(item):
                 if not item:return None
@@ -1083,10 +1083,29 @@ class PreviewCanvas(QWidget):
         elif chosen==below:self.commandRequested.emit("below_webcam",item.id)
 
 
+def slider_to_zoom(value:float)->float:
+    """Timeline zoom slider position (0-1000, logarithmic) to pixels per second."""
+    low,high=TimelineWidget.MIN_ZOOM,TimelineWidget.MAX_ZOOM
+    return low*(high/low)**(max(0.,min(1000.,float(value)))/1000)
+
+
+def zoom_to_slider(pixels_per_second:float)->int:
+    low,high=TimelineWidget.MIN_ZOOM,TimelineWidget.MAX_ZOOM
+    value=max(low,min(high,float(pixels_per_second)))
+    return round(1000*math.log(value/low)/math.log(high/low))
+
+
+def ruler_label(second:int)->str:
+    second=max(0,int(second))
+    if second>=3600:return f"{second//3600}:{second%3600//60:02d}:{second%60:02d}"
+    return f"{second//60:02d}:{second%60:02d}"
+
+
 class TimelineWidget(QAbstractScrollArea):
     itemSelected=Signal(str); trackSelected=Signal(str); playheadChanged=Signal(float); itemChanged=Signal(str)
     mediaDropped=Signal(str,str,float); commandRequested=Signal(str,object); bladeRequested=Signal(str,float)
     zoomChanged=Signal(float)
+    MIN_ZOOM=.05; MAX_ZOOM=240.  # pixels per second; .05 fits a ~4 h stream in a normal timeline width
     LABEL_WIDTH=180; RULER_HEIGHT=32; VIDEO_GAP=26; TRACK_HEIGHT=39; AV_SEPARATOR=8
 
     def __init__(self):
@@ -1105,7 +1124,7 @@ class TimelineWidget(QAbstractScrollArea):
 
     def set_tool(self,tool:str):self.tool=tool; self.viewport().setCursor(Qt.CrossCursor if tool=="blade" else Qt.ArrowCursor)
     def set_zoom(self,value:float,anchor_x:float|None=None):
-        anchor_x=self.viewport().width()/2 if anchor_x is None else anchor_x; anchor=self.time_for_x(anchor_x); self.pixels_per_second=float(min(240,max(.6,value))); self._range(); self.horizontalScrollBar().setValue(round(anchor*self.pixels_per_second-anchor_x+self.LABEL_WIDTH)); self.viewport().update(); self.zoomChanged.emit(self.pixels_per_second)
+        anchor_x=self.viewport().width()/2 if anchor_x is None else anchor_x; anchor=self.time_for_x(anchor_x); self.pixels_per_second=float(min(self.MAX_ZOOM,max(self.MIN_ZOOM,value))); self._range(); self.horizontalScrollBar().setValue(round(anchor*self.pixels_per_second-anchor_x+self.LABEL_WIDTH)); self.viewport().update(); self.zoomChanged.emit(self.pixels_per_second)
     def set_project(self,project:Project):
         self.project=project; project.ensure_track_model()
         if self.selected_track not in self.tracks():self.selected_track=project.video_tracks[0]

@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 def run(path,settings,offset=0.,progress=None,words_per_caption=5,hold_seconds=.5,
-        require_word_timestamps=False,cancel_check=None):
+        require_word_timestamps=False,cancel_check=None,cut_points=(),join_points=()):
     from .captions import _check_cancel,CaptionBackendError
     from .model import Caption,CaptionStyle
     from .process import popen
@@ -20,7 +20,7 @@ def run(path,settings,offset=0.,progress=None,words_per_caption=5,hold_seconds=.
         # Never serialize unrelated credentials/settings into an inference request.
         allowed=('whisper_model','whisper_cli','whisper_model_path','caption_language','caption_device','caption_alignment','caption_vocabulary','caption_measure_emphasis','ffmpeg')
         request.write_text(json.dumps(dict(path=str(Path(path).resolve()),settings={k:settings[k] for k in allowed if k in settings},offset=offset,
-            words_per_caption=words_per_caption,hold_seconds=hold_seconds,require_word_timestamps=require_word_timestamps)),encoding='utf-8')
+            words_per_caption=words_per_caption,hold_seconds=hold_seconds,require_word_timestamps=require_word_timestamps,cut_points=list(cut_points),join_points=list(join_points))),encoding='utf-8')
         command=[sys.executable]
         if not getattr(sys,'frozen',False):command.append(str(Path(__file__).resolve().parents[1]/'main.py'))
         command+=['--caption-worker',str(request)]

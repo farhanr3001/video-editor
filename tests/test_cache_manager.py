@@ -42,8 +42,8 @@ class CacheManagerTests(unittest.TestCase):
         window=MainWindow(); window.autosave_timer.stop()
         try:
             file_menu=window.menuBar().actions()[0].menu()
-            self.assertEqual([action.text() for action in file_menu.actions()[-4:]],
-                             ['Cache Manager…','Optional downloads…','Check for updates…','UI Themes…'])
+            self.assertEqual([action.text() for action in file_menu.actions()[-6:] if not action.isSeparator()],
+                             ['Cache Manager…','Optional downloads…','Check for updates…','UI Themes…','Exit'])
             for theme in ('default','final_cut_obsidian','ableton_gray'):
                 window.apply_theme(theme,save=False)
                 dialog=CacheManagerDialog(window)

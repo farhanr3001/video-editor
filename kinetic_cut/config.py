@@ -45,6 +45,7 @@ DEFAULT_SETTINGS = {
     "elevenlabs_api_key": "",
     "effects_category": "All Effects",
     "shortcuts": DEFAULT_SHORTCUTS,
+    "clear_playback_cache_on_exit": True,
 }
 
 

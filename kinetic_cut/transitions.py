@@ -49,6 +49,7 @@ TRANSITION_SUBSECTIONS: dict[str, list[str]] = {
 
 from . import animated_transitions as animated
 TRANSITION_SUBSECTIONS.update(animated.CATEGORIES)
+TRANSITION_SUBSECTIONS.update(animated.EXTRA_CATEGORIES)
 
 # Flat list of all transition names
 TRANSITION_NAMES: list[str] = [name for names in TRANSITION_SUBSECTIONS.values() for name in names]
@@ -119,6 +120,7 @@ TRANSITION_DESCRIPTIONS: dict[str, str] = {
 
 TRANSITION_DESCRIPTIONS.update(animated.DESCRIPTIONS)
 TRANSITION_ICONS.update({name:('puzzle' if 'Puzzle' in name else 'sparkles' if name in animated.CATEGORIES['Pieces & Particles'] else 'waves' if name in animated.CATEGORIES['Distortion & Flow'] else 'shapes') for name in animated.NAMES})
+TRANSITION_ICONS.update({name:('layers' if name in animated.EXTRA_CATEGORIES['Motion & Camera'] else 'shapes') for name in animated.EXTRA_NAMES})
 
 # FFmpeg xfade transition filter mapping
 XFADE_MAP: dict[str, str] = {
@@ -211,7 +213,7 @@ class Transition(IndexedRecord):
 
 def default_transition_properties(name: str) -> dict[str, Any]:
     """Return default parameters for the specified transition name."""
-    if name in animated.NAMES:return animated.defaults(name)
+    if name in animated.ALL_NAMES:return animated.defaults(name)
     props: dict[str, Any] = {
         "easing": "Ease In-Out",
     }
@@ -327,7 +329,7 @@ def composite_transition(
     Zero lag implementation leveraging native QPainter clipping, opacity, transforms,
     and composition modes.
     """
-    if transition.name in animated.NAMES:
+    if transition.name in animated.ALL_NAMES:
         image=animated.composite(img_a,img_b,transition,raw_progress,(max(1,round(dest_rect.width())),max(1,round(dest_rect.height()))))
         painter.drawImage(dest_rect,image)
         return

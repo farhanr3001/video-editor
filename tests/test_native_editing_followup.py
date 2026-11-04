@@ -105,7 +105,10 @@ class NativeEditingFollowupTests(unittest.TestCase):
                     self.assertAlmostEqual(yy.max()-yy.min()+1,112*math.sin(angle)+72*math.cos(angle),delta=2)
                     with tempfile.TemporaryDirectory() as temp,patch('kinetic_cut.config.CACHE_DIR',Path(temp)):
                         stage=prepare(p,None,None)
-                        with av.open(stage.media[-1].path) as video:np.testing.assert_array_equal(next(video.decode(video=0)).to_ndarray(format='rgba'),pixels)
+                        from kinetic_cut.native_animation import is_motion_graphic
+                        # Motion graphics are drawn by the GPU stage (not the CPU painter), so only painter graphics are bit-exact.
+                        if not is_motion_graphic(item):
+                            with av.open(stage.media[-1].path) as video:np.testing.assert_array_equal(next(video.decode(video=0)).to_ndarray(format='rgba'),pixels)
                     continue
                 self.assertTrue(events)
                 self.assertTrue(all('\\fscx140.000\\fscy180.000\\frz-37.000' in event for event in events))

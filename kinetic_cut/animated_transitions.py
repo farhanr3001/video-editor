@@ -14,6 +14,25 @@ CATEGORIES={
  'Geometric Reveals':['Circle Iris','Diamond Iris','Star Iris','Venetian Blinds','Chevron Sweep','Diagonal Sweep','Hexagon Reveal','Pinwheel'],
 }
 NAMES=tuple(n for group in CATEGORIES.values() for n in group)
+# Extra transitions are rendered by the exact CPU path (preview and export). They are deliberately NOT in NAMES, because
+# NAMES index the compiled GPU shader/native modes. Adding them to the shader build needs a native rebuild.
+EXTRA_CATEGORIES={
+ 'Motion & Camera':['Elastic Push','Parallax Slide','Squeeze Slide','Stripe Slide','Barn Doors','Vertical Collapse','Card Flip','Page Peel','Spin Zoom','Zoom Punch','Camera Shake Cut'],
+ 'Cuts & Reveals':['Glitch Slice','Strobe Cut','Spiral Wipe','Checkerboard Zoom','Random Bars','Ink Bleed'],
+}
+EXTRA_NAMES=tuple(n for group in EXTRA_CATEGORIES.values() for n in group)
+ALL_NAMES=NAMES+EXTRA_NAMES
+EXTRA_MODE_BASE=50  # modes 1-24 are the paired transitions, 25-49 the legacy native ones
+def mode_of(name):
+    return NAMES.index(name)+1 if name in NAMES else EXTRA_MODE_BASE+EXTRA_NAMES.index(name)
+def native_names():
+    """Transitions the compiled native exporter can render. The extras count only once gpu_export.dll has been rebuilt with their
+    HLSL; scripts/build_gpu_export.ps1 records the highest supported mode in assets/native/gpu_export.modes."""
+    try:
+        from .icons import resource_path
+        limit=int(resource_path('assets','native','gpu_export.modes').read_text().strip())
+    except (OSError,ValueError,ImportError):limit=EXTRA_MODE_BASE-1
+    return NAMES+tuple(n for n in EXTRA_NAMES if mode_of(n)<=limit)
 DESCRIPTIONS=dict(zip(NAMES,[
  'A flowing wave sweeps the next shot into view.',
  'Concentric water ripples bend both shots through the cut.',
@@ -46,6 +65,32 @@ BASE=[('amount','Amount',0,2,1,.05),('detail','Detail',2,32,8,1),('seed','Patter
 CONTROL_SLOTS=[(0,1),(0,1,3,4),(0,3,4),(0,3,4),(0,1,2),(0,3,4),(0,1,3,4),(0,1),
  (0,1,2),(0,1,2),(0,1,2,3,4,5),(0,1,2,3,4,5),(1,2),(1,),(1,2),(0,1),
  (0,3,4),(0,3,4,5),(0,1,3,4,5),(0,1,5),(0,4),(0,5),(1,2),(0,1,3,4,5)]
+EXTRA_DESCRIPTIONS={
+ 'Elastic Push':'Both shots push across the frame with an elastic overshoot. Angle sets the direction.',
+ 'Parallax Slide':'The incoming shot slides over a slower moving outgoing shot for depth. Angle sets the direction.',
+ 'Squeeze Slide':'The outgoing shot squeezes sideways as the incoming shot is squeezed into view.',
+ 'Stripe Slide':'Horizontal stripes slide out in alternating directions to uncover the next shot.',
+ 'Barn Doors':'The shot splits along an axis and the halves slide apart. Angle sets the axis.',
+ 'Vertical Collapse':'The outgoing shot collapses to a line, then a dot, like an old TV switching off.',
+ 'Card Flip':'The outgoing shot turns edge-on like a card and the incoming shot turns face-on.',
+ 'Page Peel':'The outgoing shot peels away along a moving fold line. Angle sets the peel direction.',
+ 'Spin Zoom':'Both shots spin and zoom through the cut.',
+ 'Zoom Punch':'A fast punch-in on the outgoing shot lands on a zoomed incoming shot that settles.',
+ 'Camera Shake Cut':'A violent camera shake hides a hard cut.',
+ 'Glitch Slice':'Horizontal slices jitter sideways and swap to the next shot at random times.',
+ 'Strobe Cut':'Rapidly alternates between both shots before landing on the next one.',
+ 'Spiral Wipe':'A spiral edge wipes the next shot in from the centre.',
+ 'Checkerboard Zoom':'Checkerboard squares grow in two waves to reveal the next shot.',
+ 'Random Bars':'Random bars across an axis reveal the next shot. Angle sets the axis.',
+ 'Ink Bleed':'Organic ink-like blobs spread until the next shot fills the frame.'}
+DESCRIPTIONS.update(EXTRA_DESCRIPTIONS)
+EXTRA_SLOTS={'Elastic Push':(0,5),'Parallax Slide':(0,5),'Squeeze Slide':(),'Stripe Slide':(1,),'Barn Doors':(5,),'Vertical Collapse':(),'Card Flip':(),'Page Peel':(5,),
+ 'Spin Zoom':(0,3,4),'Zoom Punch':(0,3,4),'Camera Shake Cut':(0,1,2),'Glitch Slice':(0,1,2),'Strobe Cut':(1,),'Spiral Wipe':(1,3,4,5),'Checkerboard Zoom':(1,),
+ 'Random Bars':(1,2,5),'Ink Bleed':(0,1,2)}
+EXTRA_LABELS={'Elastic Push':('Overshoot',''),'Parallax Slide':('Parallax',''),'Stripe Slide':('','Stripes'),'Spin Zoom':('Spin and zoom',''),'Zoom Punch':('Punch strength',''),
+ 'Camera Shake Cut':('Shake strength','Shake speed'),'Glitch Slice':('Glitch distance','Slices'),'Strobe Cut':('','Flashes'),'Spiral Wipe':('','Spiral tightness'),
+ 'Checkerboard Zoom':('','Squares'),'Random Bars':('','Bars'),'Ink Bleed':('Edge softness','Blob size')}
+
 CONTROLS={name:[BASE[n] for n in slots] for name,slots in zip(NAMES,CONTROL_SLOTS)}
 CONTROL_LABELS={
  'Wave Sweep':('Wave depth','Wave frequency'),'Liquid Ripple':('Ripple depth','Ripple frequency'),
@@ -61,6 +106,10 @@ CONTROL_LABELS={
 CONTROLS={name:[(key,CONTROL_LABELS[name][0 if key=='amount' else 1] if key in ('amount','detail') else label,lo,hi,default,step)
                 for key,label,lo,hi,default,step in rows] for name,rows in CONTROLS.items()}
 
+for _name,_slots in EXTRA_SLOTS.items():
+ _labels=EXTRA_LABELS.get(_name,('',''))
+ CONTROLS[_name]=[(key,(_labels[0 if key=='amount' else 1] if key in ('amount','detail') else label),lo,hi,default,step) for key,label,lo,hi,default,step in (BASE[n] for n in _slots)]
+
 def values(properties):
  result=[]
  for key,_,lo,hi,default,_ in BASE:
@@ -74,8 +123,9 @@ def defaults(name):
  return dict(easing='Ease In-Out',**{r[0]:r[4] for r in BASE})
 
 def descriptor(transition):
+ assert transition.name in ALL_NAMES
  from .transitions import apply_easing
- return dict(mode=NAMES.index(transition.name)+1,params=values(transition.properties),
+ return dict(mode=mode_of(transition.name),params=values(transition.properties),
              easing=(transition.properties or {}).get('easing','Ease In-Out'))
 
 U,V,T=ref('u'),ref('v'),ref('t')
@@ -86,6 +136,57 @@ def step(a,b):return choose(gt(b,a),1,0)
 def rotate(x,y,a):return x*cos(a)-y*sin(a),x*sin(a)+y*cos(a)
 def noise(x,y):return hash_noise(x,y,P[2])+.5
 def reveal(threshold,feather=.025):return smooth(threshold-feather,threshold+feather,T*1.1-.05)
+
+def inside(u,v):return step(0,u)*step(u,1)*step(0,v)*step(v,1)
+def vnoise(x,y):
+ ix=floor(x);iy=floor(y);fx=fract(x);fy=fract(y);sx=fx*fx*(3-2*fx);sy=fy*fy*(3-2*fy)
+ return mix(mix(noise(ix,iy),noise(ix+1,iy),sx),mix(noise(ix,iy+1),noise(ix+1,iy+1),sx),sy)
+
+def extra(name):
+ amount,detail,seed,cx,cy,angle=P;turn=angle*PI/180;peak=sin(T*PI);dx=cos(turn);dy=sin(turn)
+ x=(U-cx)*ASPECT;y=V-cy;r=sqrt(x*x+y*y+.00000001);a=atan(y,x)
+ au,av,bu,bv,w=U,V,U,V,T
+ if name=='Elastic Push':
+  s=T+amount*.08*sin(T*PI*2)*(1-T);au=U+s*dx;av=V+s*dy;bu=au-dx;bv=av-dy;w=1-inside(au,av)
+ elif name=='Parallax Slide':
+  au=U+T*.3*amount*dx;av=V+T*.3*amount*dy;bu=U+(T-1)*dx;bv=V+(T-1)*dy;w=inside(bu,bv)
+ elif name=='Squeeze Slide':
+  edge=maximum(.001,1-T);au=U/edge;bu=(U-edge)/maximum(.001,T);w=step(edge,U)
+ elif name=='Stripe Slide':
+  band=floor(V*detail);sign=choose(gt(fract(band*.5),.25),1,-1);au=U+sign*T;w=1-inside(au,V)
+ elif name=='Barn Doors':
+  axis=(U-.5)*dx+(V-.5)*dy;side=choose(gt(axis,0),1,-1);au=U-side*T*.5*dx;av=V-side*T*.5*dy
+  moved=(au-.5)*dx+(av-.5)*dy;w=1-step(0,axis*moved)*inside(au,av)
+ elif name=='Vertical Collapse':
+  s1=maximum(.003,1-clamp(T/.6));s2=maximum(.003,1-clamp((T-.6)/.4));au=.5+(U-.5)/s2;av=.5+(V-.5)/s1;w=1-inside(au,av)
+ elif name=='Card Flip':
+  scale=maximum(.02,abs_(cos(T*PI)));xs=.5+(U-.5)/scale;ins=inside(xs,V);first=gt(.5,T)
+  au=choose(first,xs,U);bu=choose(first,U,xs);w=choose(first,1-ins,ins)
+ elif name=='Page Peel':
+  extent=.5*(abs_(dx)+abs_(dy));fold=extent-T*2*extent;c=(U-.5)*dx+(V-.5)*dy;past=gt(c,fold);dist=c-fold
+  su=U-2*dist*dx;sv=V-2*dist*dy;au=choose(past,su,U);av=choose(past,sv,V);w=choose(past,1-inside(su,sv)*step(dist,.22+.1*amount),0)
+ elif name=='Spin Zoom':
+  zoom=1+peak*amount*1.5;spin=amount*PI*T;ax,ay=rotate(x/zoom,y/zoom,spin);bx,by=rotate(x/zoom,y/zoom,spin-amount*PI)
+  au,av=cx+ax/ASPECT,cy+ay;bu,bv=cx+bx/ASPECT,cy+by;w=smooth(.4,.6,T)
+ elif name=='Zoom Punch':
+  za=1+T*T*amount*4;zb=1+(1-T)*(1-T)*amount*4;au=cx+(U-cx)/za;av=cy+(V-cy)/za;bu=cx+(U-cx)/zb;bv=cy+(V-cy)/zb;w=smooth(.47,.53,T)
+ elif name=='Camera Shake Cut':
+  shake=amount*.04*peak;ju=shake*sin(T*detail*9+seed);jv=shake*sin(T*detail*11+2+seed);au=U+ju;av=V+jv;bu=U+ju;bv=V+jv;w=smooth(.47,.53,T)
+ elif name=='Glitch Slice':
+  band=floor(V*detail*3);off=(noise(band,floor(T*14)+seed)-.5)*amount*.5*peak;au=U+off;bu=U+off
+  edge=noise(band,seed+7)*.6+.2;w=smooth(edge-.02,edge+.02,T)
+ elif name=='Strobe Cut':
+  w=choose(gt(T,.8),1,choose(gt(.2,T),0,choose(gt(fract(T*floor(detail)),.5),1,0)))
+ elif name=='Spiral Wipe':
+  w=reveal(fract((a+turn)/(2*PI)+r*detail*.12),.03)
+ elif name=='Checkerboard Zoom':
+  cols=maximum(2,detail);rows=maximum(2,floor(cols/ASPECT));parity=choose(gt(fract((floor(U*cols)+floor(V*rows))*.5),.25),1,0)
+  lx=fract(U*cols)-.5;ly=fract(V*rows)-.5;phase=clamp(T*2-parity);w=step(maximum(abs_(lx),abs_(ly)),phase*.5+.0001*phase)
+ elif name=='Random Bars':
+  c=(U-.5)*dx+(V-.5)*dy+.5;w=reveal(noise(floor(c*detail),seed),.01)
+ elif name=='Ink Bleed':
+  px=U*ASPECT*detail*.5;py=V*detail*.5;field=vnoise(px,py)*.6+vnoise(px*2.3+seed,py*2.3)*.4;w=reveal(field,.03+.04*amount)
+ return au,av,bu,bv,w
 
 def graph(name):
  amount,detail,seed,cx,cy,angle=P
@@ -189,13 +290,14 @@ def graph(name):
     owner_x=choose(near,ix,owner_x);owner_y=choose(near,ry,owner_y);best=minimum(best,distance)
   w=reveal(noise(owner_x,owner_y),.025)
  elif name=='Pinwheel':w=reveal(fract((a+turn)/(2*PI)*maximum(2,floor(detail*.5))),.015+.025*amount)
+ if name in EXTRA_NAMES:au,av,bu,bv,w=extra(name)
  # Enforce exact endpoints independently of every spatial mask/soft edge.
  w=choose(gt(T,.999999),1,choose(gt(.000001,T),0,w))
  au=choose(gt(.000001,T),U,au);av=choose(gt(.000001,T),V,av)
  bu=choose(gt(T,.999999),U,bu);bv=choose(gt(T,.999999),V,bv)
  return (au,av,bu,bv,clamp(w))
 
-GRAPHS={n:graph(n) for n in NAMES}
+GRAPHS={n:graph(n) for n in ALL_NAMES}
 
 def shader_map(name,backend):
  graph=GRAPHS[name];bindings={};lines=[]

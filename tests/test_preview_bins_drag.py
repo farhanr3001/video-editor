@@ -114,8 +114,8 @@ class PreviewBinsDragTests(unittest.TestCase):
         move=QDragMoveEvent(target,Qt.CopyAction,mime,Qt.LeftButton,Qt.NoModifier); QApplication.sendEvent(t.viewport(),move); self.assertTrue(move.isAccepted())
         drop=QDropEvent(QPointF(target),Qt.CopyAction,mime,Qt.LeftButton,Qt.NoModifier); QApplication.sendEvent(t.viewport(),drop); self.assertTrue(drop.isAccepted()); self.assertTrue(w.project.timeline)
     def test_zoom_out_is_twenty_times_wider_and_old_limit_at_slider_midpoint(self):
-        w=self.w; w.timeline_zoom.setValue(500); self.assertAlmostEqual(w.timeline.pixels_per_second,12)
-        w.timeline_zoom.setValue(0); self.assertAlmostEqual(w.timeline.pixels_per_second,.6)
+        w=self.w; w.timeline_zoom.setValue(500); self.assertAlmostEqual(w.timeline.pixels_per_second,(.05*240)**.5)
+        w.timeline_zoom.setValue(0); self.assertAlmostEqual(w.timeline.pixels_per_second,.05)
         w.timeline_zoom.setValue(1000); self.assertAlmostEqual(w.timeline.pixels_per_second,240)
         w.timeline.set_zoom(1); event=QWheelEvent(QPointF(500,180),QPointF(500,180),QPoint(),QPoint(0,-120),Qt.NoButton,Qt.AltModifier,Qt.NoScrollPhase,False)
         QApplication.sendEvent(w.timeline.viewport(),event); self.assertLess(w.timeline.pixels_per_second,1); w.timeline.viewport().grab()

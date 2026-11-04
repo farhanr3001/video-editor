@@ -129,7 +129,9 @@ class CaptionStyleTests(unittest.TestCase):
     def test_case_edits_preserve_metadata_but_replacements_clear_it(self):
         c=Caption('a',0,2,'Hello world',word_timings=[dict(text='Hello',start=0,end=.3),dict(text='world',start=1,end=1.5)],highlighted_words=[1])
         set_text(c,'HELLO WORLD'); self.assertEqual(c.highlighted_words,[1]); self.assertEqual(timings(c)[1],(1,1.5))
-        set_text(c,'Different sentence'); self.assertEqual(c.highlighted_words,[]); self.assertEqual(c.word_timings,[])
+        set_text(c,'Different sentence'); self.assertEqual(c.highlighted_words,[])
+        self.assertEqual([(w['text'],w['estimated']) for w in c.word_timings],[('Different',True),('sentence',True)])   # estimated inside the old span, not discarded
+        self.assertEqual((c.word_timings[0]['start'],c.word_timings[-1]['end']),(0,1.5))
     def test_font_menu_short_and_legacy_font_preserved(self):
         from kinetic_cut.caption_fonts import CaptionFontCombo
         picker=CaptionFontCombo(); self.assertLess(picker.count(),25); self.assertGreaterEqual(picker.findText('Nirmala UI'),0)

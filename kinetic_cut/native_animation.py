@@ -1,6 +1,6 @@
 """Shared native title painting and lossless animated overlay preparation."""
 import copy,hashlib,json,math,os,tempfile
-from contextlib import contextmanager
+from contextlib import closing,contextmanager,nullcontext
 from threading import RLock
 from pathlib import Path
 from fractions import Fraction
@@ -74,6 +74,42 @@ def frame(project,item,t,size=None):
     finally:painter.end()
     return image
 
+def is_motion_graphic(item):
+    from .motion_gpu import is_motion
+    return is_motion(item)
+
+def gpu_frames(project,item,count,directory,check):
+    """Frames of a motion graphic drawn by the GPU in a producer process (same QML as the preview).
+
+    A separate process owns the Qt Quick window, so this also works from export worker threads. Frames arrive as raw RGBA
+    over a pipe; the CPU only encodes them.
+    """
+    import numpy as np,subprocess,sys
+    fps=project.settings.fps;width,height=project.settings.width,project.settings.height
+    stage=copy.copy(project);stage.timeline=[item];stage.captions=[];stage.transitions=[]
+    spec=Path(directory)/'motion-gpu.json'
+    spec.write_text(json.dumps(dict(project=stage.to_dict(),first=math.ceil(item.start*fps-1e-7),frames=count,native_animation=True)),encoding='utf-8')
+    command=[sys.executable]+([] if getattr(sys,'frozen',False) else [str(Path(__file__).resolve().parent.parent/'main.py')])+['--preview-effect-source',str(spec)]
+    flags=getattr(subprocess,'CREATE_NO_WINDOW',0)
+    # The worker reports Python errors in its own producer-error log. Avoid
+    # passing a temporary-directory file handle through Windows child startup.
+    process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,creationflags=flags)
+    size=width*height*4
+    try:
+        for _ in range(count):
+            check();data=process.stdout.read(size)
+            if len(data)!=size:
+                process.wait(timeout=10)
+                log=spec.with_suffix('.producer-error.log')
+                detail=log.read_text(encoding='utf-8',errors='replace')[-3000:] if log.is_file() else ''
+                raise RuntimeError(f'GPU motion renderer stopped early (exit {process.returncode}).\n{detail}'.strip())
+            yield np.frombuffer(data,np.uint8).reshape(height,width,4).copy()
+    finally:
+        try:process.stdout.close()
+        except OSError:pass
+        if process.poll() is None:process.kill()
+        process.wait()
+
 def prepare(project,progress,cancel):
     items=[i for i in project.timeline if required(i) and not i.muted and project.track_states.get(i.track,{}).get('visible',True)]
     if not items:return project
@@ -99,11 +135,16 @@ def prepare(project,progress,cancel):
             count=math.ceil(item.duration*fps-1e-7)
             with tempfile.TemporaryDirectory(prefix='pending-',dir=directory) as temp:
                 pending=Path(temp)/'animation.mkv'
-                with av.open(str(pending),'w') as movie:
+                gpu=gpu_frames(project,item,count,pending.parent,check) if is_motion_graphic(item) else None
+                with av.open(str(pending),'w') as movie, (closing(gpu) if gpu is not None else nullcontext()):
                     stream=movie.add_stream('ffv1',rate=Fraction(str(fps))); stream.width=project.settings.width; stream.height=project.settings.height; stream.pix_fmt='bgra'; stream.options={'level':'3'}
                     for n in range(count):
-                        check(); image=frame(project,item,n/fps)
-                        pixels=np.frombuffer(image.constBits(),np.uint8).reshape(image.height(),image.bytesPerLine()//4,4)[:,:image.width()].copy()
+                        check()
+                        if gpu is not None:
+                            pixels=next(gpu)
+                        else:
+                            image=frame(project,item,n/fps)
+                            pixels=np.frombuffer(image.constBits(),np.uint8).reshape(image.height(),image.bytesPerLine()//4,4)[:,:image.width()].copy()
                         video=av.VideoFrame.from_ndarray(pixels,format='rgba'); video.pts=n
                         for packet in stream.encode(video):movie.mux(packet)
                         if n%15==0 and progress:progress(0,f'Preparing motion graphics · {n/fps:.1f}s / {item.duration:.1f}s')

@@ -96,8 +96,12 @@ def occurrences(project, media_id, start, end):
     return rows
 
 
-def search(project, settings, query='', media_ids=None, limit=200, offset=0):
+def search(project, settings, query='', media_ids=None, limit=200, offset=0, start=None, end=None, detail='full'):
     if isinstance(limit,bool) or not isinstance(limit,int) or not 1 <= limit <= 500 or isinstance(offset,bool) or not isinstance(offset,int) or offset < 0: raise ValueError('Use limit 1–500 and a nonnegative integer offset.')
+    if detail not in ('full', 'text'): raise ValueError('detail must be full or text')
+    for bound in (start, end):
+        if bound is not None and (isinstance(bound, bool) or not isinstance(bound, (int, float)) or bound < 0): raise ValueError('start and end are nonnegative source seconds')
+    if start is not None and end is not None and end <= start: raise ValueError('end must be after start')
     wanted = None if media_ids is None else set(media_ids)
     terms = str(query).casefold().split(); matches = []; indexed = []; missing = []
     for media in project.media:
@@ -106,7 +110,11 @@ def search(project, settings, query='', media_ids=None, limit=200, offset=0):
         if data is None: missing.append(media.id); continue
         indexed.append(media.id)
         for index, row in enumerate(data['segments']):
+            if start is not None and row['end'] <= start or end is not None and row['start'] >= end: continue
             if all(term in row['text'].casefold() for term in terms):
+                if detail == 'text':
+                    matches.append(dict(media_id=media.id, segment=index, start=row['start'], end=row['end'], text=row['text']))
+                    continue
                 matches.append(dict(media_id=media.id, name=media.name, segment=index,
                                     timing=data['timing'], **copy.deepcopy(row),
                                     occurrences=occurrences(project,media.id,row['start'],row['end'])))

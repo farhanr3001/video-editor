@@ -36,6 +36,11 @@ def samples(project,item,frames):
         curves(node,convert,tail)
         if node.get('mask'):curves(node['mask'],convert,tail)
         for boundary in (node.get('start',0),node.get('end',1e5)):interval(convert(boundary),convert(boundary+tail))
+        if node.get('kind')=='video':interval(convert(node.get('start',0)),convert(min(node.get('end',1e5),item.in_point+item.source_duration)))
+        parent=next((n for n in scene['nodes'] if n['id']==node.get('parent','')),None)
+        if parent and isinstance(parent.get('layout'),dict):
+            reflow=parent['layout'].get('reflow',.35)
+            interval(convert(node.get('start',0)),convert(node.get('start',0)+reflow+tail)); interval(convert(node.get('end',1e5)-reflow),convert(node.get('end',1e5)+tail))
         mode=node.get('text_mode','none')
         if mode=='typewriter' and node.get('caret',False):return list(range(frames))
         if mode in ('character','word','typewriter','rolling'):
@@ -45,7 +50,7 @@ def samples(project,item,frames):
     return sorted(result)
 
 
-def layers(project,items,directory):
+def layers(project,items,directory,pairs=()):
     fps=project.settings.fps;width,height=project.settings.width,project.settings.height
     groups={}
     for item in items:
@@ -65,9 +70,13 @@ def layers(project,items,directory):
                 if 0<=n<count:selected.add(n)
             for node in item.graphic_data.get('scene',{}).get('nodes',[]):
                 if node.get('kind')=='image' and not Path(node.get('source','')).is_file():raise ValueError('Motion image is missing: '+str(node.get('source','')))
+        ids={i.id for i in group};mine=[t for t in pairs if t.left_item_id in ids and t.right_item_id in ids]
+        graphic_transitions=[dict(transition=t.to_dict(),first=math.ceil(t.start*fps-1e-7),last=math.ceil(t.end*fps-1e-7)) for t in mine]
+        for x in graphic_transitions:
+            for g in range(max(first,x['first']),min(last,x['last'])):selected.add(g-first)
         stage=copy.copy(project);stage.timeline=group;stage.captions=[];stage.transitions=[]
         path=Path(directory)/f'native-graphics-{index}.json';marker=str(path.with_suffix('.rgba'));selected=sorted(selected)
-        path.write_text(json.dumps(dict(project=stage.to_dict(),first=first,frames=count,sample_frames=selected,native_animation=True)),encoding='utf-8')
+        path.write_text(json.dumps(dict(project=stage.to_dict(),first=first,frames=count,sample_frames=selected,native_animation=True,graphic_transitions=graphic_transitions)),encoding='utf-8')
         command=[sys.executable]+([] if getattr(sys,'frozen',False) else [str(Path(__file__).resolve().parent.parent/'main.py')])+['--preview-effect-source',str(path)]
         sources[marker]=dict(command=command,width=width,height=height,fps=fps,frames=count,sample_frames=selected,log=str(path.with_suffix('.log')))
         output.append(dict(id=f'__native_graphics_{index}',track=track,path=marker,cpu=True,still=False,clock=marker,start=first/fps,end=last/fps,in_point=0.,speed=1.,size=[width,height],crop=[0,0,1,1],box=[0,0,width,height],opacity=1.,operations=[]))

@@ -89,6 +89,22 @@ def apply(project, item, values):
                           vertical=values['background_strength'])
 
 
+def records_from_settings(settings):
+    """Validated saved presets, in saved order (shared by the inspector and Auto 3-layer layout)."""
+    records = []
+    raw = settings.get(KEY, [])
+    if isinstance(raw, list):
+        for record in raw[:200]:
+            try:
+                name, identity = record['name'], record['id']
+                if not isinstance(name, str) or not name.strip() or len(name) > 80: continue
+                if not isinstance(identity, str) or not identity or len(identity) > 80: continue
+                if any(r['id'] == identity or r['name'].casefold() == name.strip().casefold() for r in records): continue
+                records.append(dict(id=identity, name=name.strip(), values=validate(record['values'])))
+            except (KeyError, TypeError, ValueError): continue
+    return records
+
+
 class PresetNameDialog(QDialog):
     def __init__(self, parent, records):
         super().__init__(parent); self.setWindowTitle('Save video preset'); self.setMinimumWidth(320)
@@ -128,17 +144,7 @@ class VideoPresetStrip(QWidget):
         self.reload()
 
     def reload(self, selected=None):
-        records = []
-        raw = self.window.settings.get(KEY, [])
-        if isinstance(raw, list):
-            for record in raw[:200]:
-                try:
-                    name, identity = record['name'], record['id']
-                    if not isinstance(name, str) or not name.strip() or len(name) > 80: continue
-                    if not isinstance(identity, str) or not identity or len(identity) > 80: continue
-                    if any(r['id'] == identity or r['name'].casefold() == name.strip().casefold() for r in records): continue
-                    records.append(dict(id=identity, name=name.strip(), values=validate(record['values'])))
-                except (KeyError, TypeError, ValueError): continue
+        records = records_from_settings(self.window.settings)
         self.records = records
         self.combo.blockSignals(True); self.combo.clear()
         self.combo.addItem('No preset selected' if records else 'No presets saved', None)

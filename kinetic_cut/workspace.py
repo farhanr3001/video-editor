@@ -1129,6 +1129,7 @@ def build_workspace(w):
     w.select_tool.setChecked(True)
     w.transform_box_tool=tool_button("box-select",lambda checked:w.preview.set_transform_controls_visible(checked and not w.transport.playing and w.current_page==0),"Show on-screen transform controls",True); w.transform_box_tool.setChecked(True); bar.insertWidget(1,w.transform_box_tool)
     w.crop_tool=tool_button("crop",lambda:w.frame_source(w.timeline.selected_id),"Crop selected clip… · C"); bar.insertWidget(2,w.crop_tool)
+    w.auto_layout_tool=tool_button("layers",w.set_auto_layout,"Auto 3-layer layout · new video drops get a blurred background, fitted content and a webcam layer",True); bar.insertWidget(3,w.auto_layout_tool)
     from .timeline_retime_control import TimelineRetimeButton
     w.retime_button=TimelineRetimeButton(w); bar.addWidget(w.retime_button)
     def toggle_links(checked):
@@ -1139,10 +1140,11 @@ def build_workspace(w):
     w.snap_tool=tool_button("magnet",w.toggle_snapping,"Magnetic Snapping · N",True); w.snap_tool.setChecked(True); bar.addWidget(w.snap_tool); bar.addWidget(w.link_toggle)
     undo_tool=tool_button("rotate-ccw",w.undo,"Undo · Ctrl+Z"); redo_tool=tool_button("rotate-cw",w.redo,"Redo · Ctrl+Shift+Z")
     bar.addWidget(undo_tool); bar.addWidget(redo_tool)
-    w.timeline_edit_tools=[w.select_tool,w.transform_box_tool,w.crop_tool,w.blade_tool,w.retime_button,w.link_toggle,w.snap_tool,undo_tool,redo_tool]
+    w.timeline_edit_tools=[w.select_tool,w.transform_box_tool,w.crop_tool,w.auto_layout_tool,w.blade_tool,w.retime_button,w.link_toggle,w.snap_tool,undo_tool,redo_tool]
     w.review_badge=QLabel("REVIEW ONLY · Scrub or play to preview"); w.review_badge.setObjectName("reviewBadge"); w.review_badge.hide(); bar.addWidget(w.review_badge); bar.addStretch()
-    w.timeline_zoom=SafeSlider(Qt.Horizontal); w.timeline_zoom.setRange(0,1000); w.timeline_zoom.setValue(round(1000*math.log(45/.6)/math.log(400))); w.timeline_zoom.setFixedWidth(110)
-    bar.addWidget(tool_button("zoom-out",lambda:w.timeline_zoom.setValue(w.timeline_zoom.value()-50),"Timeline zoom out")); bar.addWidget(w.timeline_zoom); bar.addWidget(tool_button("zoom-in",lambda:w.timeline_zoom.setValue(w.timeline_zoom.value()+50),"Timeline zoom in"))
+    from .widgets import slider_to_zoom,zoom_to_slider
+    w.timeline_zoom=SafeSlider(Qt.Horizontal); w.timeline_zoom.setRange(0,1000); w.timeline_zoom.setValue(zoom_to_slider(45)); w.timeline_zoom.setFixedWidth(110)
+    bar.addWidget(tool_button("zoom-out",lambda:w.timeline_zoom.setValue(w.timeline_zoom.value()-40),"Timeline zoom out")); bar.addWidget(w.timeline_zoom); bar.addWidget(tool_button("zoom-in",lambda:w.timeline_zoom.setValue(w.timeline_zoom.value()+40),"Timeline zoom in"))
     from .monitor_control import MonitorControl
     w.monitor_control=MonitorControl(w); bar.addWidget(w.monitor_control); layout.addLayout(bar)
     w.timeline=TimelineWidget(); w.timeline.itemSelected.connect(w.select_item); w.timeline.playheadChanged.connect(w.seek); w.timeline.scrubFinished.connect(w.finish_scrub); w.timeline.itemChanged.connect(lambda _:w.model_changed()); w.timeline.mediaDropped.connect(w.add_media_to_track); w.timeline.mediaBatchDropped.connect(w.add_media_batch); w.timeline.titleDropped.connect(w.add_title_object); w.timeline.commandRequested.connect(w.timeline_command); w.timeline.bladeRequested.connect(w.split_at); w.timeline.captionBladeRequested.connect(w.split_caption_at); w.timeline.effectDropped.connect(lambda name,id:w.apply_effect_to(name,id)); w.timeline.captionSelected.connect(w.select_caption); w.timeline.transitionSelected.connect(w.select_transition)
@@ -1155,8 +1157,8 @@ def build_workspace(w):
     w.timeline.file_drop_controller=FileDropController(w)
     w.timeline.filesDropped.connect(w.timeline.file_drop_controller.drop)
     def reflect_zoom(value):
-        w.timeline_zoom.blockSignals(True); w.timeline_zoom.setValue(round(1000*math.log(value/.6)/math.log(400))); w.timeline_zoom.blockSignals(False)
-    w.timeline_zoom.valueChanged.connect(lambda value:w.timeline.set_zoom(.6*400**(value/1000))); w.timeline.zoomChanged.connect(reflect_zoom); layout.addWidget(w.timeline); w.center_split.addWidget(tl); w.center_split.setSizes([490,350])
+        w.timeline_zoom.blockSignals(True); w.timeline_zoom.setValue(zoom_to_slider(value)); w.timeline_zoom.blockSignals(False)
+    w.timeline_zoom.valueChanged.connect(lambda value:w.timeline.set_zoom(slider_to_zoom(value))); w.timeline.zoomChanged.connect(reflect_zoom); layout.addWidget(w.timeline); w.center_split.addWidget(tl); w.center_split.setSizes([490,350])
     w.right_stack=QStackedWidget(); w.right_stack.setFixedWidth(350); w.viewer_split.addWidget(w.right_stack); w.viewer_split.setStretchFactor(0,1); w.viewer_split.setStretchFactor(1,0); w.viewer_split.handle(1).setEnabled(False)
     w.inspector=PropertiesPanel(w); w.inspector.changed.connect(w.model_changed); w.inspector.requestCrop.connect(w.frame_source); w.right_stack.addWidget(w.inspector)
     # Existing caption generation commands use this non-visible editing adapter.

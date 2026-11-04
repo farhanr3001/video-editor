@@ -10,6 +10,33 @@ from kinetic_cut.mcp_bridge import send_mcp_request
 
 
 class AssistantModelTests(unittest.TestCase):
+    def test_bundled_guide_discovery_sections_and_no_window_dependency(self):
+        from kinetic_cut.assistant_api import EditorAPI,TOOLS,GUIDE_SECTIONS
+        api=EditorAPI(None);guide=api.call_get_editor_guide()
+        self.assertIn('get_editor_guide',guide['markdown'])
+        self.assertIn('**default port is 48765**',guide['markdown'])
+        self.assertNotIn('The 3-Second Hook Rule',guide['markdown'])
+        self.assertNotIn('40 to 58 seconds',guide['markdown'])
+        entry=next(t for t in TOOLS if t['name']=='get_editor_guide')
+        self.assertTrue(entry['annotations']['readOnlyHint'])
+        self.assertFalse(entry['annotations']['destructiveHint'])
+        self.assertEqual(set(entry['inputSchema']['properties']['section']['enum']),set(guide['sections']))
+        for section,heading in GUIDE_SECTIONS.items():
+            text=api.call_get_editor_guide(section)['markdown']
+            self.assertTrue(text.startswith('## '+heading+'\n'),section)
+            self.assertEqual(sum(line.startswith('## ') for line in text.splitlines()),1,section)
+        import re
+        index=api.call_get_editor_guide('tools')['markdown']
+        self.assertEqual(set(re.findall(r'^\| `([^`]+)` \|',index,re.M)),{t['name'] for t in TOOLS})
+
+    def test_guide_rejects_paths_and_missing_asset_without_fallback_to_private_notes(self):
+        from kinetic_cut.assistant_api import EditorAPI
+        api=EditorAPI(None)
+        for section in ('../../AI_PROJECT_CONTEXT.md','private_preferences',[],None):
+            with self.assertRaises(ValueError):api.call_get_editor_guide(section)
+        with patch('kinetic_cut.icons.resource_path',return_value=Path('missing-guide-fixture.md')):
+            with self.assertRaisesRegex(RuntimeError,'guide is unavailable'):api.call_get_editor_guide()
+
     def test_smart_template_batch_persists_sparse_marks_without_mutating_source(self):
         from kinetic_cut.model import Caption,CaptionStyle
         p=Project(captions=[Caption('chosen',0,2,'THE MOST RANGE',customize=True),Caption('other',3,4,'Keep this',style=CaptionStyle(font='Poppins'),customize=True)])
@@ -153,6 +180,15 @@ class AssistantLiveTests(unittest.TestCase):
         self.assertEqual(self.w.project.timeline[0].title_text,'MCP edit'); self.assertEqual(len(self.w._history),2)
         image=self.call('get_preview')['content'][1]; self.assertEqual(image['type'],'image'); self.assertGreater(len(image['data']),100)
         self.call('history',direction='undo'); self.assertFalse(self.w.project.timeline)
+    def test_guide_over_authenticated_http_preserves_project_history_and_playhead(self):
+        before=copy.deepcopy(self.w.project.to_dict());history=list(self.w._history)
+        init=self.request('initialize',dict(protocolVersion='2025-06-18'))
+        self.assertIn('get_editor_guide',init['result']['instructions'])
+        guide=json.loads(self.call('get_editor_guide',section='startup')['content'][0]['text'])
+        self.assertIn('First actions',guide['markdown'])
+        self.assertEqual(self.w.project.to_dict(),before);self.assertEqual(self.w._history,history)
+        capabilities=json.loads(self.call('get_capabilities')['content'][0]['text'])
+        self.assertEqual(capabilities['editor_guide']['tool'],'get_editor_guide')
     def test_unauthorized_origin_and_invalid_version_rejected(self):
         for headers in ({'Authorization':'Bearer wrong'},{'Origin':'https://hostile.example'},{'MCP-Protocol-Version':'invalid'}):
             with self.assertRaises(urllib.error.HTTPError):self.request('tools/list',headers=headers)

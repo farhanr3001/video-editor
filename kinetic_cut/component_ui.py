@@ -4,6 +4,14 @@ from PySide6.QtCore import QThreadPool, QObject, Signal, Slot, Qt
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QProgressBar, QMessageBox,QCheckBox
 from . import feature_packs
 
+SPEECH_INFO = ("A larger, more accurate speech model for generating captions. It hears words more reliably than the built-in "
+               "base.en, including fast speech, accents and background noise, and can recognise other languages. It runs on this computer; "
+               "captions take longer than with base.en (much faster with an NVIDIA GPU).\n\n"
+               "To use it: after the download, open Workflow > Settings > Advanced > Speech model and choose large-v3-turbo. "
+               "Switch back to base.en there at any time. Already have this model on your computer? Choose "
+               "\"Custom model folder\u2026\" in the same place instead of downloading.")
+
+
 class ComponentEvents(QObject):
     changed = Signal()
 
@@ -64,13 +72,14 @@ class InstallComponentDialog(QDialog):
         super().__init__(parent); self.key = key; self.cancel = threading.Event(); self.running = False; self._closed=False; self._job=None
         item = feature_packs.manifest().get(key, {})
         name = item.get('name', {
-                                 'vision':'Face / background tools','vocals':'Vocal separation','enhance':'AI Enhance'}[key])
+                                 'vision':'Face / background tools','vocals':'Vocal separation','enhance':'AI Enhance','speech':'Caption model (large-v3-turbo)'}[key])
         self.setWindowTitle('Download ' + name); self.resize(510,260)
         layout = QVBoxLayout(self)
         self.status = QLabel(name + ' is an optional download.'); self.status.setWordWrap(True); layout.addWidget(self.status)
         if item:
             info = f"Download: {item['download_bytes']/1e6:.1f} MB\nInstalled size: {item['installed_bytes']/1e6:.1f} MB"
-        else:info = 'Installed size: approximately ' + ('350 MB' if key == 'vision' else '1.6 GB' if key=='enhance' else '1.2 GB')
+        else:info = 'Installed size: about ' + size_label(estimated_bytes(key))
+        if key=='speech':info='Download and installed size: about '+size_label(estimated_bytes('speech'))+'\n\n'+SPEECH_INFO
         if key=='enhance':info='Download: approximately 350-450 MB\n'+info+'\nLocal GPU restoration with motion-aware stabilization; playback uses cached frames.'
         details = QLabel(info + '\nYour projects, sources and Power Bin are preserved.'); details.setWordWrap(True); layout.addWidget(details)
         self.cuda=None
@@ -244,30 +253,157 @@ def installer_downloads(keys, local_source=None):
         app.setQuitOnLastWindowClosed(quit_policy)
 
 
+from .feature_packs import size_label
+
+
+def estimated_bytes(key):
+    """Installed size measured from real installs (Nov 2026); a manifest value wins when present."""
+    item = feature_packs.manifest().get(key, {})
+    if item.get('installed_bytes'):
+        return int(item['installed_bytes'])
+    if key == 'enhance':
+        from .enhance_component import default_acceleration
+        return 4_950_000_000 if default_acceleration() == 'CUDA' else 1_700_000_000
+    return {'vision': 354_000_000, 'vocals': 1_167_000_000, 'speech': 1_621_670_079}[key]
+
+
+CATALOG = (
+    ('speech', 'Caption model (large-v3-turbo)', 'captions',
+     'More accurate speech recognition for generated captions.'),
+    ('vision', 'Face / background tools', 'smile',
+     'Background removal and face effects (masks, big eyes, face twist).'),
+    ('vocals', 'Vocal separation', 'audio-waveform',
+     'Separates voices from music and noise for the Vocal Only effect.'),
+    ('enhance', 'AI Enhance', 'sparkles',
+     'Local video restoration: denoise, deblur, sharpen and upscale.'),
+)
+
+_STYLE = """
+QFrame#componentCard { background: @bg_panel; border: 1px solid @border_subtle; border-radius: 8px; }
+QLabel#componentHeading { color: @text_main; font-size: 15px; font-weight: 600; background: transparent; }
+QLabel#componentIntro, QLabel#componentBlurb, QLabel#componentTotal { color: @text_sub; background: transparent; border: 0; }
+QLabel#componentTitle { color: @text_main; font-weight: 600; background: transparent; border: 0; }
+QLabel#componentIcon { background: transparent; border: 0; }
+QLabel#componentState { color: @text_sub; background: transparent; border: 0; }
+QLabel#componentState[installed="true"] { color: @success; }
+QPushButton#componentInfo { background: #3d9ae8; color: #ffffff; border: 0; border-radius: 9px; padding: 0;
+    min-width: 18px; max-width: 18px; min-height: 18px; max-height: 18px;
+    font-family: Georgia, "Times New Roman", serif; font-size: 12px; font-weight: 700; font-style: italic; }
+QPushButton#componentInfo:hover { background: #63b0f2; }
+QPushButton#componentInfo:pressed { background: #2b7fc7; }
+"""
+
+
 class ComponentsDialog(QDialog):
+    NAMES = tuple((key, name, 0) for key, name, _icon, _blurb in CATALOG)
+
     def __init__(self, window):
         super().__init__(window); self.window = window
-        self.setWindowTitle("Optional downloads"); self.resize(570, 310)
-        layout = QVBoxLayout(self)
-        title = QLabel("Editing and caption generation are included. Add optional tools when you need them.")
-        title.setWordWrap(True); layout.addWidget(title)
-        metadata = feature_packs.manifest()
-        for key, name, estimate in (("vision", "Face / background tools", 350000000), ("vocals", "Vocal separation", 1200000000), ('enhance','AI Enhance',1600000000)):
-            if key=='enhance':
-                from .enhance_component import default_acceleration
-                if default_acceleration()=='CUDA':estimate=5000000000
-            row = QHBoxLayout(); layout.addLayout(row)
-            size = metadata.get(key, {}).get("installed_bytes", estimate)
-            label = QLabel(f"{name} · +{size / 1e6:.1f} MB" + (" estimated" if key not in metadata else ""))
-            label.setWordWrap(True); row.addWidget(label, 1)
-            button = QPushButton("Installed" if feature_packs.available(key, window.settings) else "Download")
-            button.setEnabled(not feature_packs.available(key, window.settings))
-            button.clicked.connect(lambda checked=False, k=key, b=button: self.download(k, b)); row.addWidget(button)
-        close = QPushButton("Close"); close.clicked.connect(self.accept); layout.addWidget(close)
+        from PySide6.QtWidgets import QFrame
+        from PySide6.QtCore import QTimer
+        from .theme_widgets import set_ui_style, set_ui_icon
+        self.setWindowTitle("Optional downloads"); self.setMinimumWidth(680)
+        set_ui_style(self, _STYLE)
+        layout = QVBoxLayout(self); layout.setContentsMargins(18, 16, 18, 16); layout.setSpacing(8)
+        heading = QLabel('Optional downloads'); heading.setObjectName('componentHeading'); layout.addWidget(heading)
+        intro = QLabel('Editing and standard captions work without these. Each tool downloads once, runs on this computer and can be removed at any time.')
+        intro.setObjectName('componentIntro'); intro.setWordWrap(True); layout.addWidget(intro); layout.addSpacing(4)
+        self.rows = {}; self.info_buttons = {}; self.states = {}; self.sizes = {}
+        for key, name, icon, blurb in CATALOG:
+            card = QFrame(); card.setObjectName('componentCard'); layout.addWidget(card)
+            row = QHBoxLayout(card); row.setContentsMargins(12, 10, 12, 10); row.setSpacing(12)
+            glyph = QLabel(); glyph.setObjectName('componentIcon'); set_ui_icon(glyph, icon, None, 22)
+            glyph.setFixedWidth(26); row.addWidget(glyph, 0, Qt.AlignTop)
+            text = QVBoxLayout(); text.setSpacing(2); row.addLayout(text, 1)
+            title_row = QHBoxLayout(); title_row.setSpacing(6); text.addLayout(title_row)
+            title = QLabel(name); title.setObjectName('componentTitle'); title_row.addWidget(title)
+            if key == 'speech':
+                info = QPushButton('i'); info.setObjectName('componentInfo'); info.setCursor(Qt.PointingHandCursor)
+                info.setToolTip(SPEECH_INFO); info.setAccessibleName('About the large-v3-turbo caption model')
+                info.clicked.connect(lambda checked=False: QMessageBox.information(self, 'Caption model: large-v3-turbo', SPEECH_INFO))
+                title_row.addWidget(info, 0, Qt.AlignVCenter); self.info_buttons[key] = info
+            title_row.addStretch()
+            description = QLabel(blurb); description.setObjectName('componentBlurb'); description.setWordWrap(True); text.addWidget(description)
+            state = QLabel(); state.setObjectName('componentState'); text.addWidget(state); self.states[key] = state
+            button = QPushButton("Download"); button.setObjectName('componentDownload'); button.setMinimumWidth(96)
+            button.clicked.connect(lambda checked=False, k=key: self.download(k)); row.addWidget(button, 0, Qt.AlignVCenter)
+            remove = QPushButton("Uninstall"); remove.setObjectName('componentUninstall'); remove.setMinimumWidth(88)
+            remove.clicked.connect(lambda checked=False, k=key, n=name: self.uninstall(k, n)); row.addWidget(remove, 0, Qt.AlignVCenter)
+            self.rows[key] = (button, remove)
+        layout.addStretch(1)
+        footer = QHBoxLayout(); layout.addLayout(footer)
+        self.total = QLabel(); self.total.setObjectName('componentTotal'); footer.addWidget(self.total, 1)
+        close = QPushButton("Close"); close.setMinimumWidth(96); close.clicked.connect(self.accept); footer.addWidget(close)
+        self._measure_timer = QTimer(self); self._measure_timer.setInterval(150); self._measure_timer.timeout.connect(self._apply_sizes)
+        self._measured = {}; self._measuring = None
+        self.refresh_rows()
 
-    def download(self, key, button):
-        if offer(self,key):button.setEnabled(False); button.setText('Installed')
+    def _root(self, key):
+        if key == 'speech':
+            from .caption_runtime import app_model_root
+            return app_model_root()
+        return feature_packs.component_root(key)
+
+    def _measure(self, keys):
+        """Folder sizes off the UI thread; a 5 GB runtime has tens of thousands of files."""
+        from .cache_manager import tree_size
+        result = {}
+        for key in keys:
+            try:result[key] = tree_size(self._root(key))
+            except (OSError, ValueError, KeyError):pass
+        self._measuring = result
+
+    def _apply_sizes(self):
+        if self._measuring is None:return
+        self._measure_timer.stop(); self._measured.update(self._measuring); self._measuring = None
+        self.refresh_rows(measure=False)
+
+    def refresh_rows(self, measure=True):
+        ready_keys = []
+        for key, (button, remove) in self.rows.items():
+            ready = feature_packs.available(key, getattr(self.window, 'settings', {}))
+            busy = key in active_downloads
+            button.setText("Installed" if ready else "Downloading\u2026" if busy else "Download")
+            button.setEnabled(not ready and not busy)
+            remove.setEnabled(ready and not busy)
+            state = self.states[key]
+            if ready:
+                ready_keys.append(key)
+                size = self._measured.get(key)
+                state.setText('\u2713 Installed' + (f' \u00b7 {size_label(size)} on disk' if size else ''))
+            else:
+                self._measured.pop(key, None)
+                state.setText(f'About {size_label(estimated_bytes(key))}')
+            state.setProperty('installed', ready); state.style().unpolish(state); state.style().polish(state)
+        used = sum(self._measured.get(k, 0) for k in ready_keys)
+        self.total.setText(f'{len(ready_keys)} of {len(self.rows)} installed' + (f' \u00b7 {size_label(used)} used' if used else ''))
+        pending = [k for k in ready_keys if k not in self._measured]
+        if measure and pending and self._measuring is None and not self._measure_timer.isActive():
+            import threading
+            threading.Thread(target=self._measure, args=(pending,), daemon=True).start()
+            self._measure_timer.start()
+
+    def download(self, key):
+        offer(self, key); self.refresh_rows()
+
+    def uninstall(self, key, name):
+        from .cache_manager import removal_blocked
+        if removal_blocked(self.window):
+            QMessageBox.information(self, 'Optional tool busy', 'Stop playback, transfers and rendering, and wait for background jobs to finish before uninstalling tools.')
+            return
+        extra = ''
+        if key == 'speech' and str(getattr(self.window, 'settings', {}).get('whisper_model', '')) == 'large-v3-turbo':
+            extra = ' Captions are currently set to use this model; it will download again the next time you generate captions unless you switch back to base.en in Settings > Advanced.'
+        if QMessageBox.question(self, f'Uninstall {name}?', f'Remove {name} from this computer? Your projects, sources and Power Bin are not deleted, and you can download it again later.' + extra) != QMessageBox.Yes:
+            return
+        try:
+            feature_packs.remove(key)
+        except (OSError, ValueError, RuntimeError) as error:
+            QMessageBox.warning(self, 'Uninstall not completed', str(error))
+        self._measured.pop(key, None)
+        events().changed.emit(); self.refresh_rows()
 
     def done(self, result):
         if hasattr(self, '_cancel'): self._cancel.set()
+        self._measure_timer.stop()
         super().done(result)

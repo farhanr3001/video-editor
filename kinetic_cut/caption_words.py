@@ -41,14 +41,38 @@ def prepare_generated(captions,style,strip_periods=False,censor=False):
         from .caption_emphasis import mark_strong_words
         mark_strong_words(captions)
 
+def retime(old_text,old_timings,new_text):
+    """Word timings for edited text. Unchanged words keep their measured timing; new or replaced
+    words are spread over the span the old words occupied (flagged estimated)."""
+    import difflib
+    old=old_text.split(); new=new_text.split()
+    if not new or not old_timings or len(old_timings)!=len(old):return []
+    norm=lambda w:re.sub(r'\W','',w).casefold()
+    try:
+        spans=[(float(t['start']),float(t['end'])) for t in old_timings]
+    except (KeyError,TypeError,ValueError):return []
+    result=[None]*len(new)
+    for tag,i1,i2,j1,j2 in difflib.SequenceMatcher(a=[norm(w) for w in old],b=[norm(w) for w in new],autojunk=False).get_opcodes():
+        if tag=='equal':
+            for k in range(j2-j1):
+                t=dict(old_timings[i1+k]);t['text']=new[j1+k];result[j1+k]=t
+            continue
+        if j1==j2:continue
+        if i1==i2:lo=spans[i1-1][1] if i1>0 else spans[0][0];hi=spans[i1][0] if i1<len(spans) else spans[-1][1]
+        else:lo,hi=spans[i1][0],spans[i2-1][1]
+        hi=max(hi,lo+.06*(j2-j1)); weights=[max(1,len(norm(w))) for w in new[j1:j2]]; total=sum(weights); cursor=lo
+        for k,weight in enumerate(weights):
+            end=cursor+(hi-lo)*weight/total
+            result[j1+k]=dict(text=new[j1+k],start=round(cursor,3),end=round(end,3),estimated=True); cursor=end
+    return result
+
 def set_text(caption,text):
     if text!=caption.text:
-        # Preserve timings for case/punctuation-only edits; don't attach old
-        # speech onsets to an unrelated replacement sentence.
-        old=caption.text.split(); new=text.split()
-        if len(old)==len(new) and all(re.sub(r'\W','',a).casefold()==re.sub(r'\W','',b).casefold() for a,b in zip(old,new)):
-            for timing,word in zip(caption.word_timings,new):timing['text']=word
-        else:caption.word_timings=[]; caption.highlighted_words=[]
+        timings_=retime(caption.text,caption.word_timings,text)
+        if len(timings_)==len(text.split()) and timings_:caption.word_timings=timings_
+        else:caption.word_timings=[]
+        old_words,new_words=caption.text.split(),text.split(); clean=lambda w:re.sub(r'\W','',w).casefold()
+        caption.highlighted_words=[i for i in caption.highlighted_words if i<len(old_words) and i<len(new_words) and clean(old_words[i])==clean(new_words[i])]
         caption.text=text
 
 def shift_origin(caption,delta):

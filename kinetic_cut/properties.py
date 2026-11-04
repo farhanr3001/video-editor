@@ -2140,7 +2140,7 @@ class PropertiesPanel(QWidget):
         has_glitch = "Glitch" in name
         has_rgb = "RGB" in name
         has_intensity = "Flash" in name or "Color" in name or "Black" in name or "Flare" in name
-        from .animated_transitions import NAMES as animated_names,CONTROLS,values
+        from .animated_transitions import ALL_NAMES as animated_names,CONTROLS,values
         animated=name in animated_names
         if animated:
             has_color=has_blur=has_feather=has_dir=has_motion=has_zoom=has_glitch=has_rgb=has_intensity=False
