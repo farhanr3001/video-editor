@@ -8,10 +8,43 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 from kinetic_cut.activity_log import ActivityLog,read,SLOT_BYTES
 
 
 class ActivityLogTests(unittest.TestCase):
+    @unittest.skipUnless(os.name=='nt','Windows mapped-file sharing')
+    def test_live_windows_sessions_keep_independent_action_rings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'actions.log'
+            first=ActivityLog(path)
+            second=None
+            try:
+                first.record('older.editor')
+                second=ActivityLog(path)
+                second.record('newer.editor')
+                self.assertEqual(read(first.path)[-1]['action'],'older.editor')
+                self.assertEqual(read(second.path)[-1]['action'],'newer.editor')
+            finally:
+                if second:second.close()
+                first.close()
+
+    def test_locked_previous_session_still_records_new_actions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'actions.log'
+            first=ActivityLog(path)
+            try:
+                first.record('first.session')
+                with patch.object(Path,'replace',side_effect=PermissionError('mapped by another editor')):
+                    second=ActivityLog(path)
+                try:
+                    second.record('second.session')
+                    self.assertNotEqual(first.path,second.path)
+                    self.assertEqual(read(first.path)[-1]['action'],'first.session')
+                    self.assertEqual(read(second.path)[-1]['action'],'second.session')
+                finally:second.close()
+            finally:first.close()
+
     def test_ring_is_bounded_and_retains_latest_actions_in_sequence_order(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'actions.log';log=ActivityLog(path,capacity=8)

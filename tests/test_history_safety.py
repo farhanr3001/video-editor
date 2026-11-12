@@ -77,13 +77,13 @@ class HistorySafetyTests(unittest.TestCase):
             refresh.assert_not_called()
 
     def test_restored_source_replaces_waveform_after_history_settles(self):
-        media = MediaItem('m', 'original.mp4', 'video', 'Audio', 5, has_audio=True)
+        media = MediaItem('m', 'original.wav', 'audio', 'Audio', 5, has_audio=True)
         jobs = []
         with patch.object(self.w, 'start_worker', side_effect=jobs.append):
-            self.w.set_project(Project(media=[media]))
+            self.w.set_project(Project(media=[media], timeline=[TimelineItem('clip','m','audio_1',0,5)]))
             jobs[-1].signals.result.emit([.1])
             jobs[-1].signals.finished.emit()
-            media.path = 'replacement.mp4'
+            media.path = 'replacement.wav'
             self.w.request_waveform(media)
             replacement = jobs[-1]
             replacement.signals.result.emit([.9])

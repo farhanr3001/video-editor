@@ -6,11 +6,10 @@ native compositor.
 """
 import os
 from PySide6.QtCore import Qt, QUrl, QRectF, QCoreApplication
-from PySide6.QtGui import QColor, QImage, QMatrix4x4
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtQml import QQmlComponent
 from PySide6.QtQuick import QQuickView, QQuickItem
-from . import motion_frame as F
-from .motion_gpu import placement, opacity_of, scene_of
+from .motion_gpu import publish_motion, opacity_of, scene_of
 
 
 class MotionStage:
@@ -36,21 +35,21 @@ class MotionStage:
             item.setParent(self.root); item.setParentItem(self.root); self.layers[key] = item
         return item
 
-    def _place(self, layer, item, elapsed, project, z, size):
+    def _place(self, layer, item, elapsed, project, z):
+        from .keyframes import evaluated
+        item=evaluated(item,elapsed)
         frame_rect = QRectF(0, 0, self.width, self.height); scene = scene_of(project, item, self.scenes)
-        layer.setVisible(True); layer.setZ(z); layer.setWidth(self.width); layer.setHeight(self.height)
-        layer.setProperty('k', self.width / max(1, scene.get('canvas', [project.settings.width])[0]))
-        layer.setProperty('placement', QMatrix4x4(placement(item, project, frame_rect))); layer.setProperty('alpha', opacity_of(item, elapsed))
-        layer.setProperty('frame', F.frame(scene, item.in_point + elapsed * item.speed, size, project.settings.fps))
+        layer.setVisible(True); layer.setZ(z)
+        publish_motion(layer,item,scene,project,elapsed,frame_rect,opacity_of(item,elapsed))
 
     def render(self, entries, project, at_for):
         """entries: motion graphic items. at_for(item) -> seconds of the item's own clock. Returns an RGBA8888 QImage."""
-        shown = set(); size = (self.width, self.height)
+        shown = set()
         if self.pair is not None: self.pair.setVisible(False)
         for z, item in enumerate(entries):
             elapsed = at_for(item)
-            if opacity_of(item, elapsed) <= .001 or elapsed < 0: continue
-            self._place(self.layer(item.id), item, elapsed, project, z, size); shown.add(item.id)
+            if elapsed < 0: continue
+            self._place(self.layer(item.id), item, elapsed, project, z); shown.add(item.id)
         for key, layer in self.layers.items():
             if key not in shown: layer.setVisible(False)
         QCoreApplication.processEvents()
@@ -59,7 +58,6 @@ class MotionStage:
     def render_transition(self, left, right, left_elapsed, right_elapsed, phase, mode, params, project):
         """Both graphics are drawn by the GPU and blended by the preview's transition shader. Returns RGBA8888."""
         from PySide6.QtGui import QVector4D
-        size = (self.width, self.height)
         if self.pair is None:
             from .icons import resource_path
             component = QQmlComponent(self.view.engine(), QUrl.fromLocalFile(str(resource_path('assets', 'qml', 'GpuTransition.qml'))))
@@ -74,7 +72,7 @@ class MotionStage:
                 layer = self.component.create()
                 if layer is None: raise RuntimeError('\n'.join(e.toString() for e in self.component.errors()))
                 parent = self.pair.findChild(QQuickItem, name); layer.setParent(parent); layer.setParentItem(parent); self.side_layers[key] = layer
-            self._place(layer, item, max(0., elapsed), project, 0, size)
+            self._place(layer, item, max(0., elapsed), project, 0)
         self.pair.setProperty('shader', f'../shaders/transition_{mode}.frag.qsb'); self.pair.setProperty('progress', float(phase))
         self.pair.setProperty('p1', QVector4D(*params[:3], 0)); self.pair.setProperty('p2', QVector4D(*params[3:], self.width / max(1, self.height)))
         QCoreApplication.processEvents()
@@ -99,7 +97,7 @@ def scene_image(scene, seconds, size, fps=60):
     canvas = scene.get('canvas', [width, height])
     transform = SimpleNamespace(x=.5, y=.5, anchor_x=0, anchor_y=0, rotation=0, scale=1, effective_scale_y=1)
     item = SimpleNamespace(id='__scene_image__', role='graphic', graphic_type='Motion Composition', graphic_data={'scene': scene}, start=0.,
-                           duration=1e9, in_point=float(seconds), speed=1., fade_in=0, fade_out=0, opacity=100., transform=transform)
+                           duration=1e9, in_point=float(seconds), speed=1., fade_in=0, fade_out=0, opacity=100., transform=transform,keyframes={})
     project = SimpleNamespace(settings=SimpleNamespace(width=int(canvas[0]), height=int(canvas[1]), fps=fps))
     stage.scenes.clear()
     return stage.render([item], project, lambda _: 0.)

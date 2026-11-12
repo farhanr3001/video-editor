@@ -87,11 +87,11 @@ def frame_index(analysis,source_time):return max(0,min(analysis['frames']-1,roun
 def status(item,media,source_time):
     effects=active(item)
     if not effects:return ''
-    if any(not valid_effect(e,media,item) for e in effects):return 'Effect needs analysis — use Re-analyse in Effects'
+    if any(not valid_effect(e,media,item) for e in effects):return 'Effect needs analysis â€” use Re-analyse in Effects'
     a=effects[0]['analysis']
-    if any(e['name']=='Remove Person Background' for e in effects) and mask_image(a['root'],frame_index(a,source_time)).isNull():return 'Background cache missing — use Re-analyse in Effects'
+    if any(e['name']=='Remove Person Background' for e in effects) and mask_image(a['root'],frame_index(a,source_time)).isNull():return 'Background cache missing â€” use Re-analyse in Effects'
     if any(e['name'] in FACE_NAMES for e in effects):
-        if not face_data(a['root'])[frame_index(a,source_time)]:return 'Face not detected — face filter hidden'
+        if not face_data(a['root'])[frame_index(a,source_time)]:return 'Face not detected â€” face filter hidden'
     return ''
 
 def apply(image,item,media,source_time):
@@ -243,8 +243,9 @@ def prepare_export(project,ffmpeg,progress,cancel,cached_only=False):
         crop=Crop() if tracking and item.role=='background' and not effects else item.crop.clamped()
         width=max(2,int(media.width*crop.width)//2*2); height=max(2,int(media.height*crop.height)//2*2)
         assets=[]
-        for effect in tracking:
-            if effect.get('mode')=='Image':
+        from .tracking_effect import render_effects
+        for effect in render_effects(item):
+            if effect.get('image'):
                 asset=Path(effect['image']); stat=asset.stat(); assets.append((str(asset),stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns))
         follow=bool(follow_effect(item))
         key=hashlib.sha256(json.dumps([fingerprint(media),vars(crop),item.in_point,item.source_duration,fps,effects]+([2,tracking,assets] if tracking else []),sort_keys=True).encode()).hexdigest()
@@ -254,7 +255,7 @@ def prepare_export(project,ffmpeg,progress,cancel,cached_only=False):
         import shutil
         needed=max(50*1024**2,int(width*height*4*item.source_duration*fps/3))
         if shutil.disk_usage(target.parent).free<needed:raise RuntimeError(f'Please free about {needed/1024**3:.1f} GB for this lossless effect render cache.')
-        if progress:progress(0,'Preparing object tracking frames…' if tracking else 'Preparing cached face/background frames…')
+        if progress:progress(0,'Preparing object tracking framesâ€¦' if tracking else 'Preparing cached face/background framesâ€¦')
         inputs=['-loop','1'] if media.kind=='image' else ['-ss',str(item.in_point)]
         decode_width,decode_height=(media.width,media.height) if follow else (width,height)
         crop_filter='null' if follow or crop==Crop() else _crop_filter(item)
@@ -276,7 +277,7 @@ def prepare_export(project,ffmpeg,progress,cancel,cached_only=False):
                             pixels=np.frombuffer(image.constBits(),dtype=np.uint8).reshape(height,width,4); frame=av.VideoFrame.from_ndarray(pixels,format='rgba'); frame.pts=n
                             for packet in stream.encode(frame):movie.mux(packet)
                             n+=1
-                            if n%15==0 and progress:progress(0,f'Preparing {"object tracking" if tracking else "face/background"} frames · {n/fps:.1f}s / {item.source_duration:.1f}s')
+                            if n%15==0 and progress:progress(0,f'Preparing {"object tracking" if tracking else "face/background"} frames Â· {n/fps:.1f}s / {item.source_duration:.1f}s')
                         for packet in stream.encode():movie.mux(packet)
                     if decoder.wait(timeout=15) or n==0:raise RuntimeError('Could not decode this clip for effect rendering.')
                 finally:

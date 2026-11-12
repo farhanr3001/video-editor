@@ -16,7 +16,7 @@ class InspectorIndexingTests(unittest.TestCase):
         project=Project(timeline=[TimelineItem(str(i),'media','video_1',i,1) for i in range(3000)])
         items=CountedTimeline(project.timeline,project,'timeline');object.__setattr__(project,'timeline',items)
         project.runtime_index;items.scans=0
-        panel=SimpleNamespace(window=SimpleNamespace(project=project,timeline=SimpleNamespace(selected_ids={'2000'})),item_id='2000')
+        panel=SimpleNamespace(window=SimpleNamespace(project=project,timeline=SimpleNamespace(selected_ids={'2000'},linked_selection=False)),item_id='2000')
         return project,panel,items
 
     def test_single_selection_does_not_scan_unrelated_clips_per_control(self):
@@ -37,9 +37,22 @@ class InspectorIndexingTests(unittest.TestCase):
         project.timeline=[project.item_by_id('10')]
         self.assertEqual([i.id for i in PropertiesPanel.targets(panel)],['10'])
 
+    def test_unlinked_video_audio_controls_never_scan_the_document(self):
+        project,panel,items=self.fixture();panel.window.timeline.linked_selection=True
+        for _ in range(100):self.assertEqual(PropertiesPanel.targets(panel,True),[])
+        self.assertEqual(items.scans,0)
+
+    def test_linked_audio_fallback_uses_only_the_audio_track_index(self):
+        project,panel,items=self.fixture();panel.window.timeline.linked_selection=True
+        project.item_by_id('2000').link_id='pair'
+        audio=TimelineItem('sound','media','audio_1',2000,1,link_id='pair');project.timeline.append(audio)
+        items.scans=0
+        for _ in range(100):self.assertEqual(PropertiesPanel.targets(panel,True),[audio])
+        self.assertEqual(items.scans,0)
+
     def test_primary_kind_locks_audio_filter_and_project_replacement_are_preserved(self):
         video=TimelineItem('video','m','video_1',0,1);audio=TimelineItem('audio','m','audio_1',0,1);title=TimelineItem('title','m','video_1',0,1,role='title')
-        project=Project(timeline=[title,audio,video]);panel=SimpleNamespace(window=SimpleNamespace(project=project,timeline=SimpleNamespace(selected_ids={'title','audio','video'})),item_id='video')
+        project=Project(timeline=[title,audio,video]);panel=SimpleNamespace(window=SimpleNamespace(project=project,timeline=SimpleNamespace(selected_ids={'title','audio','video'},linked_selection=False)),item_id='video')
         self.assertEqual(PropertiesPanel.targets(panel),[video]);self.assertEqual(PropertiesPanel.targets(panel,True),[])
         panel.item_id='audio';self.assertEqual(PropertiesPanel.targets(panel,True),[audio])
         panel.item_id='title';self.assertEqual(PropertiesPanel.targets(panel),[title])

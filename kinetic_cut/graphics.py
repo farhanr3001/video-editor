@@ -211,6 +211,18 @@ def _render_glow_text(
     painter.drawText(rect, Qt.AlignCenter, text)
 
 
+def graphic_transform(project, item, frame_rect):
+    scale_factor = frame_rect.width()/max(1., project.settings.width)
+    tx = item.transform
+    transform = QTransform()
+    transform.translate(frame_rect.left()+tx.x*frame_rect.width(), frame_rect.top()+tx.y*frame_rect.height())
+    transform.translate(tx.anchor_x*scale_factor, tx.anchor_y*scale_factor)
+    transform.rotate(tx.rotation)
+    transform.scale(tx.scale*scale_factor, tx.effective_scale_y*scale_factor)
+    transform.translate(-tx.anchor_x, -tx.anchor_y)
+    return transform
+
+
 def draw_graphic(
     painter: QPainter,
     project: Any,
@@ -245,17 +257,7 @@ def draw_graphic(
     # Scale factor relative to 1080p base resolution
     scale_factor = frame_rect.width() / max(1.0, float(project.settings.width))
 
-    # Center position
-    center_x = frame_rect.left() + item.transform.x * frame_rect.width()
-    center_y = frame_rect.top() + item.transform.y * frame_rect.height()
-
-    # Local transformation matrix
-    transform = QTransform()
-    transform.translate(center_x, center_y)
-    transform.translate(item.transform.anchor_x * scale_factor,item.transform.anchor_y * scale_factor)
-    transform.rotate(item.transform.rotation)
-    transform.scale(item.transform.scale * scale_factor, item.transform.effective_scale_y * scale_factor)
-    transform.translate(-item.transform.anchor_x,-item.transform.anchor_y)
+    transform = graphic_transform(project,item,frame_rect)
 
     painter.setTransform(transform, True)
 
@@ -284,6 +286,7 @@ def draw_graphic(
 
         local_bounds = QRectF(-r, -r, 2 * r, 2 * r)
         painter.drawEllipse(local_bounds)
+        local_bounds.adjust(-th/2,-th/2,th/2,th/2)
 
     # 2. Pointing Arrow
     elif "arrow" in kind:
@@ -298,11 +301,13 @@ def draw_graphic(
 
         half_len = length / 2.0
         shaft_end = half_len - hs * 0.75
+        double_headed = data.get("style") == "Double-Headed"
+        shaft_start = -shaft_end if double_headed else -half_len
 
         # Shaft
         pen = QPen(col, th, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
         painter.setPen(pen)
-        painter.drawLine(QPointF(-half_len, 0), QPointF(shaft_end, 0))
+        painter.drawLine(QPointF(shaft_start, 0), QPointF(shaft_end, 0))
 
         # Arrowhead
         painter.setPen(Qt.NoPen)
@@ -315,8 +320,7 @@ def draw_graphic(
         ])
         painter.drawPolygon(head_poly)
 
-        if data.get("style") == "Double-Headed":
-            painter.drawLine(QPointF(-shaft_end, 0), QPointF(shaft_end, 0))
+        if double_headed:
             head_poly_left = QPolygonF([
                 QPointF(-half_len, 0),
                 QPointF(-half_len + hs, -hs * 0.55),
@@ -325,7 +329,10 @@ def draw_graphic(
             ])
             painter.drawPolygon(head_poly_left)
 
-        local_bounds = QRectF(-half_len - hs, -hs, length + 2 * hs, 2 * hs)
+        top = max(hs*.55, th/2)
+        left=min(-half_len,shaft_start-th/2)
+        right=max(half_len,shaft_end+th/2)
+        local_bounds = QTransform().rotate(dir_angle).mapRect(QRectF(left, -top, right-left, 2*top))
 
     # 3. Square
     elif "square" in kind:
@@ -345,6 +352,7 @@ def draw_graphic(
 
         local_bounds = QRectF(-s / 2.0, -s / 2.0, s, s)
         painter.drawRoundedRect(local_bounds, cr, cr)
+        local_bounds.adjust(-th/2,-th/2,th/2,th/2)
 
     # 4. Rectangle
     elif "rectangle" in kind:
@@ -365,6 +373,7 @@ def draw_graphic(
 
         local_bounds = QRectF(-w / 2.0, -h / 2.0, w, h)
         painter.drawRoundedRect(local_bounds, cr, cr)
+        local_bounds.adjust(-th/2,-th/2,th/2,th/2)
 
     # 5. Timer / Countdown
     elif "timer" in kind:

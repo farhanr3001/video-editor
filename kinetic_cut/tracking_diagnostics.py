@@ -57,6 +57,88 @@ def image_array(image):
         image.height(), image.bytesPerLine() // 4, 4)[:, :image.width()].copy()
 
 
+def verify_tracking_first_open(window,app,output,source):
+    """Actual editor Add Effect/exec/reopen, including a delayed GUI and real60fps source."""
+    import copy,time,os
+    from PySide6.QtCore import QTimer,QPoint,QEventLoop,Qt
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QPainter
+    from PySide6.QtTest import QTest
+    from .model import Project,TimelineItem
+    from .media import probe
+    from .tracking_dialog import TrackingDialog
+    records=[]
+    media=probe(source,window.settings.get('ffprobe','ffprobe'))
+    duration=min(6.5055555555555555,media.duration)
+    proxy=os.environ.get('KINETIC_TRACKING_TEST_PROXY','')
+    vfr=os.environ.get('KINETIC_TRACKING_TEST_VFR','')
+    variants=[('original60-first',media,None,0.),('original60-reopen',media,None,2.15)]
+    if proxy:variants.append(('proxy60',media,proxy,0.))
+    if vfr:variants.append(('variable-rate',probe(vfr,window.settings.get('ffprobe','ffprobe')),None,0.))
+    original_poll=TrackingDialog.poll
+    def delayed_poll(dialog):
+        if dialog.player and not dialog.playing and dialog.player.playbackState().name=='PlayingState':time.sleep(.09)
+        original_poll(dialog)
+    TrackingDialog.poll=delayed_poll
+    try:
+        for name,source_media,preview_path,opening in variants:
+            current=copy.deepcopy(source_media)
+            item=TimelineItem('first-open-'+name,current.id,'video_1',0,min(duration,current.duration))
+            project=Project(name='Disposable tracking first open '+name,media=[current],timeline=[item],playhead=opening)
+            project.settings.fps=60
+            window.set_project(project);window.select_item(item.id)
+            if preview_path:window.proxies[current.id]=preview_path
+            before=copy.deepcopy(item.effects);errors=[];phase=0;started=time.monotonic();record=dict(name=name,frames=[],fresh_effect=True,actual_add_effect=True)
+            def drive():
+                nonlocal phase
+                dialog=app.activeModalWidget()
+                if not isinstance(dialog,TrackingDialog):return
+                try:
+                    assert dialog.surface.container.geometry()==dialog.view.rect(),('geometry',dialog.surface.container.geometry(),dialog.view.rect())
+                    if time.monotonic()-started>8:raise AssertionError((name,'frame timeout',dialog.source_time(),dialog.sink.videoFrame().startTime(),dialog._seek_attempts))
+                    if phase==5:
+                        assert dialog.playing
+                        dialog.pause_for_edit();record.update(passed=True,native_geometry=True,source_visible=True,box_preview=True,stepping=True,instant_play=True)
+                        dialog.reject();return
+                    if not dialog.settled_frame():return
+                    frame=dialog.sink.videoFrame();target=round(dialog.frame_target()*1000000)
+                    assert frame.isValid() and frame.startTime()<=target+1000 and frame.endTime()>target
+                    record['frames'].append(dict(target=target,start=frame.startTime(),end=frame.endTime()))
+                    if phase==0:
+                        dialog.timeline.setValue(min(dialog.timeline.maximum(),129));phase=1;return
+                    if phase==1:
+                        rect=dialog.view.image_rect();a=QPoint(round(rect.x()+rect.width()*.2),round(rect.y()+rect.height()*.2));b=QPoint(round(rect.x()+rect.width()*.42),round(rect.y()+rect.height()*.65))
+                        QTest.mousePress(dialog.surface.view,Qt.LeftButton,pos=a);QTest.mouseMove(dialog.surface.view,b);QTest.mouseRelease(dialog.surface.view,Qt.LeftButton,pos=b)
+                        assert dialog.view.region and dialog.track_button.isEnabled()
+                        dialog.mode.setCurrentText('Circle');phase=2;return
+                    if phase==2:
+                        gpu=dialog.surface.view.grabWindow()
+                        assert image_array(gpu)[:,:,:3].std()>15,(name,'black/flat GPU pixels')
+                        shot=dialog.grab();painter=QPainter(shot);painter.drawImage(dialog.view.mapTo(dialog,QPoint(0,0)),gpu);painter.end()
+                        assert shot.save(str(output/('first-open-'+name+'.png')))
+                        if preview_path:assert dialog._playback_source==preview_path
+                        dialog.step(-1);phase=3;return
+                    if phase==3:
+                        dialog.step(1);phase=4;return
+                    if phase==4:
+                        dialog.timeline.setValue(min(dialog.timeline.maximum(),90));dialog.toggle_play();assert dialog.playing
+                        phase=5;return
+                    if phase==5:
+                        dialog.pause_for_edit();record.update(passed=True,native_geometry=True,source_visible=True,box_preview=True,stepping=True,instant_play=True)
+                        dialog.reject()
+                except Exception as error:
+                    errors.append(error);dialog.reject()
+            driver=QTimer();driver.setInterval(60);driver.timeout.connect(drive);driver.start()
+            try:window.apply_effect('Object Tracking')
+            finally:driver.stop()
+            if errors:raise errors[0]
+            assert record.get('passed') and item.effects==before,(name,'Cancel changed clip or modal did not open')
+            records.append(record)
+            QApplication.processEvents()
+    finally:TrackingDialog.poll=original_poll
+    return records
+
+
 def run(output):
     """Verify real source tracking, native three-theme UI and encoded pixels."""
     import copy
@@ -71,11 +153,21 @@ def run(output):
     import numpy as np
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    os.environ['KINETIC_CUT_HOME'] = str(output / 'home')
+    import faulthandler
+    trace=(output/'stacks.log').open('w',encoding='utf-8')
+    faulthandler.enable(trace)
+    faulthandler.dump_traceback_later(20,repeat=True,file=trace)
+    os.environ['KINETIC_GPU_PROCESS_TRACE']=str(output/'gpu-stacks.log')
+    def phase(name):
+        (output/'phase.txt').write_text(name,encoding='utf-8')
+    phase('Starting')
+    import tempfile
+    os.environ['KINETIC_CUT_HOME'] = tempfile.mkdtemp(prefix='home-',dir=output)
     os.environ['QT_QPA_PLATFORM'] = 'windows' if os.name == 'nt' else 'offscreen'
-    from PySide6.QtCore import Qt, QRectF, QEventLoop, QTimer, QThreadPool, QEvent
+    from PySide6.QtCore import Qt, QRectF, QPoint, QPointF, QEventLoop, QTimer, QThreadPool, QEvent
     from PySide6.QtGui import QImage, QColor, QPainter, QPainterPath
     from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtTest import QTest
     from .model import Project, TimelineItem, MediaItem, Crop, Transform
     from .object_tracking import analyze, sample, valid as analysis_valid
     from .tracking_effect import (MODES, default_effect, apply, export_error,
@@ -181,6 +273,7 @@ def run(output):
             return result
 
         for mode in MODES:
+            phase('Export '+mode)
             project, item = project_with(mode)
             window.preview.set_project(project)
             output_path = output / ('marker-' + mode.lower().replace(' ', '-') + '.mp4')
@@ -348,6 +441,60 @@ def run(output):
         window.inspector.tabs.setCurrentIndex(2)
         window.inspector.effect_picker.setCurrentIndex(0)
         window.preview.set_transform_controls_visible(False)
+        phase('Unanalysed marker source visibility and stable decoder')
+        fresh=TrackingDialog(window,project.media[0],item)
+        fresh.show()
+        for _ in range(40):
+            settle(100)
+            if fresh.settled_frame():break
+        assert fresh.settled_frame(),fresh.info.text()
+        for mode in MODES:
+            fresh.mode.setCurrentText(mode);fresh.refresh_preview();settle(60)
+            assert not fresh.surface.root.property('showMarkers'),mode
+            pixels=image_array(fresh.surface.view.grabWindow())
+            assert pixels[:,:,:3].mean()>8,(mode,'unexpected black source')
+        fresh.mode.setCurrentText('Circle')
+        original_pixels=image_array(fresh.surface.view.grabWindow())
+        rectangle=fresh.view.image_rect()
+        x,y,w,h=boxes[21]
+        start=QPoint(round(rectangle.x()+x*rectangle.width()),round(rectangle.y()+y*rectangle.height()))
+        end=QPoint(round(rectangle.x()+(x+w)*rectangle.width()),round(rectangle.y()+(y+h)*rectangle.height()))
+        workers_before=len(window._workers)
+        QTest.mousePress(fresh.view,Qt.LeftButton,pos=start)
+        QTest.mouseMove(fresh.view,end)
+        QTest.mouseRelease(fresh.view,Qt.LeftButton,pos=end)
+        settle(100)
+        assert fresh.surface.root.property('showMarkers')
+        assert fresh._published_markers and fresh._published_markers[0]['w']<.9
+        marked_pixels=image_array(fresh.surface.view.grabWindow())
+        assert np.count_nonzero(np.max(np.abs(marked_pixels.astype(int)-original_pixels.astype(int)),axis=2)>15)>100
+        assert not fresh.effect.get('analysis') and len(window._workers)==workers_before
+        fresh.add_anchor()
+        assert len(fresh.timeline.keyframes)==1
+        key=fresh.timeline.keyframe_position(fresh.timeline.keyframes[0]).toPoint()
+        QTest.mouseClick(fresh.timeline,Qt.LeftButton,pos=key)
+        assert fresh.anchor_list.selectionModel().selectedRows()
+        menu=fresh.analysis_menu()
+        next(action for action in menu.actions() if action.text()=='Remove selected frames').trigger()
+        assert not fresh.anchors and not fresh.timeline.keyframes and fresh.view.region is None
+        assert not fresh.effect.get('analysis')
+        original_source=fresh._playback_source
+        window.proxies[project.media[0].id]=str(output/'late-proxy-must-not-be-opened.mp4')
+        fresh._busy=True
+        fresh.poll()
+        assert fresh._playback_source==original_source
+        fresh.set_busy(False)
+        window.proxies.pop(project.media[0].id,None)
+        settle(150)
+        gpu_shot=fresh.surface.view.grabWindow()
+        shot=fresh.grab()
+        painter=QPainter(shot)
+        painter.drawImage(fresh.view.mapTo(fresh,QPoint(0,0)),gpu_shot)
+        painter.end()
+        assert shot.save(str(output/'guided-first-use.png'))
+        fresh.reject();fresh.deleteLater();settle()
+        report['unanalysed_all_modes_visible_and_decoder_stable']=True
+        report['drawn_marker_preview_diamond_and_context_removal']=True
         for theme in ('default', 'final_cut_obsidian', 'ableton_gray'):
             window.apply_theme(theme, save=False)
             dialog = TrackingDialog(window, project.media[0], item, item.effects[0])
@@ -355,13 +502,46 @@ def run(output):
             for _ in range(30):
                 settle(100)
                 if not dialog.raw.isNull() and dialog.settled_frame(): break
+            if dialog.raw.isNull() or not dialog.settled_frame():
+                frame=dialog.sink.videoFrame() if dialog.player else None
+                report['monitor_failure']=dict(theme=theme,target=dialog.source_time(),
+                    position=dialog.player.position() if dialog.player else None,
+                    status=dialog.player.mediaStatus().name if dialog.player else None,
+                    frame=(frame.startTime(),frame.endTime()) if frame and frame.isValid() else None)
             assert not dialog.raw.isNull() and dialog.settled_frame(), dialog.info.text()
             assert dialog.apply_button.isEnabled()
+            width=dialog.view.width()
+            draft_before=dialog.result_effect()
+            dialog.marker_toggle.click();settle(100)
+            assert dialog.marker_panel.isHidden() and dialog.view.width()>width
+            assert image_array(dialog.surface.view.grabWindow())[:,:,:3].mean()>8
+            dialog.marker_toggle.click();settle(100)
+            assert not dialog.marker_panel.isHidden() and dialog.result_effect()==draft_before
+            dialog.preview_expand.click();settle(100)
+            assert not dialog.analysis_panel.isVisible() and dialog.view.width()>width
+            assert image_array(dialog.surface.view.grabWindow())[:,:,:3].mean()>8
+            QTest.keyClick(dialog,Qt.Key_Escape);settle(100)
+            assert dialog.analysis_panel.isVisible() and not dialog.preview_expand.isChecked()
+            assert dialog.result_effect()==draft_before and dialog.isVisible()
+            dialog.marker_settings_card.toggle.click()
+            assert dialog.marker_settings_card.body.isHidden()
+            dialog.marker_settings_card.toggle.click()
             dialog.before.setChecked(False)
-            for size in ((980, 750), (760, 640)):
+            for size in ((980,700),(1100,760),(1280,850),(1440,1000)):
                 dialog.resize(*size); settle()
+                for control in (dialog.track_button,dialog.anchor_list,dialog.anchor_button,dialog.remove_frame_button,dialog.clear_target_button,dialog.clear_button):
+                    position=control.mapTo(dialog.analysis_panel,QPoint(0,0))
+                    assert position.y()>=0 and position.y()+control.height()<=dialog.analysis_panel.height(),(theme,size,control.objectName(),'clipped analysis action')
+                assert dialog.mode.count()==len(MODES)
+                assert dialog.marker_toggle.parentWidget() is dialog.source_label.parentWidget()
                 image_path = output / f'dialog-{theme}-{size[0]}.png'
-                assert dialog.grab().save(str(image_path)); report['themes'].append(image_path.name)
+                gpu_shot=dialog.surface.view.grabWindow() if dialog.surface else None
+                shot=dialog.grab()
+                if dialog.surface:
+                    painter=QPainter(shot)
+                    painter.drawImage(dialog.view.mapTo(dialog,QPoint(0,0)),gpu_shot)
+                    painter.end()
+                assert shot.save(str(image_path)); report['themes'].append(image_path.name)
             original = copy.deepcopy(item.effects[0])
             dialog.item.crop = Crop(.2, .1, .45, .65)
             dialog.mode.setCurrentText('Follow Crop'); dialog.refresh_preview(); settle()
@@ -369,7 +549,7 @@ def run(output):
             image_path = output / f'follow-guide-{theme}.png'
             assert dialog.grab().save(str(image_path)); report['themes'].append(image_path.name)
             dialog.add_anchor()
-            assert dialog.anchors and dialog.dirty_track and not dialog.apply_button.isEnabled()
+            assert dialog.anchors and not dialog.dirty_track and dialog.apply_button.isEnabled()
             dialog.reject(); dialog.deleteLater(); settle()
             assert item.effects[0] == original, 'Cancelling corrections changed the timeline.'
             panels = window.inspector.findChildren(TrackingPanel)
@@ -388,12 +568,221 @@ def run(output):
             assert window.grab().save(str(image_path)); report['themes'].append(image_path.name)
             item.crop = previous_crop
             panel.mode.setCurrentText('Circle'); settle()
+
+        phase('Real nested-modal reopen and popup ownership')
+        import gc
+        from .tracking_design import TrackingCard
+        from PySide6.QtWidgets import QWidget,QDialog
+        modal_checks=[]
+        for reopen in range(3):
+            modal=TrackingDialog(window,project.media[0],item,item.effects[0] if reopen else None)
+            failures=[]
+            def drive_modal():
+                try:
+                    deadline=time.monotonic()+5
+                    while not modal.settled_frame() and time.monotonic()<deadline:settle(50)
+                    assert modal.settled_frame()
+                    captions={card:card.title_label.text() for card in modal.findChildren(TrackingCard)}
+                    for size in ((980,700),(1280,850),(1440,1000)):
+                        modal.resize(*size);settle(50)
+                        for mode in MODES:
+                            modal.mode.setCurrentText(mode)
+                            gc.collect();QApplication.sendPostedEvents(None,QEvent.DeferredDelete);settle(15)
+                            assert all(card.title_label.text()==title for card,title in captions.items())
+                            assert modal.mode.count()==len(MODES)
+                        managed={modal.layout().itemAt(i).widget() for i in range(modal.layout().count())}
+                        assert all(w in managed for w in modal.findChildren(QWidget,options=Qt.FindDirectChildrenOnly) if w.isVisible() and not w.isWindow())
+                    modal.mode.setCurrentText('Censor Bar')
+                    modal.mode.showPopup();settle(60)
+                    popup=modal.mode.view().window()
+                    bottom=modal.mode.mapToGlobal(QPoint(0,modal.mode.height())).y()
+                    report['popup_probe']=dict(visible=popup.isVisible(),popup=(popup.x(),popup.y(),popup.width(),popup.height()),below=bottom,dialog_visible=modal.isVisible(),reopen=reopen)
+                    # Windows closes ordinary Qt popups immediately on a
+                    # non-input desktop too (plain-combo.log reproduces it).
+                    # Check native geometry here; visible item selection is
+                    # covered through the offscreen Qt popup/input test.
+                    assert popup.y()>=bottom
+                    modal.mode.hidePopup()
+                    modal.marker_editor.add_kind('Arrow')
+                    assert modal.marker_editor.picker.count()==2 and modal.mode.count()==len(MODES)
+                    modal.marker_editor.picker.setCurrentIndex(0)
+                    assert modal.mode.currentText()=='Censor Bar'
+                    modal.marker_toggle.click();assert modal.marker_toggle.arrowType()==Qt.UpArrow
+                    modal.marker_toggle.click();assert modal.marker_toggle.arrowType()==Qt.DownArrow
+                    modal_checks.append(dict(reopen=reopen,real_exec=True,all_types=True,popup_below_geometry=True,native_popup_visible=popup.isVisible(),no_orphans=True))
+                except Exception as error:failures.append(error)
+                finally:modal.reject()
+            QTimer.singleShot(0,drive_modal)
+            assert modal.exec()==QDialog.Rejected
+            if failures:raise failures[0]
+            modal.deleteLater();QApplication.sendPostedEvents(None,QEvent.DeferredDelete);settle(50)
+        report['nested_modal_ownership']=modal_checks
         report['native_controls'] = True
+        phase('Playback and multiple markers')
+
+        # The new workflow keeps corrections editable and renders a shared
+        # trajectory with independent markers through the normal GPU exporter.
+        project,item=project_with('Circle')
+        window.set_project(project)
+        dialog=TrackingDialog(window,project.media[0],item,item.effects[0])
+        dialog.show()
+        deadline=time.monotonic()+8
+        while time.monotonic()<deadline and not dialog.settled_frame():settle(40)
+        assert dialog.player is not None and dialog.surface is not None
+        assert dialog.anchor_list.rowCount()==len(analysis['frames'])
+        assert len(dialog.timeline.keyframes)==len(analysis['frames'])
+        # Real native held-pointer scrubs in both directions. Geometry must not
+        # change when seek status and decoded-frame notifications alternate.
+        timeline_width=dialog.timeline.width();positions=[]
+        QTest.mousePress(dialog.timeline,Qt.LeftButton,pos=QPoint(30,41))
+        for xs in (list(range(40,timeline_width-15,25)),list(range(timeline_width-20,30,-25))):
+            values=[]
+            for x in xs:
+                QTest.mouseMove(dialog.timeline,QPoint(x,41));settle(20)
+                assert dialog.timeline.width()==timeline_width
+                assert dialog.timeline.value()==dialog.timeline.at(x)
+                values.append(dialog.timeline.value())
+            assert values==sorted(values,reverse=xs[0]>xs[-1]),values
+            positions.append(values)
+        QTest.mouseRelease(dialog.timeline,Qt.LeftButton,pos=QPoint(30,41))
+        seek_results=[]
+        for index in (10,35,65,40,20,61):
+            dialog.timeline.setValue(index)
+            deadline=time.monotonic()+3
+            while not dialog.settled_frame() and time.monotonic()<deadline:settle(20)
+            assert dialog.settled_frame(),('seek',index,dialog.sink.videoFrame().startTime())
+            frame=dialog.sink.videoFrame();target=round(dialog.source_time()*1000000)
+            assert frame.startTime()<=target+1000 and frame.endTime()>target,(index,frame.startTime(),frame.endTime(),target)
+            seek_results.append(dict(index=index,start=frame.startTime(),end=frame.endTime()))
+        for direction in (-1,1,-1,1):
+            previous=dialog.timeline.value();dialog.step(direction)
+            deadline=time.monotonic()+3
+            while not dialog.settled_frame() and time.monotonic()<deadline:settle(20)
+            assert dialog.settled_frame() and dialog.timeline.value()==previous+direction
+        dialog.timeline.setValue(20)
+        dialog.toggle_play()
+        assert dialog.playing and not dialog._decode_timer.isActive()
+        settle(180)
+        assert dialog.timeline.value()>=20
+        assert dialog.sink.videoFrame().endTime()>round(20/30*1000000)
+        dialog.pause_for_edit()
+        report['stable_scrubbing']=dict(pointer_positions=positions,seeks=seek_results,previous_next=True,label_stable=True)
+        # The exact same source-time keys drive native GPU overlays and export.
+        dialog.select_frame_rows([10,20]);dialog.seek_anchor(10)
+        deadline=time.monotonic()+3
+        while not dialog.settled_frame() and time.monotonic()<deadline:settle(20)
+        dialog.mode.setCurrentText('Arrow');dialog.marker_editor.change('color','#ed47c4')
+        dialog.refresh_preview();settle(80)
+        assert dialog._published_markers[0]['mode']=='Arrow'
+        temporal=dialog.result_effect()
+        assert len(temporal['markers'][0]['appearance_keys'])==2
+        temporal_project,temporal_item=project_with('Circle');temporal_item.effects=[temporal]
+        temporal_target=output/'temporal-markers-gpu.mp4'
+        export(temporal_project,str(temporal_target),PRESETS['TikTok · Fast'],False,'Auto',export_audio=False)
+        with av.open(str(temporal_target)) as movie:temporal_frames=list(movie.decode(video=0))
+        temporal_errors=[]
+        for number in (6,21,51,75):
+            expected=viewer_frame(temporal_project,temporal_item,number/30)
+            difference=float(np.abs(image_array(expected)[:,:,:3].astype(float)-temporal_frames[number].to_ndarray(format='rgb24')).mean())
+            assert difference<6,(number,difference)
+            temporal_errors.append(difference)
+        report['temporal_marker_gpu_export']=dict(frames=len(temporal_frames),keys=2,errors=temporal_errors)
+        dialog.clear_frame_selection();dialog.marker_editor.current().pop('appearance_keys',None)
+        dialog.mode.setCurrentText('Circle');dialog.timeline.setValue(0);settle(150)
+        QTest.keyClick(dialog,Qt.Key_Space)
+        assert dialog.playing
+        first=dialog.player.position()
+        first_frame=dialog.sink.videoFrame().startTime()
+        first_paint=dialog.surface.frames
+        settle(350)
+        assert dialog.player.position()>first+100
+        assert dialog.sink.videoFrame().startTime()>first_frame+100000
+        assert dialog.surface.frames>first_paint
+        dialog.timeline.setValue(30)
+        settle(150)
+        assert not dialog.playing
+        assert abs(dialog.player.position()-1001)<70
+        dialog.step(1)
+        settle(150)
+        assert not dialog.playing
+        dialog.view.region=[.25,.25,.2,.2]
+        dialog._shown_time=dialog.source_time()
+        worker_count=len(window._workers)
+        dialog.region_changed(dialog.view.region)
+        assert not dialog.dirty_track and dialog.apply_button.isEnabled()
+        assert len(window._workers)==worker_count
+        dialog.marker_editor.kind.setCurrentText('Label')
+        dialog.marker_editor.add()
+        dialog.marker_editor.change('label','Tracked')
+        dialog.marker_editor.change('font_size',22)
+        dialog.marker_editor.change('offset_y',-45)
+        dialog.marker_editor.kind.setCurrentText('Arrow')
+        dialog.marker_editor.add()
+        dialog.marker_editor.change('offset_x',65)
+        dialog.marker_editor.change('rotation',25)
+        dialog.marker_editor.picker.setCurrentIndex(0)
+        dialog.transform_tool.setChecked(True);dialog.refresh_preview();settle(50)
+        before_track=copy.deepcopy(dialog.effect['analysis'])
+        original_offset=dialog.marker_editor.current().get('offset_x',0)
+        geometry=dialog.view.selected();transform,rect=dialog.view.shape(geometry)
+        point=transform.map(rect.center()).toPoint()
+        # Route through the actual native QQuick window's production forwarding.
+        QTest.mousePress(dialog.surface.view,Qt.LeftButton,pos=point)
+        QTest.mouseMove(dialog.surface.view,point+QPoint(18,9))
+        QTest.mouseRelease(dialog.surface.view,Qt.LeftButton,pos=point+QPoint(18,9))
+        assert dialog.marker_editor.current()['offset_x']>original_offset
+        point=dialog.view.handles(dialog.view.selected())['se'].toPoint()
+        QTest.mousePress(dialog.surface.view,Qt.LeftButton,pos=point)
+        QTest.mouseMove(dialog.surface.view,point+QPoint(15,12))
+        QTest.mouseRelease(dialog.surface.view,Qt.LeftButton,pos=point+QPoint(15,12))
+        assert dialog.marker_editor.current()['width']>100
+        geometry=dialog.view.selected();transform,rect=dialog.view.shape(geometry)
+        origin=transform.map(QPointF(0,0));knob=dialog.view.handles(geometry)['rotate']
+        relative=knob-origin;target=origin+QPointF(-relative.y(),relative.x())
+        QTest.mousePress(dialog.surface.view,Qt.LeftButton,pos=knob.toPoint())
+        QTest.mouseMove(dialog.surface.view,target.toPoint())
+        QTest.mouseRelease(dialog.surface.view,Qt.LeftButton,pos=target.toPoint())
+        assert abs(dialog.marker_editor.current()['rotation']-90)<3
+        assert dialog.effect['analysis']==before_track
+        report['native_marker_gizmo']=dict(move=True,resize=True,rotate=True,trajectory_unchanged=True)
+        dialog.before.setChecked(False)
+        settle(120)
+        assert dialog.surface.view.grabWindow().save(str(output/'multiple-marker-preview.png'))
+        effect=dialog.result_effect()
+        assert len(effect['markers'])==3
+        dialog.reject();dialog.deleteLater();settle(80)
+        item.effects=[effect]
+        target=output/'multiple-markers-gpu.mp4'
+        messages=[]
+        export(project,str(target),PRESETS['TikTok · Fast'],False,'Auto',export_audio=False,
+               progress=lambda _,message:messages.append(message))
+        with av.open(str(target)) as movie:
+            decoded=list(movie.decode(video=0))
+        assert len(decoded)==84
+        for number in (6,21,51,75):
+            expected=viewer_frame(project,item,number/30)
+            difference=float(np.abs(image_array(expected)[:,:,:3].astype(float)-decoded[number].to_ndarray(format='rgb24')).mean())
+            assert difference<6,(number,difference)
+        report['playback_correction_multiple_markers']=dict(passed=True,decoded_frames=len(decoded),markers=3,
+            export_messages=messages[-3:])
+
+        partial_project,partial_item=project_with('Censor Bar')
+        phase('Partial range export')
+        partial=partial_item.effects[0]['analysis']
+        partial['frames']=[point for point in partial['frames'] if point['time']<=2.0]
+        partial['source_end']=partial['frames'][-1]['time']
+        target=output/'partial-tracking-protected.mp4'
+        export(partial_project,str(target),PRESETS['TikTok · Fast'],False,'Auto',export_audio=False)
+        with av.open(str(target)) as movie:protected=list(movie.decode(video=0))
+        assert len(protected)==84
+        assert protected[75].to_ndarray(format='rgb24').max()<8
+        report['extended_range_export_protected']=True
 
         # Exercise the actual authenticated loopback MCP transport, not a
         # direct EditorAPI call. The network client never touches Qt objects;
         # queued server requests and worker completion settle on the GUI thread.
         from .assistant_client import Client
+        phase('MCP tracking')
         from .media import make_thumbnail
         network_project, network_item = project_with('Circle')
         network_item.effects = []
@@ -434,7 +823,7 @@ def run(output):
                 capabilities = client.value('get_capabilities')['object_tracking']
                 assert capabilities['modes'] == list(MODES)
                 state = client.value('get_state')
-                assert not state['project']['timeline'][0]['effects']
+                assert not state['project']['timeline'][0].get('effects',[])
                 job = client.value('track_object', revision=state['revision'],
                     item_id=network_item.id, reference_source_time=.7, region=boxes[21],
                     anchors=[dict(time=1.7, box=boxes[51])], mode='Circle',
@@ -454,7 +843,7 @@ def run(output):
                 assert effects[0]['analysis']['anchors'] == [dict(time=.7, box=boxes[21]),
                                                             dict(time=1.7, box=boxes[51])]
                 client.value('history', direction='undo')
-                assert not client.value('get_state')['project']['timeline'][0]['effects']
+                assert not client.value('get_state')['project']['timeline'][0].get('effects',[])
                 client.value('history', direction='redo')
                 restored = client.value('get_state')['project']['timeline'][0]['effects']
                 assert restored == effects
@@ -495,11 +884,15 @@ def run(output):
             report['mcp_network'] = network
         finally:
             connection.stop()
+        if os.environ.get('KINETIC_TRACKING_REAL_SOURCE'):
+            phase('Real media Add Effect first-open/reopen')
+            report['real_first_open']=verify_tracking_first_open(window,app,output,os.environ['KINETIC_TRACKING_REAL_SOURCE'])
         report['passed'] = True
     except Exception:
         report['passed'] = False
         report['error'] = traceback.format_exc()
     finally:
+        phase('Cleanup')
         if window is not None:
             window.close()
             QThreadPool.globalInstance().waitForDone(10000)
@@ -507,4 +900,8 @@ def run(output):
         QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         QApplication.processEvents()
         (output / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+        faulthandler.cancel_dump_traceback_later()
+        faulthandler.disable()
+        trace.close()
+        phase('Complete')
     return 0 if report['passed'] else 1

@@ -211,7 +211,6 @@ class PreviewCanvas(QWidget):
                      if i.track == track and i.start <= t < i.start + i.duration and not i.muted), None)
 
     def _visible_items(self) -> list[tuple[TimelineItem, QImage, QRectF]]:
-        if getattr(self,'caption_focus',False):return []
         if not self.project:
             return []
         gpu=getattr(self,'gpu',None)
@@ -220,7 +219,11 @@ class PreviewCanvas(QWidget):
             frame=self.composition_rect()
             for track in self.project.video_tracks:
                 item=self._active(track)
-                if item and item.role=='graphic':visible.append((item,QImage(),self._graphic_rect(item,frame)))
+                if item and item.role=='graphic':
+                    rect=self._graphic_rect(item,frame)
+                    if not rect.isEmpty():visible.append((item,QImage(),rect))
+            order={track:n for n,track in enumerate(self.project.video_tracks)}
+            visible.sort(key=lambda entry:order.get(entry[0].track,0))
             return visible
         frame_rect = self.composition_rect()
         visible: list[tuple[TimelineItem, QImage, QRectF]] = []
@@ -299,8 +302,14 @@ class PreviewCanvas(QWidget):
 
     def _graphic_rect(self,item,frame_rect):
         from PySide6.QtGui import QPicture
-        from .graphics import draw_graphic
-        unrotated=copy.copy(item); unrotated.transform=copy.copy(item.transform); unrotated.transform.rotation=0
+        from .graphics import draw_graphic,graphic_transform
+        from .keyframes import evaluated
+        from .motion_gpu import is_motion
+        unrotated=copy.copy(evaluated(item,self.project.playhead-item.start))
+        unrotated.keyframes={};unrotated.transform=copy.copy(unrotated.transform);unrotated.transform.rotation=0
+        if is_motion(unrotated):
+            width,height=self.project.settings.width,self.project.settings.height
+            return graphic_transform(self.project,unrotated,frame_rect).mapRect(QRectF(-width/2,-height/2,width,height))
         picture=QPicture(); painter=QPainter(picture)
         try:return draw_graphic(painter,self.project,unrotated,frame_rect,self.project.playhead)
         finally:painter.end()
@@ -352,6 +361,8 @@ class PreviewCanvas(QWidget):
                  (QPointF(target.center().x(), target.top()), QPointF(target.right(), target.center().y()),
                   QPointF(target.center().x(), target.bottom()), QPointF(target.left(), target.center().y()))]
         handle_distance = max(36.0, min(96.0, target.height() * .34))
+        if item.role=='graphic' and abs(handle_distance-target.height()/2)<12:
+            handle_distance=target.height()/2+24
         if self._is_headline(item):handle_distance=max(handle_distance,target.height()/2+24)
         rotation_handle = transform.map(anchor + QPointF(0, -handle_distance))
         return anchor, corners, sides, rotation_handle, handle_distance
@@ -409,7 +420,7 @@ class PreviewCanvas(QWidget):
         from .enhance import active as enhance_active
         from .visual_fx import evaluate_visual_fx
         project=self.project
-        if not project or getattr(self,'caption_focus',False):return None
+        if not project:return None
         requests=[]; rect=self.composition_rect()
         for track in project.video_tracks:
             item=self._active(track)
@@ -634,10 +645,9 @@ class PreviewCanvas(QWidget):
         self.update()
 
     def paintEvent(self, _):
-        if self.gpu and not self.gpu.closed and not getattr(self,'caption_focus',False):
+        if self.gpu and not self.gpu.closed:
             self.gpu.paint_underlay(_,getattr(self,'_viewer_bg','#191a1d'))
             self.gpu.schedule();return
-        if self.gpu and getattr(self,'caption_focus',False):self.gpu.container.hide()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
@@ -659,9 +669,6 @@ class PreviewCanvas(QWidget):
         painter.drawRect(frame_rect)
         if not self.project:
             return
-        if getattr(self,'caption_focus',False):
-            from .caption_focus import paint
-            paint(self,painter,frame_rect); return
         if not self.project.timeline and not self.project.captions:
             painter.save(); painter.setClipRect(frame_rect,Qt.IntersectClip)
             center=frame_rect.center(); width=max(20,frame_rect.width()-20); text_size=max(8,min(11,frame_rect.width()/20)); icon_size=round(min(32,width/4))
@@ -803,15 +810,6 @@ class PreviewCanvas(QWidget):
             if required(item):continue
             from .native_animation import draw_title
             bounds=draw_title(painter,self.project,item,frame_rect,self.project.playhead); self.text_rects[("title",item.id)]=bounds
-        from .graphics import draw_graphic
-        for item in self.project.timeline:
-            if item.role!="graphic" or item.track not in self.project.video_tracks or item.muted or not self.project.track_states.get(item.track,{}).get("visible",True) or not item.start<=self.project.playhead<item.start+item.duration:continue
-            from .native_animation import required
-            if required(item):continue
-            bounds=draw_graphic(painter,self.project,item,frame_rect,self.project.playhead)
-            if bounds:self.text_rects[("graphic",item.id)]=bounds
-            if bounds and item.id==self.selected_item_id and not item.keyframes:
-                overlay=(item,self._graphic_rect(item,frame_rect))
         for caption in sorted(self.project.captions, key=lambda c: c.start):
             if not getattr(self,'draw_captions',True):break
             if not self.project.track_states.get("subtitle_1",{}).get("visible",True) or not (caption.start <= self.project.playhead < caption.end):
@@ -908,13 +906,14 @@ class PreviewCanvas(QWidget):
                 self.update(); return
         visible = self._visible_items()
         selected = next(((i, image, rect) for i, image, rect in visible if i.id == self.selected_item_id), None)
-        if selected and selected[0].keyframes:selected=None
+        if selected and (selected[0].keyframes or self.project.track_states.get(selected[0].track,{}).get('locked')):selected=None
         if selected and self.transform_controls_visible:
             anchor,corners,sides,rotation_handle,_=self._transform_geometry(selected[0],selected[2])
             # Thin graphics can put a side grip inside another grip's hit radius.
             # The closest visible grip wins, rather than the first broad radius.
+            anchor_radius=9 if selected[0].role=='graphic' else 18
             grips=[((point-rotation_handle).manhattanLength(),16,'rotate','rotation'),
-                   ((point-anchor).manhattanLength(),18,'anchor','anchor')]
+                   ((point-anchor).manhattanLength(),anchor_radius,'anchor','anchor')]
             grips += [((point-h).manhattanLength(),14,'scale',n) for n,h in enumerate(corners)]
             grips += [((point-h).manhattanLength(),12,mode,f'side-{n}') for n,(h,mode) in enumerate(zip(sides,('scale_y','scale_x','scale_y','scale_x')))]
             nearest=min((g for g in grips if g[0]<=g[1]),key=lambda g:g[0],default=None)
@@ -946,11 +945,12 @@ class PreviewCanvas(QWidget):
         item = hit[0]
         self.selected_item_id = item.id; self.selected_layer = item.track
         self.itemSelected.emit(item.id); self.layerSelected.emit(item.track); self.update()
+        if self.project.track_states.get(item.track,{}).get('locked'):return
         if item.keyframes:
             owner=self.window()
             if hasattr(owner,'statusBar'):owner.statusBar().showMessage('Use Manage Keyframes to edit this animated clip’s transform.',4000)
             return
-        if self.tool == "crop" and item.track in self.project.video_tracks:
+        if self.tool == "crop" and item.track in self.project.video_tracks and item.role!='graphic':
             self.cropRequested.emit(item.id)
             return
         if not self.transform_controls_visible:
@@ -984,8 +984,9 @@ class PreviewCanvas(QWidget):
             geometry=self._transform_geometry(*selected) if selected else None
             grip=None
             if geometry:
+                anchor_radius=9 if selected[0].role=='graphic' else 18
                 hover_grips=[((point-geometry[3]).manhattanLength(),16,'rotate'),
-                             ((point-geometry[0]).manhattanLength(),18,'anchor')]
+                             ((point-geometry[0]).manhattanLength(),anchor_radius,'anchor')]
                 hover_grips += [((point-h).manhattanLength(),14,'resize') for h in geometry[1]]
                 hover_grips += [((point-h).manhattanLength(),12,'resize') for h in geometry[2]]
                 nearest=min((g for g in hover_grips if g[0]<=g[1]),key=lambda g:g[0],default=None)
@@ -1388,6 +1389,7 @@ class CropDialog(QDialog):
         if image and not image.isNull():self.canvas.image=image; self.canvas.update()
 
 
-def extract_frame(path: str, at: float, ffmpeg: str = "ffmpeg") -> QImage:
-    result=run_process([ffmpeg,"-hide_banner","-loglevel","error","-ss",f"{at:.4f}","-i",path,"-frames:v","1","-f","image2pipe","-vcodec","png","-"],capture_output=True)
+def extract_frame(path: str, at: float, ffmpeg: str = "ffmpeg", *, cancel_check=None) -> QImage:
+    from .process import run_cancellable
+    result=run_cancellable([ffmpeg,"-hide_banner","-loglevel","error","-ss",f"{at:.4f}","-i",path,"-frames:v","1","-f","image2pipe","-vcodec","png","-"],capture_output=True,cancel_check=cancel_check)
     image=QImage(); image.loadFromData(result.stdout,"PNG"); return image

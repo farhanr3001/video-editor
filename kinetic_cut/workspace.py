@@ -2,16 +2,18 @@
 import copy
 import json
 import math
+import re
 import time
+from collections import deque
 from dataclasses import asdict
 from pathlib import Path
 from .theme_widgets import ui_color
-from PySide6.QtCore import Qt,QSize,QMimeData,QRectF,QPoint,QUrl,QEvent,QTimer
+from PySide6.QtCore import Qt,QSize,QMimeData,QRectF,QPoint,QUrl,QEvent,QTimer,Slot
 from PySide6.QtGui import QIcon,QDrag,QColor,QPainter,QFont,QPen,QPixmap,QImage,QDesktopServices
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QLabel,QLineEdit,
     QSplitter,QStackedWidget,QListWidget,QListWidgetItem,QTreeWidget,QTreeWidgetItem,QAbstractItemView,
     QToolButton,QPushButton,QButtonGroup,QSlider,QCheckBox,QStatusBar,QInputDialog,QMenu,QFileDialog,
-    QProgressBar,QMessageBox,QAbstractButton)
+    QProgressBar,QMessageBox,QAbstractButton,QDialog,QTabBar,QSizePolicy)
 from .config import DATA_DIR
 from .controls import SafeComboBox,SafeDoubleSpinBox,SafeSlider
 from .small_controls import PanelSearch, CopyTimecodeLabel
@@ -23,6 +25,122 @@ from .properties import PropertiesPanel,scroll
 from .exporter import ExportPreset,estimate,export
 from .effects import CATALOG, DESCRIPTIONS, CATEGORY_STYLE, EFFECT_ICONS
 from . import binclips
+
+
+class BackgroundTasks(QDialog):
+    history_limit = 10
+    statuses = {
+        'Queued': 'activity', 'Running': 'activity', 'Completed': 'check',
+        'Failed': 'badge-alert', 'Cancelled': 'badge-alert',
+    }
+    labels = {
+        'waveform': 'Generate audio waveform', 'wave_image': 'Generate audio waveform',
+        'extract_frame': 'Extract preview frame', 'video_codec': 'Inspect video codec',
+        'generate_proxy': 'Prepare preview proxy', 'probe': 'Inspect media',
+        'check': 'Check for updates', 'publish_write': 'Publish media preview',
+        'next_job': 'Render video', 'render_asset': 'Render compound clip',
+        'index_folders': 'Index watched folders', 'scan': 'Scan projects',
+        'do_download': 'Download media', 'synthesize_speech': 'Synthesize dialogue',
+    }
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Tool)
+        self.setWindowTitle('Background tasks')
+        self.resize(340, 310)
+        self.active = {}
+        self.history = deque(maxlen=self.history_limit)
+        layout = QVBoxLayout(self)
+        self.summary = QLabel(self)
+        self.rows = QListWidget(self)
+        self.rows.setAccessibleName('Background tasks')
+        self.rows.setSelectionMode(QAbstractItemView.NoSelection)
+        self.rows.setWordWrap(True)
+        self.clear_button = QPushButton('Clear history', self)
+        self.clear_button.setToolTip('Remove finished tasks from this list')
+        self.clear_button.clicked.connect(self.clear_history)
+        layout.addWidget(self.summary)
+        layout.addWidget(self.rows, 1)
+        layout.addWidget(self.clear_button, 0, Qt.AlignRight)
+
+    @classmethod
+    def task_name(cls, worker):
+        if label := getattr(worker, 'task_label', ''):
+            return label
+        name = getattr(worker.function, '__qualname__', '')
+        name = name.split('.<locals>.')[0].split('.')[-1]
+        name = name.removeprefix('call_').strip('_')
+        if not name or name.startswith('<'):
+            return 'Background task'
+        return cls.labels.get(name, re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', name.replace('_', ' ')).capitalize())
+
+    def add(self, worker):
+        self.active[worker.signals] = [self.task_name(worker), 'Queued', None]
+        worker.signals.started.connect(self.started, Qt.QueuedConnection)
+        worker.signals.error.connect(self.failed, Qt.QueuedConnection)
+        self.refresh()
+
+    @Slot(float)
+    def started(self, timestamp):
+        if entry := self.active.get(self.sender()):
+            entry[1] = 'Running'
+            entry[2] = timestamp
+            self.refresh()
+
+    @Slot(str)
+    def failed(self, message):
+        if entry := self.active.get(self.sender()):
+            entry[1] = 'Cancelled' if message == 'Operation cancelled.' else 'Failed'
+            self.refresh()
+
+    def finish(self, signals):
+        if entry := self.active.pop(signals, None):
+            label, state, started_at = entry
+            ended_at = getattr(signals, 'task_finished_at', None)
+            if ended_at is None:
+                ended_at = time.monotonic()
+            elapsed = max(0, ended_at - started_at) if started_at is not None else 0
+            self.history.appendleft((label, state if state in ('Failed', 'Cancelled') else 'Completed', elapsed))
+            self.refresh()
+
+    def clear_history(self):
+        self.history.clear()
+        self.refresh()
+
+    def refresh(self):
+        if not self.isVisible():
+            return
+        scroll = self.rows.verticalScrollBar().value()
+        entries = [(name, state, None) for name, state, _ in self.active.values()]
+        entries.extend(list(self.history)[:max(0, self.history_limit - len(entries))])
+        self.rows.clear()
+        for name, state, elapsed in entries:
+            icon = lucide_icon(self.statuses[state], ui_color('text_sub').name(), 16)
+            text = f'{name}  ·  {state}'
+            if elapsed is not None:
+                if elapsed >= 60:
+                    minutes, seconds = divmod(int(elapsed), 60)
+                    text += f'  ·  {minutes}m {seconds:02d}s'
+                else:
+                    text += f'  ·  {elapsed:.1f}s'
+            self.rows.addItem(QListWidgetItem(icon, text))
+        self.rows.verticalScrollBar().setValue(scroll)
+        self.summary.setText('Active tasks and recent history' if entries else 'No background tasks yet')
+        self.clear_button.setEnabled(bool(self.history))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def toggle(self):
+        if self.isVisible():
+            self.hide()
+            return
+        button = self.parentWidget().job_status
+        corner = button.mapToGlobal(QPoint(button.width(), 0))
+        area = button.screen().availableGeometry()
+        self.move(max(area.left(), corner.x() - self.width()), max(area.top(), corner.y() - self.height() - 8))
+        self.show()
+        self.raise_()
 
 
 class PowerBins:
@@ -72,7 +190,22 @@ class PowerBins:
 
 
 class EffectList(QListWidget):
-    def __init__(self):super().__init__(); self.setDragEnabled(True); self.setObjectName("effectLibrary"); self.setMouseTracking(True)
+    def __init__(self):
+        super().__init__(); self.setDragEnabled(True); self.setObjectName("effectLibrary"); self.setMouseTracking(True)
+        self.setAutoScroll(False); self._effect_press=None
+    def mousePressEvent(self,event):
+        self._effect_press=event.position().toPoint() if event.button()==Qt.LeftButton and self.itemAt(event.position().toPoint()) else None
+        super().mousePressEvent(event)
+    def mouseMoveEvent(self,event):
+        if event.buttons()&Qt.LeftButton:
+            from PySide6.QtWidgets import QApplication
+            if self._effect_press is not None and (event.position().toPoint()-self._effect_press).manhattanLength()>=QApplication.startDragDistance():
+                self._effect_press=None
+                self.startDrag(Qt.CopyAction)
+            event.accept(); return
+        super().mouseMoveEvent(event)
+    def mouseReleaseEvent(self,event):
+        self._effect_press=None; super().mouseReleaseEvent(event)
     def startDrag(self,_):
         if not self.currentItem() or not self.currentItem().data(Qt.UserRole):return
         name=str(self.currentItem().data(Qt.UserRole))
@@ -87,9 +220,14 @@ class EffectList(QListWidget):
         if name in TRANSITION_SET:
             mime.setData("application/x-kinetic-transition",name.encode())
         drag=QDrag(self); drag.setMimeData(mime)
-        drag.setPixmap(self.viewport().grab(self.visualItemRect(self.currentItem()))); drag.exec(Qt.CopyAction)
+        drag.setPixmap(self.viewport().grab(self.visualItemRect(self.currentItem())))
+        bars=(self.horizontalScrollBar(),self.verticalScrollBar()); positions=[bar.value() for bar in bars]
+        try:drag.exec(Qt.CopyAction)
+        finally:
+            for bar,value in zip(bars,positions):bar.setValue(value)
     def paintEvent(self,event):
         super().paintEvent(event)
+        if getattr(self,'visual_library',False):return
         if self.count():
             for index in range(self.count()):
                 item=self.item(index)
@@ -285,23 +423,27 @@ class MediaPanel(QWidget):
         super().__init__(); self.window=window; self.power=PowerBins(); self.folder="project"
         from .watch_folders import WatchFolders
         self.watch_folders=WatchFolders(self)
-        self._thumbnail_rebuild_paths={}; self._thumbnail_rebuild_failed=set(); self._thumbnail_rebuild_busy=False; self._thumbnail_rebuild_scheduled=False
+        self._thumbnail_rebuild_paths={}; self._thumbnail_view_indexes={}; self._thumbnail_inflight=set(); self._thumbnail_rebuild_failed=set(); self._thumbnail_rebuild_busy=False; self._thumbnail_rebuild_scheduled=False
         root=QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
-        header=QHBoxLayout(); title=QLabel("Media Pool"); title.setObjectName("mediaPoolTitle"); header.addWidget(title); header.addStretch()
-        from .pool_tools import set_view,AudioThumbnails
+        header=QHBoxLayout()
+        self.source_tabs=QTabBar(); self.source_tabs.addTab('Project'); self.source_tabs.addTab('Power Bins'); self.source_tabs.setExpanding(False); self.source_tabs.setDrawBase(False)
+        header.addWidget(self.source_tabs); header.addStretch()
+        from .pool_tools import set_view,AudioThumbnails,GALLERY_CARD,GALLERY_ART
         self.audio_thumbnails=AudioThumbnails(self)
         self.view_button=QToolButton(); self.view_button.clicked.connect(lambda:set_view(self,not self.list_view)); header.addWidget(self.view_button)
         from .ui import tool_button
         header.addWidget(tool_button("folder-open",window.import_media,"Import media · Ctrl+I")); header.addWidget(tool_button("search",self.toggle_search,"Search media")); root.addLayout(header)
         self.search=PanelSearch(); self.search.setPlaceholderText("Search file name"); self.search.hide(); self.search.textChanged.connect(self.refresh); self.search.dismissed.connect(lambda:self.grid.setFocus()); root.addWidget(self.search)
-        split=QSplitter(Qt.Horizontal); navigation=QSplitter(Qt.Vertical); navigation.setMinimumWidth(105); navigation.setMaximumWidth(180); navigation.setChildrenCollapsible(False); navigation.setHandleWidth(5)
+        self._source_folders={0:'project',1:'Master'}
+        split=QSplitter(Qt.Horizontal); navigation=QStackedWidget(); navigation.setMinimumWidth(105); navigation.setMaximumWidth(180)
         self.project_tree=ProjectFolderTree(self); self.project_tree.setObjectName("poolFolderTree"); self.project_tree.setHeaderHidden(True); self.project_tree.setMinimumHeight(65); self.project_tree.itemClicked.connect(self.choose_folder); navigation.addWidget(self.project_tree)
         self.project_tree.setContextMenuPolicy(Qt.CustomContextMenu); self.project_tree.customContextMenuRequested.connect(self.project_context)
         lower=QWidget(); lower.setMinimumHeight(105); lower_layout=QVBoxLayout(lower); lower_layout.setContentsMargins(0,0,0,0); lower_layout.setSpacing(0); lower_layout.addWidget(QLabel("Power Bins",objectName="powerBinsTitle"))
-        self.tree=PowerFolderTree(self); self.tree.setObjectName("powerFolderTree"); self.tree.setHeaderHidden(True); self.tree.setIndentation(8); lower_layout.addWidget(self.tree); navigation.addWidget(lower); navigation.setSizes([210,160]); self.navigation_split=navigation
+        self.tree=PowerFolderTree(self); self.tree.setObjectName("powerFolderTree"); self.tree.setHeaderHidden(True); self.tree.setIndentation(8); lower_layout.addWidget(self.tree); navigation.addWidget(lower); self.navigation_split=navigation
+        self.source_tabs.currentChanged.connect(self.set_source_tab)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu); self.tree.customContextMenuRequested.connect(self.context); self.tree.itemClicked.connect(self.choose_folder)
         split.addWidget(navigation)
-        self.grid=BinMediaList(self); self.grid.setViewMode(QListWidget.IconMode); self.grid.setResizeMode(QListWidget.Adjust); self.grid.setMovement(QListWidget.Static); self.grid.setWrapping(True); self.grid.setIconSize(QSize(110,65)); self.grid.setGridSize(QSize(130,100)); self.grid.setWordWrap(False); self.grid.setTextElideMode(Qt.ElideRight)
+        self.grid=BinMediaList(self); self.grid.setViewMode(QListWidget.IconMode); self.grid.setResizeMode(QListWidget.Adjust); self.grid.setMovement(QListWidget.Static); self.grid.setWrapping(True); self.grid.setIconSize(GALLERY_ART); self.grid.setGridSize(GALLERY_CARD); self.grid.setWordWrap(False); self.grid.setTextElideMode(Qt.ElideRight)
         # Static controls icon rearrangement, not permission to drag into the editor.
         self.grid.setDragEnabled(True); self.grid.setDragDropMode(QAbstractItemView.DragDrop)
         # Icon/static layout resets the viewport's drop flag independently of
@@ -391,6 +533,16 @@ class MediaPanel(QWidget):
     def choose_folder(self,item,*_):
         self.folder=item.data(0,Qt.UserRole) or "project"; self.refresh()
         (self.tree if self.folder=="project" or self.is_watch() else self.project_tree).clearSelection()
+    def set_source_tab(self,index):
+        folder=self._source_folders.get(index,'project' if index==0 else 'Master')
+        if index==0 and folder!='project' and folder not in self.watch_folders.folders:folder='project'
+        if index==1 and folder not in self.power.data['folders']:folder='Master'
+        self.folder=folder; self.refresh()
+    def sync_source_tabs(self):
+        index=0 if self.folder=='project' or self.is_watch() else 1
+        self._source_folders[index]=self.folder
+        self.source_tabs.blockSignals(True); self.source_tabs.setCurrentIndex(index); self.source_tabs.blockSignals(False)
+        self.navigation_split.setCurrentIndex(index)
     def is_watch(self):return self.folder in self.watch_folders.folders
     def update_watch_rows(self):
         for n in range(self.project_tree.topLevelItemCount()):
@@ -439,11 +591,15 @@ class MediaPanel(QWidget):
                 if existing.pool_hidden:existing.pool_hidden=False; changed=True
             else:
                 media=copy.deepcopy(asset); self.window.project.add_media(media)
-                self.window.request_waveform(media); changed=True
+                changed=True
         if changed:self.window.model_changed(); self.window.refresh_media()
         return any(asset and not asset.timeline_preset for asset in assets)
     def toggle_search(self):self.search.toggle()
     def refresh(self,*_,preserve=False):
+        self.sync_source_tabs()
+        self.audio_thumbnails.pending.clear()
+        for path in self._thumbnail_view_indexes:self._thumbnail_rebuild_paths.pop(path,None)
+        self._thumbnail_view_indexes.clear()
         if getattr(self,'_thumbnail_rebuild_project',None) is not self.window.project:
             self._thumbnail_rebuild_project=self.window.project
             cancel=getattr(self,'_thumbnail_rebuild_cancel',None)
@@ -452,7 +608,11 @@ class MediaPanel(QWidget):
             # A previous project's transient failure must not suppress rebuilding
             # forever when the user returns to a now-readable source.
             self._thumbnail_rebuild_failed.clear()
-            for media in self.window.project.media:self._request_thumbnail(media)
+            view=(self.folder,self.search.text())
+            if preserve and self.folder!='project' and not self.is_watch() and getattr(self,'_displayed_view',None)==view:
+                self.grid.viewport().update()
+                return
+        self._displayed_view=(self.folder,self.search.text())
         selected={i.data(Qt.UserRole) for i in self.grid.selectedItems()} if preserve else set()
         current=self.grid.currentItem(); primary=current.data(Qt.UserRole) if current and preserve else None
         scroll=self.grid.verticalScrollBar().value(); horizontal=self.grid.horizontalScrollBar().value()
@@ -480,7 +640,11 @@ class MediaPanel(QWidget):
             if is_missing(m):
                 item.setText(label(m)); item.setForeground(QColor('#e5574b')); item.setToolTip(label(m)+'\n'+m.path)
                 values=metadata(m); values[0]=label(m); item.setData(Qt.UserRole+3,values); item.setData(Qt.UserRole+4,True)
-            item.setIcon(self.media_icon(m))
+            elif m.kind=='audio':
+                item.setData(Qt.UserRole+5,m.path)
+            elif m.kind in ('image','video') and not m.timeline_preset:
+                item.setData(Qt.UserRole+6,m)
+            item.setIcon(self.media_icon(m,queue=False))
             self.grid.addItem(item)
             if preserve:
                 if m.id==primary:self.grid.setCurrentItem(item)
@@ -489,13 +653,13 @@ class MediaPanel(QWidget):
         if preserve:
             self.grid.doItemsLayout()
             self.grid.verticalScrollBar().setValue(scroll); self.grid.horizontalScrollBar().setValue(horizontal)
-    def media_icon(self,media):
+    def media_icon(self,media,queue=True):
         from .missing_media import is_missing,offline_icon
         if is_missing(media):return offline_icon(media.kind=='audio')
-        if media.kind=='audio':
-            icon=self.audio_thumbnails.icon(media)
-            if not icon.isNull():return icon
-        self._request_thumbnail(media)
+        if queue:self._request_thumbnail(media)
+        if not media.thumbnail and media.kind in ('image','video'):
+            from .media import cached_thumbnail
+            media.thumbnail=cached_thumbnail(media.path,media.kind)
         if media.kind=="image" and media.thumbnail and Path(media.thumbnail).is_file():
             if not hasattr(self, '_image_icon_cache'):
                 self._image_icon_cache = {}
@@ -510,14 +674,15 @@ class MediaPanel(QWidget):
             return icon
         return QIcon(media.thumbnail) if media.thumbnail and Path(media.thumbnail).exists() else lucide_icon("music-2" if media.kind=="audio" else "captions" if media.kind in {"title","caption"} else "layers")
 
-    def _request_thumbnail(self,media):
+    def _request_thumbnail(self,media,index=None):
         if media.kind not in ('image','video'):return
         if not media.thumbnail or not Path(media.thumbnail).is_file():
             from .media import planned_thumbnail
             media.thumbnail=planned_thumbnail(media.path,media.kind)
         if Path(media.path).is_file() and (not media.thumbnail or not Path(media.thumbnail).is_file()):
-            if media.path not in self._thumbnail_rebuild_failed:
+            if media.path not in self._thumbnail_rebuild_failed and media.path not in self._thumbnail_inflight:
                 self._thumbnail_rebuild_paths[media.path]=media.kind
+                if index is not None:self._thumbnail_view_indexes[media.path]=index
                 if not self._thumbnail_rebuild_scheduled and not self._thumbnail_rebuild_busy:
                     self._thumbnail_rebuild_scheduled=True
                     QTimer.singleShot(0,self._start_thumbnail_rebuild)
@@ -530,8 +695,16 @@ class MediaPanel(QWidget):
         import threading,logging
         from .ui import Worker
         from .media import make_thumbnail
-        batch=list(self._thumbnail_rebuild_paths.items())[:20]
-        for path,_ in batch:self._thumbnail_rebuild_paths.pop(path,None)
+        for path,index in tuple(self._thumbnail_view_indexes.items()):
+            if not (self.grid.isVisible() and index.isValid() and self.grid.viewport().rect().intersects(self.grid.visualItemRect(self.grid.item(index.row())))):
+                self._thumbnail_view_indexes.pop(path,None)
+                self._thumbnail_rebuild_paths.pop(path,None)
+        batch=list(self._thumbnail_rebuild_paths.items())[:4]
+        if not batch:return
+        for path,_ in batch:
+            self._thumbnail_rebuild_paths.pop(path,None)
+            self._thumbnail_view_indexes.pop(path,None)
+        self._thumbnail_inflight={path for path,_ in batch}
         self._thumbnail_rebuild_busy=True
         cancel=threading.Event()
         self._thumbnail_rebuild_cancel=cancel
@@ -560,12 +733,13 @@ class MediaPanel(QWidget):
                     if entry['media'].get('path')==path:
                         entry['media']['thumbnail']=thumbnail; power_changed=True
             if power_changed:self.power.save()
-            self.refresh()
+            self.refresh(preserve=True)
             self.window.timeline.refresh_thumbnails()
         def failed(_):
             if not cancel.is_set() and live():self._thumbnail_rebuild_failed.update(path for path,_ in batch)
         def finished():
             self._thumbnail_rebuild_busy=False
+            self._thumbnail_inflight.clear()
             if self._thumbnail_rebuild_paths and live():self._start_thumbnail_rebuild()
         worker=Worker(work);worker.cancel_callback=cancel.set
         worker.signals.result.connect(done);worker.signals.error.connect(failed);worker.signals.finished.connect(finished);self.window.start_worker(worker)
@@ -596,7 +770,7 @@ class MediaPanel(QWidget):
     def power_bin_target(self,global_position):
         if not self.isVisible():return None
         point=self.tree.viewport().mapFromGlobal(global_position)
-        if self.tree.viewport().rect().contains(point):
+        if self.tree.isVisible() and self.tree.viewport().rect().contains(point):
             item=self.tree.itemAt(point); return item.data(0,Qt.UserRole) if item else "Master"
         point=self.grid.viewport().mapFromGlobal(global_position)
         if self.folder!="project" and not self.is_watch() and self.grid.viewport().rect().contains(point):return self.folder
@@ -724,132 +898,12 @@ class MediaPanel(QWidget):
         remove(self,{id},self.folder)
 
 
-class EffectsPanel(QWidget):
-    catalog=CATALOG
-    def __init__(self,window):
-        super().__init__(); self.window=window; root=QVBoxLayout(self); root.setContentsMargins(0,0,0,0)
-        from .ui import tool_button
-        head=QHBoxLayout(); head.addWidget(QLabel("Effects")); head.addStretch(); head.addWidget(tool_button("search",self.toggle_search,"Search effects")); root.addLayout(head)
-        self.search=PanelSearch(); self.search.setPlaceholderText("Search effects"); self.search.hide(); self.search.textChanged.connect(self.refresh); self.search.dismissed.connect(lambda:self.list.setFocus()); root.addWidget(self.search)
-        split=QSplitter(Qt.Horizontal); self.categories=QListWidget(); category_names=["All Effects","Titles",*(name for name in self.catalog if name!="Titles")]; self.categories.addItems(category_names); self.categories.setMaximumWidth(160); self.categories.setMinimumWidth(90)
-        remembered=window.settings.get("effects_category","All Effects")
-        self.categories.setCurrentRow(category_names.index(remembered) if remembered in category_names else 0)
-        self.categories.currentTextChanged.connect(self._category_changed)
-        self.list=EffectList()
-        self.list.window_ = window
-        self.list.itemDoubleClicked.connect(self._on_item_double_clicked)
-        split.addWidget(self.categories); split.addWidget(self.list); root.addWidget(split,1); self.refresh()
-        from .component_ui import events
-        events().changed.connect(self.refresh)
-    def _category_changed(self,category):
-        self.refresh()
-        if not category or self.window.settings.get("effects_category")==category:return
-        self.window.settings["effects_category"]=category
-        from .config import save_settings
-        save_settings(self.window.settings)
-    def toggle_search(self):self.search.toggle()
-    def _on_item_double_clicked(self, item):
-        name=str(item.data(Qt.UserRole) or "")
-        if not name:return
-        from .feature_packs import effect_component, available
-        key = effect_component(name)
-        if key and not available(key):
-            from .component_ui import offer
-            if not offer(self.window,key):return
-        from .transitions import TRANSITION_SET
-        if name in TRANSITION_SET and hasattr(self.window, "apply_transition"):
-            self.window.apply_transition(name)
-        else:
-            self.window.apply_effect(name)
-    def refresh(self,*_):
-        self.list.clear(); category=self.categories.currentItem().text() if self.categories.currentItem() else "All Effects"
-        from .visual_fx import VISUAL_FX_SUBSECTIONS
-        from .transitions import TRANSITION_SUBSECTIONS, TRANSITION_SET
-        for group,names in self.catalog.items():
-            if category!="All Effects" and category!=group:continue
-            if category=="Visual FX" and group=="Visual FX":
-                for sub_title,sub_names in VISUAL_FX_SUBSECTIONS.items():
-                    matching=[n for n in sub_names if self.search.text().lower() in n.lower()]
-                    if not matching:continue
-                    header=QListWidgetItem(sub_title)
-                    header.setData(Qt.UserRole,"")
-                    header.setFlags(Qt.NoItemFlags)
-                    header.setSizeHint(QSize(100,24))
-                    self.list.addItem(header)
-                    for name in matching:
-                        icon,color=CATEGORY_STYLE[group]
-                        if name in EFFECT_ICONS:icon=EFFECT_ICONS[name]
-                        item=QListWidgetItem(lucide_icon(icon,color),name); item.setData(Qt.UserRole,name)
-                        item.setToolTip(DESCRIPTIONS.get(name,"")+"\nDrag onto a video or image clip, or double-click to apply to the selected clip.")
-                        self.list.addItem(item)
-                continue
-            if category=="Video Transitions" and group=="Video Transitions":
-                for sub_title,sub_names in TRANSITION_SUBSECTIONS.items():
-                    matching=[n for n in sub_names if self.search.text().lower() in n.lower()]
-                    if not matching:continue
-                    header=QListWidgetItem(sub_title)
-                    header.setData(Qt.UserRole,"")
-                    header.setFlags(Qt.NoItemFlags)
-                    header.setSizeHint(QSize(100,24))
-                    self.list.addItem(header)
-                    for name in matching:
-                        icon,color=CATEGORY_STYLE[group]
-                        if name in EFFECT_ICONS:icon=EFFECT_ICONS[name]
-                        item=QListWidgetItem(lucide_icon(icon,color),name); item.setData(Qt.UserRole,name)
-                        item.setToolTip(DESCRIPTIONS.get(name,"")+"\nDrag onto an edit cut between two clips or clip ends to apply.")
-                        self.list.addItem(item)
-                continue
-            if category=="Face Filters" and group=="Face Filters":
-                from .effects import FACE_FILTER_SUBSECTIONS
-                for heading, sub_names in FACE_FILTER_SUBSECTIONS.items():
-                    matching=[name for name in sub_names if self.search.text().lower() in name.lower()]
-                    if not matching:continue
-                    header=QListWidgetItem(heading)
-                    header.setData(Qt.UserRole,"")
-                    header.setFlags(Qt.NoItemFlags)
-                    header.setSizeHint(QSize(100,24))
-                    self.list.addItem(header)
-                    for name in matching:
-                        icon=EFFECT_ICONS.get(name,CATEGORY_STYLE[group][0])
-                        entry=QListWidgetItem(lucide_icon(icon,CATEGORY_STYLE[group][1]),name)
-                        entry.setData(Qt.UserRole,name)
-                        entry.setToolTip(DESCRIPTIONS.get(name,"")+"\nDrag onto a video or image clip, or double-click to apply to the selected clip.")
-                        self.list.addItem(entry)
-                continue
-            for name in names:
-                if self.search.text().lower() not in name.lower():continue
-                icon,color=CATEGORY_STYLE[group]
-                if name in EFFECT_ICONS:
-                    icon=EFFECT_ICONS[name]
-                item=QListWidgetItem(lucide_icon(icon,color),name); item.setData(Qt.UserRole,name)
-                tip=DESCRIPTIONS.get(name,"")
-                if group in ("Titles","Graphics"):
-                    tip+="\nDrag onto a video track, or double-click to insert."
-                elif group=="Video Transitions" or name in TRANSITION_SET:
-                    tip+="\nDrag onto an edit cut between two clips or clip ends to apply."
-                else:
-                    tip+="\nDrag onto a compatible clip, or double-click to apply to the selected clip."
-                item.setToolTip(tip); self.list.addItem(item)
-        from .feature_packs import effect_component, available
-        for index in range(self.list.count()):
-            item = self.list.item(index); key = effect_component(str(item.data(Qt.UserRole) or ''))
-            if key and not available(key):
-                item.setData(Qt.UserRole+20,key)
-                # The native delegate keeps the identity for search/drag/tests;
-                # only the embedded controls paint this row.
-                item.setIcon(QIcon()); item.setForeground(QColor(Qt.transparent))
-                item.setToolTip('Optional download required. Click Download to view size and install.\n'+item.toolTip())
-                row=QWidget(); layout=QVBoxLayout(row); layout.setContentsMargins(6,4,6,4); layout.setSpacing(3)
-                label=QLabel(item.text()); label.setWordWrap(True); label.setMinimumWidth(0); layout.addWidget(label)
-                download=QPushButton('Download'); download.setIcon(lucide_icon('download'))
-                download.setToolTip('View download size and install this optional feature')
-                download.clicked.connect(lambda checked=False,k=key:self.download_component(k))
-                layout.addWidget(download); item.setSizeHint(QSize(100,max(76,row.sizeHint().height())))
-                self.list.setItemWidget(item,row)
+from .effects_browser import EffectsBrowser
 
-    def download_component(self,key):
-        from .component_ui import offer
-        offer(self.window,key); self.refresh()
+
+class EffectsPanel(EffectsBrowser):
+    def __init__(self, window):
+        super().__init__(window, EffectList)
 
 
 class DeliveryPage:
@@ -1097,32 +1151,42 @@ class DeliveryPage:
 
 def build_workspace(w):
     from .ui import button,tool_button,CaptionPanel
+    from .workspace_library import LibraryPanel, LibraryCommand, HEADER_HEIGHT
     central=QWidget(); root=QVBoxLayout(central); root.setContentsMargins(0,0,0,0); root.setSpacing(0); w.setCentralWidget(central)
-    toolbar=QHBoxLayout(); toolbar.setContentsMargins(6,3,6,3)
-    def toggle(text,icon,color):
-        b=QToolButton(); b.setText(text); b.setIcon(lucide_icon(icon,color)); b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon); b.setCheckable(True); b.setChecked(True); b.setProperty("panelToggle",True); toolbar.addWidget(b); return b
-    w.media_toggle=toggle("Media Pool","image-plus","#75aee8"); w.effects_toggle=toggle("Effects","wand-sparkles","#d89a72"); toolbar.addStretch()
-    w.edit_actions=[button("Generate Captions",w.generate_captions,quiet=True,icon="captions"),button("Generate TTS Dialogue",w.generate_tts_dialogue,quiet=True,icon="mic"),button("Download Media",w.open_media_downloader,quiet=True,icon="download")]
-    for action in w.edit_actions:toolbar.addWidget(action)
-    toolbar.addStretch(); w.inspector_toggle=toggle("Inspector","sliders-horizontal","#a9b7cb"); root.addLayout(toolbar)
+    w.edit_actions=[]
+    for full_name, lines, icon, callback in (('Generate Captions',('Generate','Captions'),'captions',w.generate_captions),('Generate TTS Dialogue',('Generate','TTS Dialogue'),'mic',w.generate_tts_dialogue),('Download Media',('Download','Media'),'download',w.open_media_downloader)):
+        action=LibraryCommand(); action.setText(full_name); action.setAccessibleName(full_name); action.setToolTip(full_name)
+        action.setIcon(lucide_icon(icon)); action.setProperty('iconName',icon); action.setIconSize(QSize(18,18))
+        action.setToolButtonStyle(Qt.ToolButtonTextUnderIcon); action.setFixedHeight(HEADER_HEIGHT)
+        action.setMinimumWidth(max(action.fontMetrics().horizontalAdvance(line) for line in lines)+16)
+        action.setSizePolicy(QSizePolicy.Preferred,QSizePolicy.Fixed); action.clicked.connect(callback); w.edit_actions.append(action)
+    w.header_actions=QWidget(w.menuBar()); w.header_actions_layout=QHBoxLayout(w.header_actions); w.header_actions_layout.setContentsMargins(0,0,4,0); w.header_actions_layout.setSpacing(4)
+    w.inspector_toggle=QToolButton(w.header_actions); w.inspector_toggle.setText('Inspector'); w.inspector_toggle.setAccessibleName('Inspector')
+    w.inspector_toggle.setIcon(lucide_icon('sliders-horizontal')); w.inspector_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+    w.inspector_toggle.setCheckable(True); w.inspector_toggle.setChecked(True); w.inspector_toggle.setProperty('panelToggle',True)
+    w.header_actions_layout.addWidget(w.inspector_toggle); w.menuBar().setCornerWidget(w.header_actions,Qt.TopRightCorner)
     w.page_content=QStackedWidget(); root.addWidget(w.page_content,1)
-    w.workspace_split=QSplitter(Qt.Horizontal); w.page_content.addWidget(w.workspace_split)
+    w.center_split=QSplitter(Qt.Vertical); w.center_split.setObjectName("timelineMainSplit"); w.center_split.setHandleWidth(7); w.center_split.setChildrenCollapsible(False); w.page_content.addWidget(w.center_split)
+    w.workspace_split=QSplitter(Qt.Horizontal); w.workspace_split.setChildrenCollapsible(False); w.workspace_split.setHandleWidth(7); w.center_split.addWidget(w.workspace_split)
     w.left_stack=QStackedWidget(); w.left_stack.setMinimumWidth(280); w.workspace_split.addWidget(w.left_stack)
-    w.left_panels=QSplitter(Qt.Vertical); w.media_panel=MediaPanel(w); w.effects_panel=EffectsPanel(w); w.left_panels.addWidget(w.media_panel); w.left_panels.addWidget(w.effects_panel); w.left_panels.setSizes([400,300]); w.left_stack.addWidget(w.left_panels)
+    w.media_panel=MediaPanel(w); w.effects_panel=EffectsPanel(w)
+    w.left_panels=LibraryPanel(w,w.media_panel,w.effects_panel,w.edit_actions); w.left_stack.addWidget(w.left_panels)
+    w.media_toggle=w.left_panels.buttons['Media']; w.effects_toggle=w.left_panels.buttons['Effects']
     w.media_list=w.media_panel.grid; w.effects_list=w.effects_panel.list
-    w.center_split=QSplitter(Qt.Vertical); w.center_split.setObjectName("timelineMainSplit"); w.center_split.setHandleWidth(7); w.center_split.setChildrenCollapsible(False); w.workspace_split.addWidget(w.center_split)
-    w.viewer_split=QSplitter(Qt.Horizontal); w.viewer_split.setMinimumHeight(230); w.viewer_split.setChildrenCollapsible(False); w.viewer_split.setHandleWidth(0); w.center_split.addWidget(w.viewer_split)
+    w.viewer_split=QSplitter(Qt.Horizontal); w.viewer_split.setMinimumHeight(230); w.viewer_split.setChildrenCollapsible(False); w.viewer_split.setHandleWidth(0); w.workspace_split.addWidget(w.viewer_split)
     viewer=QWidget(); viewer.setObjectName("viewerPanel"); vr=QVBoxLayout(viewer); vr.setContentsMargins(0,0,0,0); vr.setSpacing(0)
-    head=QHBoxLayout(); head.setContentsMargins(8,5,8,5); w.viewer_fit=button("Fit",lambda:w.preview.reset_view(),quiet=True); head.addWidget(w.viewer_fit); head.addStretch(); w.project_label=QLabel(w.project.name); head.addWidget(w.project_label); head.addStretch(); w.time_label=CopyTimecodeLabel("00:00:00:00",lambda:w.project.playhead); head.addWidget(w.time_label); vr.addLayout(head)
+    w.viewer_header=QWidget(); w.viewer_header.setFixedHeight(HEADER_HEIGHT)
+    viewer_header_layout=QVBoxLayout(w.viewer_header); viewer_header_layout.setContentsMargins(0,0,0,0); viewer_header_layout.setSpacing(0); vr.addWidget(w.viewer_header)
+    title_row=QHBoxLayout(); title_row.setContentsMargins(8,3,8,0)
+    w.project_label=QLabel(w.project.name); w.project_label.setMinimumWidth(0); title_row.addWidget(w.project_label,1)
+    w.time_label=CopyTimecodeLabel("00:00:00:00",lambda:w.project.playhead); title_row.addWidget(w.time_label); viewer_header_layout.addLayout(title_row)
+    head=QHBoxLayout(); head.setContentsMargins(8,2,8,3); w.viewer_fit=button("Fit",lambda:w.preview.reset_view(),quiet=True); head.addWidget(w.viewer_fit); head.addStretch(); viewer_header_layout.addLayout(head)
     w.preview=PreviewCanvas(); vr.addWidget(w.preview,1)
-    from .caption_focus import CaptionFocus
-    w.caption_focus_button=button('Caption Focus',quiet=True); w.caption_focus_button.setToolTip('Edit captions over black with audio only — video decoding and effects are bypassed')
-    head.insertWidget(1,w.caption_focus_button); w.caption_focus=CaptionFocus(w,w.caption_focus_button)
     from .preview_quality import PreviewQuality
-    w.preview_quality=PreviewQuality(w); head.insertWidget(2,w.preview_quality)
+    w.preview_quality=PreviewQuality(w); head.insertWidget(1,w.preview_quality)
     w.preview.transformChanged.connect(w.viewer_transform_changed); w.preview.captionTransformChanged.connect(w.viewer_caption_changed); w.preview.interactionFinished.connect(lambda _:w.model_changed()); w.preview.itemSelected.connect(w.select_item); w.preview.captionSelected.connect(w.select_caption); w.preview.cropRequested.connect(w.frame_source); w.preview.commandRequested.connect(w.viewer_command)
     controls=QHBoxLayout(); controls.addStretch(); controls.addWidget(tool_button("skip-back",lambda:w.seek(max(0,w.project.playhead-1/w.project.settings.fps)),"Previous frame")); controls.addWidget(tool_button("square",w.stop,"Stop · K")); w.play_button=tool_button("play",w.toggle_play,"Play / Pause · Space"); controls.addWidget(w.play_button); controls.addWidget(tool_button("skip-forward",lambda:w.seek(w.project.playhead+1/w.project.settings.fps),"Next frame")); w.loop_button=tool_button("repeat",lambda checked:setattr(w.transport,"loop",checked),"Loop timeline playback",True); controls.addWidget(w.loop_button); controls.addStretch(); vr.addLayout(controls); w.viewer_split.addWidget(viewer)
-    tl=QWidget(); tl.setObjectName("timelinePanel"); layout=QVBoxLayout(tl); layout.setContentsMargins(0,0,0,0); layout.setSpacing(0); bar=QHBoxLayout(); bar.setContentsMargins(6,4,6,4)
+    tl=QWidget(); tl.setObjectName("timelinePanel"); layout=QVBoxLayout(tl); layout.setContentsMargins(0,0,0,0); layout.setSpacing(0); bar=QHBoxLayout(); bar.setContentsMargins(6,4,14,4)
     w.tool_group=QButtonGroup(w)
     for attr,icon,mode,hint in [("select_tool","mouse-pointer-2","select","Selection · A"),("blade_tool","razor","blade","Cut/Split · B")]:
         b=tool_button(icon,lambda checked=False,m=mode:w.set_timeline_tool(m),hint,True); setattr(w,attr,b); w.tool_group.addButton(b); bar.addWidget(b)
@@ -1150,6 +1214,7 @@ def build_workspace(w):
     w.timeline=TimelineWidget(); w.timeline.itemSelected.connect(w.select_item); w.timeline.playheadChanged.connect(w.seek); w.timeline.scrubFinished.connect(w.finish_scrub); w.timeline.itemChanged.connect(lambda _:w.model_changed()); w.timeline.mediaDropped.connect(w.add_media_to_track); w.timeline.mediaBatchDropped.connect(w.add_media_batch); w.timeline.titleDropped.connect(w.add_title_object); w.timeline.commandRequested.connect(w.timeline_command); w.timeline.bladeRequested.connect(w.split_at); w.timeline.captionBladeRequested.connect(w.split_caption_at); w.timeline.effectDropped.connect(lambda name,id:w.apply_effect_to(name,id)); w.timeline.captionSelected.connect(w.select_caption); w.timeline.transitionSelected.connect(w.select_transition)
     w.timeline.setMinimumHeight(140); tl.setMinimumHeight(185)
     w.timeline.textEditRequested.connect(w.focus_timeline_text)
+    w.timeline.effectUsed.connect(w.effects_panel.remember_used)
     for signal in (w.timeline.itemSelected,w.timeline.selectionChanged,w.timeline.captionSelected,w.timeline.transitionSelected):signal.connect(w.retime_button.update_state)
     w.timeline.power_bin_target=w.media_panel.power_bin_target; w.timeline.power_bin_drag_handler=w.media_panel.begin_timeline_drag
     w.timeline.media_resolver=w.media_panel.resolve_media
@@ -1158,9 +1223,11 @@ def build_workspace(w):
     w.timeline.filesDropped.connect(w.timeline.file_drop_controller.drop)
     def reflect_zoom(value):
         w.timeline_zoom.blockSignals(True); w.timeline_zoom.setValue(zoom_to_slider(value)); w.timeline_zoom.blockSignals(False)
-    w.timeline_zoom.valueChanged.connect(lambda value:w.timeline.set_zoom(slider_to_zoom(value))); w.timeline.zoomChanged.connect(reflect_zoom); layout.addWidget(w.timeline); w.center_split.addWidget(tl); w.center_split.setSizes([490,350])
+    w.timeline_zoom.valueChanged.connect(lambda value:w.timeline.set_zoom(slider_to_zoom(value))); w.timeline.zoomChanged.connect(reflect_zoom); layout.addWidget(w.timeline); w.center_split.addWidget(tl); w.center_split.setSizes([530,300])
     w.right_stack=QStackedWidget(); w.right_stack.setFixedWidth(350); w.viewer_split.addWidget(w.right_stack); w.viewer_split.setStretchFactor(0,1); w.viewer_split.setStretchFactor(1,0); w.viewer_split.handle(1).setEnabled(False)
     w.inspector=PropertiesPanel(w); w.inspector.changed.connect(w.model_changed); w.inspector.requestCrop.connect(w.frame_source); w.right_stack.addWidget(w.inspector)
+    w.inspector.filename.setFixedHeight(30); w.inspector.tabs.tabBar().setFixedHeight(HEADER_HEIGHT-30)
+    w.inspector.tabs.tabBar().setDrawBase(False)
     # Existing caption generation commands use this non-visible editing adapter.
     w.caption_panel=CaptionPanel(lambda:w.project); w.caption_panel.changed.connect(w.model_changed); w.caption_panel.seek.connect(w.seek)
     w.normalize=QCheckBox(); w.normalize.setChecked(False); w.noise=QCheckBox(); w.duck=QCheckBox(); w.duck.setChecked(True)
@@ -1171,17 +1238,22 @@ def build_workspace(w):
         b=QToolButton(); b.setText(label); b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon); b.setCheckable(True); b.setProperty("pageNav",True); b.setProperty("navIcon",icon); b.setFixedSize(100,47); w.page_group.addButton(b,page); fr.addWidget(b)
     update_nav_icons(w)
     w.page_group.button(0).setChecked(True); w.page_group.idClicked.connect(lambda page:set_page(w,page)); fr.addStretch(); root.addWidget(footer)
-    w.workspace_split.setSizes([300,1175]); w.viewer_split.setSizes([10000,350]); w.workspace_split.setCollapsible(1,False); w.current_page=0
-    for b in [w.media_toggle,w.effects_toggle,w.inspector_toggle]:b.toggled.connect(lambda _:update_panels(w))
+    w.workspace_split.setSizes([520,960]); w.viewer_split.setSizes([10000,350]); w.workspace_split.setCollapsible(1,False); w.current_page=0
+    w.inspector_toggle.toggled.connect(lambda _:update_panels(w))
     w.setStatusBar(QStatusBar())
     w.job_progress=QProgressBar(); w.job_progress.setRange(0,0); w.job_progress.setFixedSize(66,8); w.job_progress.setTextVisible(False)
-    w.job_status=QLabel(); w.job_status.setObjectName("jobStatus"); w.statusBar().addPermanentWidget(w.job_progress); w.statusBar().addPermanentWidget(w.job_status)
-    w.job_progress.hide(); w.job_status.hide(); update_panels(w)
+    w.background_tasks=BackgroundTasks(w)
+    w.job_status=QToolButton(); w.job_status.setObjectName("jobStatus")
+    w.job_status.setFocusPolicy(Qt.StrongFocus); w.job_status.setCursor(Qt.PointingHandCursor)
+    w.job_status.setToolTip("Show active and recent background tasks")
+    w.job_status.clicked.connect(w.background_tasks.toggle)
+    w.statusBar().addPermanentWidget(w.job_progress); w.statusBar().addPermanentWidget(w.job_status)
+    w.update_job_status(); update_panels(w)
 
 
 def update_panels(w):
-    edit=w.current_page==0; w.media_panel.setVisible(w.media_toggle.isChecked()); w.effects_panel.setVisible(w.effects_toggle.isChecked())
-    w.left_stack.setVisible(not edit or w.media_toggle.isChecked() or w.effects_toggle.isChecked()); w.right_stack.setVisible(not edit or w.inspector_toggle.isChecked())
+    edit=w.current_page==0
+    w.left_stack.setVisible(True); w.right_stack.setVisible(not edit or w.inspector_toggle.isChecked())
 
 
 def set_page(w,page):
@@ -1192,12 +1264,10 @@ def set_page(w,page):
         w._edit_left_width=w.workspace_split.sizes()[0]; w.left_stack.setFixedWidth(360); w.workspace_split.handle(1).setEnabled(False)
     elif not page and w.current_page!=0:
         w.left_stack.setMinimumWidth(280); w.left_stack.setMaximumWidth(16777215); w.workspace_split.handle(1).setEnabled(True)
-        w.workspace_split.setSizes([getattr(w,'_edit_left_width',300),max(1,w.workspace_split.width()-getattr(w,'_edit_left_width',300))])
+        w.workspace_split.setSizes([getattr(w,'_edit_left_width',480),max(1,w.workspace_split.width()-getattr(w,'_edit_left_width',480))])
     w.current_page=page; w.left_stack.setCurrentIndex(min(page,1)); w.right_stack.setCurrentIndex(min(page,1)); w.page_group.button(page).setChecked(True)
     w.page_content.setCurrentIndex(0)
-    if page!=0:w.caption_focus_button.setChecked(False)
-    w.caption_focus_button.setEnabled(page==0)
-    for b in [w.media_toggle,w.effects_toggle,w.inspector_toggle,*w.edit_actions]:b.setVisible(page==0)
+    for b in [w.inspector_toggle,*w.edit_actions]:b.setVisible(page==0)
     w.timeline.set_read_only(page!=0); w.preview.set_read_only(page!=0)
     w.preview.set_transform_controls_visible(page==0 and not w.transport.playing and w.transform_box_tool.isChecked())
     w.setAcceptDrops(page==0); w.inspector.setEnabled(page==0)
@@ -1249,3 +1319,5 @@ def refresh_workspace_theme(w, palette: dict):
             sz = btn.iconSize()
             btn.setIcon(lucide_icon(icon_name, c, sz.width() or 18))
     update_nav_icons(w, palette)
+    if hasattr(w, 'background_tasks'):
+        w.background_tasks.refresh()

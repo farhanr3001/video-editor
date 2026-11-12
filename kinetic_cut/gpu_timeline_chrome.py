@@ -68,7 +68,12 @@ def refresh(surface,palette):
     def texture(name,image,x,y,width,height,z):
         node=getattr(surface,name,None)
         if node is None:
-            node=surface.create('GpuImage.qml');node.setVisible(True);node.setZ(z);setattr(surface,name,node)
+            node=surface.create('GpuImage.qml')
+            # Dynamic ruler/clock images can be republished while Qt's render
+            # thread is syncing. Schedule provider loads instead of waiting
+            # synchronously inside the GUI's source-property update.
+            node.setProperty('asynchronous',True)
+            node.setVisible(True);node.setZ(z);setattr(surface,name,node)
         node.setX(x);node.setY(y);node.setWidth(width);node.setHeight(height)
         serial=getattr(surface,'_chrome_serial',0)+1;surface._chrome_serial=serial
         surface.images.put(name,image);node.setProperty('source',f'image://prepared/{name}?v={serial}')

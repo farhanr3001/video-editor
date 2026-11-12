@@ -110,6 +110,5 @@ class PlaybackUiTests(unittest.TestCase):
             self.assertAlmostEqual(t.track_rect('subtitle_1').bottom(),t.section_rect('subtitle_1').bottom())
             t.subtitle_extent=100
             self.assertAlmostEqual(t.track_rect('subtitle_1').bottom(),t.section_rect('subtitle_1').bottom())
-            w.caption_focus.button.setChecked(True); self.assertEqual(w.caption_focus.button.text(),'Return to Video')
-            w.caption_focus.button.setChecked(False); self.assertEqual(w.caption_focus.button.text(),'Caption Focus')
+            self.assertFalse(hasattr(w,'caption_focus_button'))
         finally:w.close(); w.deleteLater(); QApplication.processEvents()

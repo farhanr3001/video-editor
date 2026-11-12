@@ -25,9 +25,16 @@ Selected video layers show their transform boxes together.
 Timeline tools include re-time controls (Ctrl+R) and compact fade handles.
 The preview and timeline use GPU-backed Qt surfaces on supported systems, with
 D3D11 composition on Windows and bounded background compatibility work;
-waveform cache files clear after the editor finishes closing.
+optional cache cleanup runs only after the editor finishes closing; Power Bin
+previews remain available and reused between projects.
 Local object tracking adds moving censors, arrows, outlines, labels, image
 markers and following crops, with adjustable appearance and correction points.
+The tracking workspace includes GPU playback, direct marker handles, a zoomable
+frame timeline, linked table/diamond multi-selection and timed marker styles.
+Advanced Colours adds grading wheels, presets, hold-to-compare source
+colours and local undo/redo; Apply creates one editor undo step.
+The Media/Effects workspace gives the timeline the full window width. The Effects
+library includes search, favourites, recent items and effect-specific previews.
 
 ## Effects and performance
 

@@ -1,0 +1,25 @@
+Kinetic Cut effects library sample media
+
+No AI-generated images or photographic faces are used.
+
+lake.jpg — Sergei Akulich, Lake Ingalls, 2015.
+Source: https://commons.wikimedia.org/wiki/File:Mountains_reflected_in_a_lake_(Unsplash).jpg
+Original: https://upload.wikimedia.org/wikipedia/commons/7/78/Mountains_reflected_in_a_lake_%28Unsplash%29.jpg
+CC0 1.0 public-domain dedication; https://creativecommons.org/publicdomain/zero/1.0/
+Resized and cropped for the effects examples.
+
+camera.jpg — Aaron Burden, “a camera on a table”, 14 November 2022.
+Source: https://unsplash.com/photos/a-camera-on-a-table-issY5v7vd9w
+Image: https://images.unsplash.com/photo-1668401498108-facf5cf3200a
+Unsplash License: https://unsplash.com/license
+Resized and cropped for the effects examples. Not offered as stock imagery.
+
+Other imagery is designed motion graphics made with Kinetic Cut's existing
+Qt Quick / Direct3D 11 motion engine. Icons use the bundled Lucide icon set.
+Typography uses the bundled OFL Inter font. There are no model downloads.
+
+The MP4 examples are silent, 384x216 at 30 fps. Each plays only on request.
+Previews demonstrate existing rendering/defaults; focal markers and specific
+sample targets are presentation assets, not changes to the effect algorithms.
+Static effects, analysis/actions and the Text/Headline titles have thumbnails
+without a Play button. The catalogue/manifest maps all existing effect names.

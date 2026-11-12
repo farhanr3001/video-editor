@@ -61,14 +61,47 @@ def active(item):
     return [e for e in item.effects if e.get('name') == NAME and e.get('enabled', True)]
 
 
-def follow_effect(item):
+def follow_effect(item, source_time=None):
     """The last enabled viewport wins; preceding viewport settings are inert."""
-    return next((e for e in reversed(active(item)) if e.get('mode') == 'Follow Crop'), None)
+    from .tracking_appearance import evaluate, variants
+    for effect in reversed(active(item)):
+        for original in reversed(effect.get('markers') or [effect]):
+            if source_time is not None:marker=evaluate(original,source_time)
+            else:
+                from .tracking_appearance import states
+                keys=states(original)
+                last=next((r for r in reversed(keys) if r['values'].get('mode')=='Follow Crop'),None)
+                marker=evaluate(original,last['time']) if last else original
+            if marker.get('mode') == 'Follow Crop':
+                merged = dict(effect)
+                merged.pop('markers',None)
+                merged.update(marker)
+                merged['analysis'] = effect.get('analysis',{})
+                return merged
+    return None
 
 
-def render_effects(item):
-    follow = follow_effect(item)
-    return [e for e in active(item) if e.get('mode') != 'Follow Crop' or e is follow]
+def render_effects(item, source_time=None):
+    result = []
+    for effect in active(item):
+        markers = effect.get('markers')
+        if markers is None:
+            from .tracking_appearance import evaluate
+            result.append(evaluate(effect,source_time) if source_time is not None else effect)
+        else:
+            if not isinstance(markers, list) or not 1 <= len(markers) <= 16:
+                raise ValueError('Use between one and sixteen tracked markers.')
+            for marker in markers:
+                from .tracking_appearance import evaluate
+                if source_time is not None:marker=evaluate(marker,source_time)
+                if not isinstance(marker, dict) or marker.get('mode') not in MODES:
+                    raise ValueError('Invalid tracked marker.')
+                merged = dict(effect)
+                merged.pop('markers', None)
+                merged.update({k: v for k, v in marker.items() if k not in ('analysis', 'name', 'markers','loss_reviewed','enabled')})
+                result.append(merged)
+    follow = next((e for e in reversed(result) if e.get('mode')=='Follow Crop'),None)
+    return [e for e in result if e.get('mode')!='Follow Crop' or e is follow]
 
 
 def _vision_conflict(item):
@@ -125,7 +158,7 @@ def valid(effect, media, item=None):
 
 def _sample(effect, media, item, source_time):
     from .object_tracking import sample
-    return sample(effect['analysis'], source_time) if valid(effect, media, item) else None
+    return sample(effect['analysis'], source_time) if valid(effect, media) else None
 
 
 def _held_box(analysis, source_time):
@@ -153,7 +186,7 @@ def box_at(effect, media, item, source_time):
     record = _sample(effect, media, item, source_time)
     if record and record['status'] in ('tracked', 'manual'):
         return list(record['box'])
-    if record and effect['loss_policy'] == 'Hold':
+    if effect['loss_policy'] == 'Hold' and valid(effect,media):
         return _held_box(effect['analysis'], source_time)
     return None
 
@@ -179,11 +212,26 @@ def _usable_image(path):
 
 def export_error(effect, media, item):
     from .object_tracking import validate as validate_analysis
+    from .tracking_appearance import variants
+    if effect.get('appearance_keys'):
+        try:
+            for variant in variants(effect):
+                error=export_error(variant,media,item)
+                if error:return error
+        except (ValueError,TypeError):return 'Invalid marker appearance keys.'
+        return ''
+    if effect.get('markers') is not None:
+        from types import SimpleNamespace
+        for marker in render_effects(SimpleNamespace(effects=[effect])):
+            error = export_error(marker, media, item)
+            if error:
+                return error
+        return ''
     if effect.get('mode') == 'Follow Crop':
         from .vision_effects import active as vision_active
         if vision_active(item):
             return VISION_CONFLICT_ERROR
-    if not valid(effect, media, item) or not validate_analysis(effect.get('analysis', {})):
+    if not valid(effect, media) or not validate_analysis(effect.get('analysis', {})):
         return 'Object tracking is missing or its source/range changed. Select the clip and analyse the target again before exporting.'
     effect = validate(effect)
     if effect['mode'] == 'Image' and not _usable_image(effect['image']):
@@ -197,7 +245,7 @@ def export_error(effect, media, item):
 def status(item, media, source_time):
     if _vision_conflict(item):
         return 'Follow Crop unavailable with face/background analysis effects — remove one effect'
-    for effect in render_effects(item):
+    for effect in render_effects(item, source_time):
         if not valid(effect, media, item):
             if effect.get('mode') == 'Follow Crop':
                 return 'Follow Crop needs analysis — original crop retained'
@@ -224,12 +272,13 @@ def cache_key(item, media, source_time):
         appearance = {k: v for k, v in effect.items() if k != 'analysis'}
         sample = _sample(effect, media, item, source_time)
         records.append((repr(appearance), repr(sample)))
-        if effect.get('mode') == 'Image':
-            try:
-                stat = Path(effect.get('image', '')).stat()
-                records.append((stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
-            except OSError:
-                records.append(None)
+        for marker in effect.get('markers') or [effect]:
+            if marker.get('mode') == 'Image':
+                try:
+                    stat = Path(marker.get('image', '')).stat()
+                    records.append((stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+                except OSError:
+                    records.append(None)
     return tuple(records), round(source_time, 9)
 
 
@@ -265,7 +314,7 @@ def effective_crop(item, media, source_time, base_crop=None):
     """
     from .model import Crop
     base = (base_crop if base_crop is not None else item.crop).clamped()
-    raw = follow_effect(item)
+    raw = follow_effect(item, source_time)
     if not raw or _vision_conflict(item):
         return base
     try:
@@ -324,7 +373,7 @@ def apply(image, item, media, source_time, crop=None):
     """
     if image.isNull():
         return image
-    effects = [effect for effect in render_effects(item) if effect.get('mode') != 'Follow Crop']
+    effects = [effect for effect in render_effects(item, source_time) if effect.get('mode') != 'Follow Crop']
     if not effects:
         return image
     result = image.convertToFormat(QImage.Format_RGBA8888).copy()
@@ -340,6 +389,9 @@ def apply(image, item, media, source_time, crop=None):
         if not record:
             if censor:
                 result = _cover(result)
+            elif effect['loss_policy']=='Hold' and valid(effect,media):
+                box=_held_box(effect['analysis'],source_time)
+                if box:_paint(result,effect,media,crop or item.crop.clamped(),box)
             continue
         if record['status'] == 'lost':
             if censor and (effect['loss_policy'] == 'Full frame' or not effect['loss_reviewed']):

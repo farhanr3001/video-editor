@@ -65,7 +65,9 @@ def collect_project(project: Project, destination: str | Path, progress=None) ->
             scene=item.get('graphic_data',{}).get('scene',{})
             extra=[(cue,'source') for cue in scene.get('sound_cues',[])]
             extra += [(node,'source') for node in scene.get('nodes',[]) if node.get('kind')=='image']
-            extra += [(effect,'image') for effect in item.get('effects',[]) if effect.get('name')=='Object Tracking']
+            for effect in item.get('effects',[]):
+                if effect.get('name')=='Object Tracking':
+                    extra += [(marker,'image') for marker in [effect]+effect.get('markers',[])]
             data=item.get('graphic_data',{})
             if data.get('preset') and isinstance(data.get('parameters'),dict):extra.append((data['parameters'],'image'))
             for target,attribute in extra:

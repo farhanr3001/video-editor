@@ -116,10 +116,14 @@ class TimelineItem(IndexedRecord):
     source_mismatch: bool = False
     source_requirement: dict = field(default_factory=dict)
     video_preset_id: str = ""
+    colour_grade: dict = field(default_factory=dict)
 
     def __post_init__(self):
         from .keyframes import clean
         self.keyframes=clean(self.keyframes)
+        if self.colour_grade or not isinstance(self.colour_grade, dict):
+            from .colour_grade import clean as clean_grade
+            self.colour_grade=clean_grade(self.colour_grade)
         if self.role=="title":
             if self.title_style is None:self.title_style=CaptionStyle(name="Basic Title",animation="none",background_enabled=False)
             elif isinstance(self.title_style,dict):self.title_style=CaptionStyle(**self.title_style)
@@ -643,9 +647,11 @@ class Project(IndexedProject):
                     from .motion_audio import rebase
                     rebase(item.get('graphic_data',{}).get('scene',{}),target.parent,True)
                     for effect in item.get('effects',[]):
-                        if effect.get('name')=='Object Tracking' and effect.get('image'):
-                            try:effect['image']=os.path.relpath(effect['image'],target.parent)
-                            except ValueError:pass
+                        if effect.get('name')=='Object Tracking':
+                            for marker in [effect]+effect.get('markers',[]):
+                                if marker.get('image'):
+                                    try:marker['image']=os.path.relpath(marker['image'],target.parent)
+                                    except ValueError:pass
                     for node in item.get('graphic_data',{}).get('scene',{}).get('nodes',[]):
                         if node.get('kind')=='image' and node.get('source'):
                             try:node['source']=os.path.relpath(node['source'],target.parent)
@@ -683,7 +689,9 @@ class Project(IndexedProject):
                     from .motion_audio import rebase
                     rebase(item.get('graphic_data',{}).get('scene',{}),base)
                     for effect in item.get('effects',[]):
-                        if effect.get('name')=='Object Tracking' and effect.get('image') and not Path(effect['image']).is_absolute():effect['image']=str((base/effect['image']).resolve())
+                        if effect.get('name')=='Object Tracking':
+                            for marker in [effect]+effect.get('markers',[]):
+                                if marker.get('image') and not Path(marker['image']).is_absolute():marker['image']=str((base/marker['image']).resolve())
                     for node in item.get('graphic_data',{}).get('scene',{}).get('nodes',[]):
                         if node.get('kind')=='image' and node.get('source') and not Path(node['source']).is_absolute():node['source']=str((base/node['source']).resolve())
                     data=item.get('graphic_data',{}); parameters=data.get('parameters',{})

@@ -567,7 +567,9 @@ QListWidget#effectLibrary::item {{
 QListWidget#effectLibrary::item:hover {{ background: {p["bg_hover"]}; border-color: {p["accent"]}; }}
 QListWidget#effectLibrary::item:selected {{ background: {p["bg_selected"]}; border-color: {p["accent"]}; }}
 QLabel#reviewBadge {{ color: {p["accent_ink"]}; font-size: 11px; padding-left: 8px; }}
-QLabel#jobStatus {{ color: {p["text_sub"]}; padding: 0 8px; }}
+QToolButton#jobStatus {{ color: {p["text_sub"]}; background: transparent; border: 1px solid transparent; padding: 0 7px; }}
+QToolButton#jobStatus:hover, QToolButton#jobStatus:focus {{ color: {p["info"]}; background: {p["bg_hover"]}; }}
+QToolButton#jobStatus:focus {{ border-color: {p["info"]}; }}
 QToolButton#sectionEnabled {{ background: {p["bg_panel"]}; color: {p["text_sub"]}; border: 0; border-radius: 8px; padding: 0; margin-left: 4px; }}
 QToolButton#sectionEnabled:checked {{ color: {p["accent_ink"]}; }}
 QToolButton#sectionEnabled:hover {{ background: {p["bg_hover"]}; }}

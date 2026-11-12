@@ -18,7 +18,7 @@ from .speed_presets import NAMES as SPEED_NAMES, DESCRIPTIONS as SPEED_DESCRIPTI
 CATALOG = {
     "Visual FX": VISUAL_FX_NAMES,
     "Video Transitions": TRANSITION_NAMES,
-    "Open FX / Blur": ["Gaussian Blur"],
+    "Open FX / Blur": ["Gaussian Blur", *FINISHING_CATEGORIES["Blur & Focus"]],
     "Transform": ["Circle Facecam"],
     "Tracking": ["Object Tracking"],
     "Quality Enhancer": ["AI Enhance"],
@@ -26,7 +26,7 @@ CATALOG = {
     "Person / Background": ["Remove Person Background"],
     "Face Filters": ["Big Eyes", "Big Nose", "Big Lips", "Face Twist", "Custom Face", "Puppy Ears & Nose", "Cat Ears & Whiskers", "AR Plague Mask", "AR Pixel Glasses"],
     "Light & Color": list(CREATIVE_NAMES[:6]),
-    **FINISHING_CATEGORIES,
+    **{group:names for group,names in FINISHING_CATEGORIES.items() if group != "Blur & Focus"},
     "Time & Speed": list(SPEED_NAMES),
     "Colour": ["Black & White", "Light Boost", "Cinematic Contrast", "Warm Tone", "Cool Tone", "Sepia", "Channel Swap"],
     "Titles": ["Text", "Headline"],

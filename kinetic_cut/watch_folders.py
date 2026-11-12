@@ -80,7 +80,7 @@ def index_folders(folders, ffprobe, ffmpeg, cancel, *, now=None, loader=probe,
                 more = True; continue
             budget -= 1
             try:
-                media = loader(entry.path, ffprobe, ffmpeg, timeout=15)
+                media = loader(entry.path, ffprobe, ffmpeg, timeout=15, defer_thumbnail=True)
                 if fingerprint(entry.path) != entry.signature:continue
                 media.id = folder_key(identity)
                 # File spelling/case must remain suitable for Explorer and display.

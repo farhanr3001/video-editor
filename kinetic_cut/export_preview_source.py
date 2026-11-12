@@ -76,7 +76,7 @@ def _worker(path):
                 try:
                     for graphic in project.timeline:
                         if graphic.start<=at<graphic.start+graphic.duration:
-                            local=(spec['first']+n-math.ceil(graphic.start*fps-1e-7))/fps
+                            local=at-graphic.start
                             # Motion compositions are drawn by the GPU (same QML as the preview); only other graphics use the painter.
                             if is_motion(graphic):gpu_items.append((graphic,local));continue
                             painter.drawImage(0,0,frame(project,graphic,local))

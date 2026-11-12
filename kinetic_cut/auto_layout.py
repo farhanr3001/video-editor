@@ -6,7 +6,7 @@ height exactly fills the output space below the webcam.
 """
 import copy
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Slot, QTimer
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout)
 
@@ -155,6 +155,11 @@ class AutoLayoutDialog(QDialog):
         if record is not None and not _same(crop, preset_crop(record['values'], self.media)):
             self.combo.blockSignals(True); self.combo.setCurrentIndex(self.combo.count() - 1); self.combo.blockSignals(False)
 
+    @Slot(object)
+    def set_source_image(self,image):
+        if self.isVisible() and image is not None and not image.isNull():
+            self.canvas.image=image;self.canvas.update()
+
     def result_options(self):
         record = self.record()
         if record is not None:
@@ -167,11 +172,11 @@ def source_image(window, media):
     """First usable picture of the source for the crop dialog."""
     image = QImage(media.path) if media.kind == 'image' else QImage()
     if image.isNull() and media.kind == 'video':
-        try:
-            from .widgets import extract_frame
-            image = extract_frame(media.path, max(0., window.project.mark_in), window.settings.get('ffmpeg', 'ffmpeg'))
-        except Exception:
-            image = QImage()
+        preview=getattr(window,'preview',None)
+        for item in window.project.timeline:
+            if item.media_id==media.id and preview is not None:
+                image=preview.frames.get(preview.active_frames.get(item.id),QImage())
+                if not image.isNull():break
     if image.isNull() and media.thumbnail:
         image = QImage(media.thumbnail)
     if image.isNull():
@@ -187,6 +192,18 @@ def ask(window, assets):
         return None
     from .video_presets import records_from_settings
     dialog = AutoLayoutDialog(window, records_from_settings(window.settings), source_image(window, videos[0]), videos[0])
-    if dialog.exec() != QDialog.Accepted:
-        return None
-    return dialog.result_options()
+    from threading import Event
+    cancel=Event();dialog.finished.connect(lambda *_:cancel.set())
+    timer=QTimer(dialog);timer.setSingleShot(True)
+    def decode():
+        if cancel.is_set() or getattr(window,'_closing',False):return
+        from .ui import Worker
+        from .widgets import extract_frame
+        worker=Worker(extract_frame,videos[0].path,max(0.,window.project.mark_in),window.settings.get('ffmpeg','ffmpeg'),cancel_check=cancel.is_set)
+        worker.cancel_callback=cancel.set;worker.signals.result.connect(dialog.set_source_image);window.start_worker(worker)
+    if videos[0].kind=='video':timer.timeout.connect(decode);timer.start(0)
+    try:
+        if dialog.exec() != QDialog.Accepted:return None
+        return dialog.result_options()
+    finally:
+        cancel.set();timer.stop();dialog.deleteLater()

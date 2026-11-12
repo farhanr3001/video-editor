@@ -91,6 +91,7 @@ class ThumbnailRecoveryTests(unittest.TestCase):
             self.assertEqual(self.window._history,history)
 
     def test_switching_projects_during_failure_still_generates_new_project(self):
+        self.window.show()
         rows=self.media(2);entered=threading.Event();release=threading.Event()
         first=Project(media=[rows[0]]);second=Project(media=[rows[1]])
         self.window.project=first
@@ -104,12 +105,13 @@ class ThumbnailRecoveryTests(unittest.TestCase):
                 original_thumbnail=rows[0].thumbnail
                 self.window.project=second;self.panel.refresh()
                 release.set()
-                self.wait_until(lambda:not self.panel._thumbnail_rebuild_busy and not self.panel._thumbnail_rebuild_paths)
+                self.wait_until(lambda:rows[1].thumbnail==str(self.thumb))
                 self.assertEqual(rows[1].thumbnail,str(self.thumb))
                 self.assertEqual(rows[0].thumbnail,original_thumbnail)
         finally:release.set()
 
     def test_returning_to_project_retries_previous_thumbnail_failure(self):
+        self.window.show()
         rows=self.media(1);project=self.window.project
         self.panel.refresh();self.panel._thumbnail_rebuild_paths.clear()
         self.panel._thumbnail_rebuild_failed.add(rows[0].path)
@@ -133,9 +135,35 @@ class ThumbnailRecoveryTests(unittest.TestCase):
             self.window.close();self.wait_until(lambda:not self.window._workers)
             self.assertTrue(observed.is_set());self.assertEqual(calls,[rows[0].path])
 
-    def test_project_thumbnails_generate_even_when_pool_shows_a_power_bin(self):
+    def test_unused_project_thumbnails_do_not_generate_when_pool_shows_a_power_bin(self):
         row=self.media(1)[0];self.panel.folder='Master'
-        with patch('kinetic_cut.media.make_thumbnail',return_value=str(self.thumb)):
+        self.window.show()
+        with patch('kinetic_cut.media.make_thumbnail',return_value=str(self.thumb)) as make:
             self.panel.refresh()
-            self.wait_until(lambda:row.thumbnail==str(self.thumb))
+            loop=QEventLoop();QTimer.singleShot(50,loop.quit);loop.exec()
+            make.assert_not_called()
+            self.assertFalse(row.thumbnail)
+
+    def test_power_bin_audio_demand_follows_the_visible_rows(self):
+        from dataclasses import asdict
+        from kinetic_cut.pool_tools import set_view
+        rows=self.media(35,kind='audio')
+        self.window.project=Project()
+        self.panel.folder='Master'
+        self.panel.power.data={'folders':['Master','Other'],'media':[
+            {'folder':'Master' if i < 34 else 'Other','media':asdict(row)}
+            for i,row in enumerate(rows)]}
+        self.window.resize(1100,700)
+        set_view(self.panel,True,False)
+        self.window.show()
+        with patch('kinetic_cut.pool_tools.wave_image',return_value=QImage(str(self.thumb))) as render:
+            self.panel.refresh()
+            self.wait_until(lambda:bool(self.panel.audio_thumbnails.cache))
+            last=self.panel.grid.item(self.panel.grid.count()-1)
+            last_path=last.toolTip()
+            self.assertFalse(self.panel.grid.viewport().rect().intersects(self.panel.grid.visualItemRect(last)))
+            self.assertNotIn(last_path,[call.args[0] for call in render.call_args_list])
+            self.panel.grid.scrollToBottom()
+            self.wait_until(lambda:last_path in [call.args[0] for call in render.call_args_list])
+            self.assertNotIn(rows[-1].path,[call.args[0] for call in render.call_args_list])
 

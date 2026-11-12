@@ -50,6 +50,20 @@ def video(path, count=45, fps=15, occlusion=(), offset=0):
 
 
 class ObjectTrackingTests(unittest.TestCase):
+    def test_compact_fft_padding_preserves_normalized_matching(self):
+        random=np.random.default_rng(516)
+        image=random.random((37,52),dtype=np.float32)
+        template=image[11:24,18:35].copy()
+        with patch.object(tracking,'_fft_size',side_effect=lambda n:1<<(n-1).bit_length()):
+            previous=tracking._correlation(image,template)
+        current=tracking._correlation(image,template)
+        # NumPy's float32 FFT paths have normal last-bit differences with
+        # different padding; locations must agree within single precision.
+        np.testing.assert_allclose(current,previous,atol=1e-7,rtol=1e-6)
+        self.assertEqual(np.unravel_index(current.argmax(),current.shape),(11,18))
+        self.assertLess(tracking._fft_size(550),1024)
+        self.assertGreaterEqual(tracking._fft_size(550),550)
+
     def test_translation_independent_size_changes_and_distractor(self):
         first, region = fixture_frame(0)
         tracker = tracking.RegionTracker(first, region)
@@ -201,8 +215,17 @@ class ObjectTrackingTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     tracking.analyze(media, item, 0, region, **keywords)
             item.duration = 601
-            with self.assertRaisesRegex(ValueError, "10 minutes"):
+            with self.assertRaisesRegex(ValueError, "30 seconds"):
                 tracking.analyze(media, item, 0, region)
+
+    def test_long_analysis_refuses_before_source_decode_without_breaking_saved_tracks(self):
+        media=MediaItem('m','missing.mp4','video','Long source',3600,1920,1080,60)
+        item=TimelineItem('i','m','video_1',0,31)
+        with patch.object(tracking,'_Frames') as reader:
+            with self.assertRaisesRegex(ValueError,'30 seconds'):
+                tracking.analyze(media,item,0,[.1,.1,.2,.2])
+            reader.assert_not_called()
+        self.assertEqual(tracking.MAX_DURATION,600)
 
     def test_shared_windows_handle_allows_rename_during_open_read(self):
         with tempfile.TemporaryDirectory() as directory:

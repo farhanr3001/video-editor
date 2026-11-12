@@ -8,6 +8,9 @@ Item {
     property matrix4x4 placement
     property vector4d cropRect: Qt.vector4d(0, 0, 1, 1)
     property vector4d grade: Qt.vector4d(0, 1, 1, 1)
+    property vector4d gradeSlope: Qt.vector4d(1, 1, 1, 0)
+    property vector4d gradeBias: Qt.vector4d(0, 0, 0, 0)
+    property vector4d gradePower: Qt.vector4d(1, 1, 1, 1)
     property real alpha: 1
     property bool ellipse: false
     property real blurX: 0
@@ -26,6 +29,9 @@ Item {
         property var source: layer.texture
         property vector4d cropRect: layer.cropRect
         property vector4d grade: layer.grade
+        property vector4d gradeSlope: layer.gradeSlope
+        property vector4d gradeBias: layer.gradeBias
+        property vector4d gradePower: layer.gradePower
         property real alpha: 1
         property real ellipse: 0
         property real sharpen: layer.sharpen

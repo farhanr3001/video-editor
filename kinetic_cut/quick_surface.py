@@ -127,7 +127,7 @@ class Surface(QObject):
         finally:painter.end()
     def _expose(self):
         self._expose_pending=False
-        if not self.closed and self.viewport.isVisible() and not getattr(self.owner,'caption_focus',False):
+        if not self.closed and self.viewport.isVisible():
             color=self.root.property('color')
             if isinstance(color,QColor):self.view.setColor(color)
             self.container.show();self.view.update()

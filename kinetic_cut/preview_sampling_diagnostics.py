@@ -34,7 +34,9 @@ def run(output):
     def save(): (out/'report.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
     def check(name,condition):
         report['checks'].append(dict(name=name,passed=bool(condition)))
-        if not condition:save();raise AssertionError(name)
+        if not condition:
+            save()
+            if os.environ.get('KINETIC_SAMPLING_COLLECT_ALL')!='1':raise AssertionError(name)
     def wait(ms):
         loop=QEventLoop();QTimer.singleShot(ms,loop.quit);loop.exec()
     def array(q):
@@ -140,13 +142,14 @@ def run(output):
             from .transition_diagnostics import preview_checks as transitions
             from .gpu_diagnostics import composition_checks
             preview_checks(w,out,check,wait);transitions(w,out,check,wait);composition_checks(w,out,check,wait)
-        report['passed']=True
+        report['passed']=all(row['passed'] for row in report['checks'])
     except Exception:report.update(passed=False,error=traceback.format_exc());save();raise
     finally:
         if w:
             w.transport.pause();w.close();deadline=time.monotonic()+12
-            while peer and peer.active and time.monotonic()<deadline:wait(30)
+            while ((peer and peer.active) or w.isVisible()) and time.monotonic()<deadline:wait(30)
+            report['window_closed']=not w.isVisible()
             report['renderer_closed']=not peer or not peer.active and peer.exitcode==0 and not peer.forced_shutdown
-            report['passed']=report['passed'] and report['renderer_closed']
+            report['passed']=report['passed'] and report['renderer_closed'] and report['window_closed']
         save()
     return 0 if report['passed'] else 1

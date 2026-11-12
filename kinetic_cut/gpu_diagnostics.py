@@ -573,10 +573,8 @@ def composition_checks(window,out,check,wait):
     project.timeline=[TimelineItem('left','photo','video_1',0,1.5),TimelineItem('right','photo','video_1',1.5,2.5,transform=Transform(.4,.5,.75)),title,graphic,motion]
     project.transitions=[Transition('dissolve','Cross Dissolve',track='video_1',start=1.2,duration=.6,left_item_id='left',right_item_id='right')]
     window.transport.sync(True);window.seek(1.4);parity('transition-with-overlays')
-    window.caption_focus_button.setChecked(True);window.preview.select_caption('caption');wait(100)
-    check('caption focus retains visible text and navigation controls',not gpu.container.isVisible() and ('caption','caption') in window.preview.text_rects and all(b.isVisible() for b in window.caption_focus.buttons))
-    window.caption_focus_button.setChecked(False);wait(150)
-    check('leaving caption focus restores the native preview',gpu.container.isVisible())
+    window.preview.select_caption('caption');wait(150)
+    check('caption selection retains the native video preview',gpu.container.isVisible())
 
 
 import ctypes

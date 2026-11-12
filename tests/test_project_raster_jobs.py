@@ -10,7 +10,7 @@ from PySide6.QtCore import QEvent,QEventLoop,QTimer,QThreadPool
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 from kinetic_cut.ui import MainWindow
-from kinetic_cut.model import Project,MediaItem
+from kinetic_cut.model import Project,MediaItem,TimelineItem
 from kinetic_cut.waveforms import Waveform
 
 
@@ -34,7 +34,8 @@ class ProjectWaveformJobsTests(unittest.TestCase):
 
     def project(self,name):
         p=self.root/(name+'.wav');p.write_bytes(b'disposable')
-        return Project(name=name,media=[MediaItem('shared-id',str(p),'audio',name,1,has_audio=True)])
+        return Project(name=name,media=[MediaItem('shared-id',str(p),'audio',name,1,has_audio=True)],
+                       timeline=[TimelineItem('clip','shared-id','audio_1',0,1)])
 
     def test_old_project_waveform_cannot_replace_same_id_in_new_project(self):
         a=self.project('a');b=self.project('b');entered=threading.Event()
@@ -44,7 +45,7 @@ class ProjectWaveformJobsTests(unittest.TestCase):
             return new
         with patch('kinetic_cut.ui.waveform',side_effect=generate):
             self.w.set_project(a);self.wait_until(entered.is_set)
-            self.w.set_project(b);self.wait_until(lambda:self.w.timeline.waveforms.get('shared-id') is new)
+            self.w.set_project(b);self.release.set();self.wait_until(lambda:self.w.timeline.waveforms.get('shared-id') is new)
             self.release.set();self.wait_until(lambda:not self.w._workers)
             self.assertIs(self.w.timeline.waveforms['shared-id'],new)
             self.assertFalse(self.w.timeline.waveform_pending);self.assertFalse(self.w.timeline.waveform_failures)

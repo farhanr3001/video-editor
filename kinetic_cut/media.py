@@ -38,7 +38,7 @@ def _rate(value: str) -> float:
             return 0.0
 
 
-def probe(path: str | Path, ffprobe: str = "ffprobe", ffmpeg: str = "ffmpeg", *, timeout=None) -> MediaItem:
+def probe(path: str | Path, ffprobe: str = "ffprobe", ffmpeg: str = "ffmpeg", *, timeout=None, defer_thumbnail=False) -> MediaItem:
     path = Path(path).resolve()
     kind = media_kind(path)
     if kind == "unknown":
@@ -46,7 +46,7 @@ def probe(path: str | Path, ffprobe: str = "ffprobe", ffmpeg: str = "ffmpeg", *,
     if kind == "image":
         with Image.open(path) as image:
             width, height = image.size
-        thumb = make_thumbnail(path, kind, ffmpeg, timeout=timeout)
+        thumb = planned_thumbnail(path,kind) if defer_thumbnail else make_thumbnail(path, kind, ffmpeg, timeout=timeout)
         return MediaItem(uid(), str(path), kind, path.name, 5.0, width, height, 0, False, thumb)
     command = [ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)]
     result = run_process(command, capture_output=True, text=True, check=True,
@@ -57,7 +57,9 @@ def probe(path: str | Path, ffprobe: str = "ffprobe", ffmpeg: str = "ffmpeg", *,
     duration = float(payload.get("format", {}).get("duration") or video.get("duration") or 0)
     width, height = int(video.get("width", 0)), int(video.get("height", 0))
     fps = _rate(video.get("avg_frame_rate", "0/1"))
-    thumb = make_thumbnail(path, kind, ffmpeg, timeout=timeout) if kind == "video" else ""
+    thumb = ""
+    if kind == "video":
+        thumb = planned_thumbnail(path,kind) if defer_thumbnail else make_thumbnail(path, kind, ffmpeg, timeout=timeout)
     media=MediaItem(uid(), str(path), kind, path.name, duration, width, height, fps, audio, thumb)
     media.video_codec = str(video.get("codec_name") or "").lower()
     for stream in payload.get('streams',[]):
@@ -179,7 +181,11 @@ def generate_proxy(media: MediaItem, ffmpeg: str = "ffmpeg", cancel=None,
     else:
         from .exporter import automatic_encoder
         codec=['-c:v','h264_nvenc','-preset','p2','-cq','18','-b:v','0'] if automatic_encoder(ffmpeg,'h264')=='NVIDIA' else ['-c:v','libx264','-preset','ultrafast','-crf','18']
-    pending=target.with_suffix('.pending.mp4')
+    import tempfile
+    # Separate editor instances can prepare the same source concurrently.
+    # Each writer owns its temporary file until the atomic publication.
+    with tempfile.NamedTemporaryFile(dir=target.parent,prefix=target.stem+'-',suffix='.pending.mp4',delete=False) as temporary:
+        pending=Path(temporary.name)
     # Short GOPs bound random-seek decoding. Compatibility previews preserve
     # the source's dimensions (up to 1920px wide); export and audio stay original.
     from .export_process import render
@@ -191,14 +197,17 @@ def generate_proxy(media: MediaItem, ffmpeg: str = "ffmpeg", cancel=None,
         if seek_cache and pending.exists() and pending.stat().st_size>512*1024**2:
             raise RuntimeError('Keeping original preview: per-source seek-cache budget reached')
         if progress:progress(fraction,message)
-    try:code,tail=render(args,media.duration,report if seek_cache else progress,cancel)
-    except BaseException:
-        if seek_cache:pending.unlink(missing_ok=True)
-        raise
-    if code or cancel and cancel.is_set():
-        if seek_cache:pending.unlink(missing_ok=True)
-        raise RuntimeError('Preview preparation stopped: '+'\n'.join(tail)[-1500:])
-    pending.replace(target)
+    try:
+        code,tail=render(args,media.duration,report if seek_cache else progress,cancel)
+        if code or cancel and cancel.is_set():
+            raise RuntimeError('Preview preparation stopped: '+'\n'.join(tail)[-1500:])
+        try:pending.replace(target)
+        except PermissionError:
+            # Another writer can publish and immediately open the finished
+            # proxy on Windows. Its complete result is suitable for this job.
+            if not target.is_file() or not target.stat().st_size:raise
+    finally:
+        pending.unlink(missing_ok=True)
     return str(target)
 
 

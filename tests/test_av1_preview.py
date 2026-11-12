@@ -29,7 +29,7 @@ class AV1PreviewTests(unittest.TestCase):
                                       timeline=[TimelineItem('clip', 'av1', 'video_1', 0, 5)])
         self.window.settings = {}
         self.window.proxies = {}
-        self.window.preview = SimpleNamespace(caption_focus=False, frames={})
+        self.window.preview = SimpleNamespace( frames={})
         calls = []
         self.window.transport = SimpleNamespace(closed=False, playing=False, decoders={},
                                                 retire_decoder=lambda key: calls.append(key),
@@ -74,6 +74,37 @@ class AV1PreviewTests(unittest.TestCase):
         self.assertTrue(Path(result).exists())
         self.assertEqual(captured['args'][captured['args'].index('-threads') + 1], '0')
         self.assertIs(captured['callback'], progress)
+
+    def test_simultaneous_proxy_writers_own_separate_temporary_files(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        cache=Path(self.folder.name)/'cache'
+        (cache/'proxies').mkdir(parents=True)
+        barrier=threading.Barrier(2)
+        pending=[]
+        def render(args,*unused):
+            path=Path(args[-1]);pending.append(path)
+            path.write_bytes(b'complete proxy')
+            barrier.wait(timeout=5)
+            return 0,[]
+        with patch('kinetic_cut.media.CACHE_DIR',cache), \
+             patch('kinetic_cut.exporter.automatic_encoder',return_value='CPU'), \
+             patch('kinetic_cut.export_process.render',side_effect=render), \
+             ThreadPoolExecutor(2) as pool:
+            paths=list(pool.map(lambda _:generate_proxy(self.media),range(2)))
+        self.assertEqual(paths[0],paths[1])
+        self.assertNotEqual(pending[0],pending[1])
+        self.assertEqual(Path(paths[0]).read_bytes(),b'complete proxy')
+        self.assertFalse(any(p.exists() for p in pending))
+
+    def test_failed_proxy_removes_its_temporary_file(self):
+        cache=Path(self.folder.name)/'cache'
+        (cache/'proxies').mkdir(parents=True)
+        with patch('kinetic_cut.media.CACHE_DIR',cache), \
+             patch('kinetic_cut.exporter.automatic_encoder',return_value='CPU'), \
+             patch('kinetic_cut.export_process.render',side_effect=RuntimeError('stopped')):
+            with self.assertRaisesRegex(RuntimeError,'stopped'):generate_proxy(self.media)
+        self.assertEqual(list((cache/'proxies').iterdir()),[])
 
     def test_ready_preview_replaces_only_decoder_input_not_source(self):
         compatible = Path(self.folder.name) / 'compatible.mp4'

@@ -49,12 +49,17 @@ DEFAULT_SETTINGS = {
 }
 
 
+_settings_dispatcher = None
+_settings_reader = None
+
+
 def load_settings() -> dict:
     current = dict(DEFAULT_SETTINGS)
     current["shortcuts"] = dict(DEFAULT_SHORTCUTS)
-    if SETTINGS_PATH.exists():
+    queued = _settings_reader(SETTINGS_PATH) if _settings_reader else None
+    if queued is not None or SETTINGS_PATH.exists():
         try:
-            saved = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            saved = queued if queued is not None else json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
             current.update({k: v for k, v in saved.items() if k != "shortcuts"})
             current["shortcuts"].update(saved.get("shortcuts", {}))
             legacy = {"<Control-i>":"Ctrl+I","<Control-s>":"Ctrl+S","<Control-e>":"Ctrl+E",
@@ -71,8 +76,21 @@ def load_settings() -> dict:
 
 
 def save_settings(settings: dict) -> None:
-    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    if _settings_dispatcher and _settings_dispatcher(settings):return
+    _write_settings(settings, SETTINGS_PATH)
+
+
+def _write_settings(settings, path):
+    """Atomic publication preserves the old preferences on write/replace failure."""
+    import tempfile, os
+    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+    fd,name=tempfile.mkstemp(prefix='.'+path.name+'.',suffix='.pending',dir=path.parent)
+    os.close(fd);pending=Path(name)
+    try:
+        pending.write_text(json.dumps(settings,indent=2),encoding='utf-8')
+        pending.replace(path)
+    finally:
+        pending.unlink(missing_ok=True)
 
 
 def load_templates() -> list[dict]:

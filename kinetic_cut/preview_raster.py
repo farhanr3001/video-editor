@@ -4,6 +4,7 @@ import math
 from PySide6.QtCore import Qt, QRect, QSize
 from PySide6.QtGui import QImage, QPainter, QColor
 from .model import Crop
+from .colour_grade import apply_image as apply_grade
 from .creative_effects import NAMES as CREATIVE_NAMES, apply as apply_creative, clock as creative_clock, ANIMATED as CREATIVE_ANIMATED
 
 @dataclass
@@ -30,7 +31,7 @@ class RasterContext:
         from .enhance import active as enhance_active
         return (item.crop_softness > 0 or item.grayscale or abs(item.brightness) > .001
                 or abs(item.contrast-1) > .001 or abs(item.saturation-1) > .001
-                or item.sharpen > .001 or active(item) or tracking_active(item) or enhance_active(item)
+                or item.sharpen > .001 or item.colour_grade or active(item) or tracking_active(item) or enhance_active(item)
                 or any(e.get('enabled',True) and (e.get('name')=='Gaussian Blur'
                        or e.get('name') in MATRICES or e.get('name') in NAMES or e.get('name') in CREATIVE_NAMES) for e in item.effects))
 
@@ -90,7 +91,7 @@ def prepare_layer_image(self, item, layer_source, target, frame_rect):
         from .visuals import grade_image, blur_image
         from .effects import MATRICES, apply_color_effect
         cache_key = (layer_source.cacheKey(), effect_key, item.grayscale,
-                     item.brightness, item.contrast, item.saturation, item.sharpen,
+                     item.brightness, item.contrast, item.saturation, item.sharpen, repr(item.colour_grade),
                      self.project.settings.blur, self.project.settings.background_brightness,
                      frame_rect.width(), frame_rect.height(), interactive)
         cached = self.effect_cache.get(item.id)
@@ -110,6 +111,7 @@ def prepare_layer_image(self, item, layer_source, target, frame_rect):
         small = source.scaled(270, 480, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         small = apply_stack(small, item)
         small = grade_image(small, item.grayscale, item.brightness, item.contrast, item.saturation, item.sharpen)
+        small = apply_grade(small, item.colour_grade)
         for effect in item.effects:
             if effect.get("enabled",True) and effect.get("name") in CREATIVE_NAMES:
                 small = apply_creative(small,effect,creative_clock(effect,item,self.project.playhead))
@@ -147,7 +149,7 @@ def prepare_layer_image(self, item, layer_source, target, frame_rect):
         # relative to the canvas, never the canvas's absolute widget position.
         # Quantize sub-pixel cancellation noise from translating both rectangles.
         relative_position = (round(target.x()-frame_rect.x(),6),round(target.y()-frame_rect.y(),6)) if interactive else None
-        cache_key = (layer_source.cacheKey(), repr(item.crop), effect_key, item.crop_softness, item.grayscale, item.brightness, item.contrast, item.saturation, item.sharpen, item.transform.rotation, item.transform.pitch, item.transform.yaw, item.transform.flip_horizontal, item.transform.flip_vertical, relative_position, target.width(), target.height(), frame_rect.width(), frame_rect.height(), interactive, raster_scale)
+        cache_key = (layer_source.cacheKey(), repr(item.crop), effect_key, item.crop_softness, item.grayscale, item.brightness, item.contrast, item.saturation, item.sharpen, repr(item.colour_grade), item.transform.rotation, item.transform.pitch, item.transform.yaw, item.transform.flip_horizontal, item.transform.flip_vertical, relative_position, target.width(), target.height(), frame_rect.width(), frame_rect.height(), interactive, raster_scale)
         cached = self.effect_cache.get(item.id)
         if cached and cached[0] == cache_key:
             return cached[1]
@@ -175,6 +177,7 @@ def prepare_layer_image(self, item, layer_source, target, frame_rect):
         if tracking:cropped = apply_tracking(cropped, item, media, source_time, effective_crop(item, media, source_time))
         cropped = apply_stack(cropped, item)
         cropped = grade_image(cropped, item.grayscale, item.brightness, item.contrast, item.saturation, item.sharpen)
+        cropped = apply_grade(cropped, item.colour_grade)
         sx = cropped.width() / max(1.0, target.width() / frame_rect.width() * self.project.settings.width)
         sy = cropped.height() / max(1.0, target.height() / frame_rect.height() * self.project.settings.height)
         for effect in item.effects:

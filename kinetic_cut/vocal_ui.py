@@ -64,6 +64,8 @@ def begin(window):
         else:project.media.append(asset)
         current.media_id=asset.id; current.in_point=0
         window.model_changed(); window.refresh_media(); window.seek(project.playhead)
+        from .effects_library import used
+        used(window, 'Vocal Only')
         window.statusBar().showMessage("Audio replaced with Vocal Only · linked video unchanged · Undo available",6000)
     def failed(detail):
         was_cancelled=cancel.is_set(); finish()

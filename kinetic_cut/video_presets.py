@@ -106,8 +106,8 @@ def records_from_settings(settings):
 
 
 class PresetNameDialog(QDialog):
-    def __init__(self, parent, records):
-        super().__init__(parent); self.setWindowTitle('Save video preset'); self.setMinimumWidth(320)
+    def __init__(self, parent, records, title='Save video preset'):
+        super().__init__(parent); self.setWindowTitle(title); self.setMinimumWidth(320)
         self.records = records
         layout = QVBoxLayout(self); layout.addWidget(QLabel('Enter preset name'))
         self.name = QLineEdit(); self.name.setMaxLength(80); layout.addWidget(self.name)

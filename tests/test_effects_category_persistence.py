@@ -23,7 +23,7 @@ class EffectsCategoryPersistenceTests(unittest.TestCase):
         second=MainWindow()
         try:
             self.assertEqual(second.effects_panel.categories.currentItem().text(),'Open FX / Blur')
-            self.assertEqual(second.effects_panel.list.count(),1)
+            self.assertEqual(second.effects_panel.list.count(),4)
             self.assertEqual(second.effects_panel.list.item(0).text(),'Gaussian Blur')
         finally:second.close()
 

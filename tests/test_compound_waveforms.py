@@ -2,7 +2,7 @@ import tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 from PySide6.QtWidgets import QApplication
-from kinetic_cut.model import Project,MediaItem
+from kinetic_cut.model import Project,MediaItem,TimelineItem
 from kinetic_cut.ui import MainWindow
 
 class CompoundWaveformTests(unittest.TestCase):
@@ -14,7 +14,7 @@ class CompoundWaveformTests(unittest.TestCase):
             try:
                 media=MediaItem('audio',str(first),'audio','Audio',1,has_audio=True)
                 with patch.object(w,'start_worker',side_effect=jobs.append):
-                    w.set_project(Project(media=[media]))
+                    w.set_project(Project(media=[media],timeline=[TimelineItem('clip',media.id,'audio_1',0,1)]))
                     old=jobs[-1]; media.path=str(second); w.request_waveform(media); new=jobs[-1]
                     old.signals.result.emit([.1]); old.signals.error.emit('old error'); old.signals.finished.emit()
                     self.assertNotIn(media.id,w.timeline.waveforms)
@@ -32,8 +32,8 @@ class CompoundWaveformTests(unittest.TestCase):
             try:
                 media=MediaItem('audio',str(path),'audio','Audio',1,has_audio=True)
                 with patch.object(w,'start_worker',side_effect=jobs.append):
-                    w.set_project(Project(media=[media])); job=jobs[-1]
-                    w.set_project(Project()); w.set_project(Project(media=[media]))
+                    w.set_project(Project(media=[media],timeline=[TimelineItem('clip',media.id,'audio_1',0,1)])); job=jobs[-1]
+                    w.set_project(Project()); w.set_project(Project(media=[media],timeline=[TimelineItem('clip',media.id,'audio_1',0,1)]))
                     self.assertEqual(len(jobs),1)
                     self.assertIn(media.id,w.timeline.waveform_pending)
                     job.signals.result.emit([.4]); job.signals.finished.emit()

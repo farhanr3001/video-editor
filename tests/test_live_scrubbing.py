@@ -26,7 +26,7 @@ class LiveScrubbingTests(unittest.TestCase):
         self.project.timeline=[TimelineItem('v'+str(n),'source',track,0,8)
                                for n,track in enumerate(self.project.video_tracks)]
         self.window.project=self.project; self.window.proxies={}; self.window.settings={}
-        self.window.preview=SimpleNamespace(caption_focus=False,frames={},active_frames={},fallback_frames={},
+        self.window.preview=SimpleNamespace(frames={},active_frames={},fallback_frames={},
                                             effect_cache={},update=Mock(),set_frame=Mock(),frame_work=Mock(return_value=None))
         self.transport=TimelineTransport(self.window); self.transport._project=self.project
         self.window.transport=self.transport

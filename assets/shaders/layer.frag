@@ -10,6 +10,9 @@ layout(std140,binding=0) uniform buf {
     float ellipse;
     float sharpen;
     vec2 pixelStep;
+    vec4 gradeSlope;
+    vec4 gradeBias;
+    vec4 gradePower;
 };
 layout(binding=1) uniform sampler2D source;
 vec4 graded(vec2 point) {
@@ -17,6 +20,7 @@ vec4 graded(vec2 point) {
     vec4 c=texture(source,uv);
     vec3 rgb=c.a>0.00001?c.rgb/c.a:vec3(0);
     rgb=clamp(rgb*max(0.0,1.0+grade.x),0.0,1.0);
+    if (abs(grade.y-1.0)>0.001) rgb=clamp((rgb-0.5)*grade.y+0.5,0.0,1.0);
     float gray=dot(rgb,vec3(0.299,0.587,0.114));
     rgb=mix(vec3(gray),rgb,grade.z);
     return vec4(clamp(rgb,0.0,1.0),c.a);
@@ -33,6 +37,11 @@ void main() {
             if(x!=0 || y!=0) softened+=graded(qt_TexCoord0+vec2(x,y)*pixelStep).rgb;
         }
         rgb=clamp(c.rgb+(c.rgb-softened/13.0)*sharpen,0.0,1.0);
+    }
+    if (gradeSlope.w > 0.5) {
+        rgb = pow(clamp(rgb * gradeSlope.rgb + gradeBias.rgb, 0.0, 1.0), gradePower.rgb);
+        float luma = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+        rgb = clamp(mix(vec3(luma), rgb, gradePower.w), 0.0, 1.0);
     }
     rgb*=grade.w;
     float mask=1.0;

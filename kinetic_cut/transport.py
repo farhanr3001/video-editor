@@ -26,6 +26,9 @@ class TimelineTransport(QObject):
         self._seek_holds={}; self._scrub_decoder_targets={}; self._video_seek_started={}
         self._required_video_keys=set(); self._protected_warm_video_keys=set()
         self._pending_video_seeks={}; self._video_seek_floor={}; self._loading_video_seeks={}
+        self._loading_audio_seeks={}
+        self._audio_load_timer=QTimer(self); self._audio_load_timer.setSingleShot(True)
+        self._audio_load_timer.timeout.connect(self.sync)
         self._frame_epochs={}; self._frame_jobs=[]; self._frame_executor=None
         self._frame_sequence=0; self._published_sequences={}; self._cpu_frame_fallback=set(); self._frame_epoch=0; self._frame_cursor=0
         self.video_pool=QThreadPool(self); self.video_pool.setMaxThreadCount(12)
@@ -160,7 +163,6 @@ class TimelineTransport(QObject):
                 quality=getattr(self.window,'preview_quality',None)
                 if quality is not None:quality.ready.pop(media_id,None)
         self._media_source_paths=sources
-        caption_focus=getattr(preview,'caption_focus',False)
         is_different_project = (self._project is None or 
                                 getattr(self._project, 'created_at', None) != getattr(p, 'created_at', None))
         if is_different_project:
@@ -176,29 +178,27 @@ class TimelineTransport(QObject):
         # media without reopening the file. Protect every simultaneous active
         # clock and the already-warmed neighbours before choosing a candidate.
         self._required_video_keys=set(); self._protected_warm_video_keys=set()
-        transition_items={item_id for trans in (() if caption_focus else active_transitions)
+        transition_items={item_id for trans in active_transitions
                           for item_id in (trans.left_item_id,trans.right_item_id) if item_id}
-        if not caption_focus:
-            for item in nearby:
-                if item.track not in p.video_tracks or item.muted:continue
-                present=item.start<=t<item.start+item.duration or item.id in transition_items
-                neighbour=t<item.start<=t+.75 or t-.75<=item.start+item.duration<=t
-                if not present and not neighbour:continue
-                state=p.track_states.get(item.track,{})
-                if not state.get('visible',True) or state.get('muted',False):continue
-                media=p.media_by_id(item.media_id)
-                if not media or media.kind!='video' or unavailable(media,item):continue
-                key=(media.id,round(item.in_point-item.start*item.speed,4),item.speed,'video')
-                if present:
-                    self._required_video_keys.add(key)
-                elif key in self.warm_keys and (t<item.start<=t+.75 or t-.75<=item.start+item.duration<=t):
-                    self._protected_warm_video_keys.add(key)
+        for item in nearby:
+            if item.track not in p.video_tracks or item.muted:continue
+            present=item.start<=t<item.start+item.duration or item.id in transition_items
+            neighbour=t<item.start<=t+.75 or t-.75<=item.start+item.duration<=t
+            if not present and not neighbour:continue
+            state=p.track_states.get(item.track,{})
+            if not state.get('visible',True) or state.get('muted',False):continue
+            media=p.media_by_id(item.media_id)
+            if not media or media.kind!='video' or unavailable(media,item):continue
+            key=(media.id,round(item.in_point-item.start*item.speed,4),item.speed,'video')
+            if present:
+                self._required_video_keys.add(key)
+            elif key in self.warm_keys and (t<item.start<=t+.75 or t-.75<=item.start+item.duration<=t):
+                self._protected_warm_video_keys.add(key)
         # Paused/warmed workers must not occupy every pool slot while a new
         # active lane waits forever. Capacity is bounded by current clocks plus
         # the existing eight-neighbour warm limit, rather than timeline length.
         self.video_pool.setMaxThreadCount(max(12,len(self._required_video_keys)+8))
         for item in nearby:
-            if caption_focus and item.track not in p.audio_tracks:continue
             if item.muted or not item.start<=t<item.start+item.duration:continue
             state=p.track_states.get(item.track,{})
             if not state.get("visible",True) or state.get("muted",False):continue
@@ -225,6 +225,9 @@ class TimelineTransport(QObject):
             # Layout duplicates share one video decoder, not three.
             audio_path=self.processed_audio(item,media) if not video else ""
             key=(media.id,round(item.in_point-item.start*item.speed,4),item.speed,"video" if video else "audio:"+item.track+audio_path)
+            # Separate audio intervals even when deleting a gap leaves their
+            # source-to-timeline mapping unchanged. Video clocks still share.
+            if not video:key+=(item.id,item.in_point,item.duration)
             active.add(key); desired=round(((t-item.start) if audio_path else item.source_time(t))*1000)
             if video:self.ensure_video_backend(key,media)
             created=key not in self.decoders; reused=False
@@ -235,12 +238,22 @@ class TimelineTransport(QObject):
             # A native seek can legitimately take longer than the drift threshold.
             # Re-seeking it on every clock tick prevents long-GOP decoding from
             # ever catching up. Explicit user seeks still supersede immediately.
-            position_needed=force or created or (key not in self._pending_video_seeks and abs(player.position()-desired)>350)
+            drift=abs(player.position()-desired)
+            position_needed=force or created or (key not in self._pending_video_seeks and drift>350)
+            if not video:
+                # A warmed clip is already at its own in-point. Keep its primed
+                # audio for an ordinary tick, but correct a delayed handoff.
+                position_needed|=key in self._loading_audio_seeks or (key in self.warm_keys and drift>20)
             if video:
                 preview.active_frames[item.id]=key; output.setVolume(0.)
                 previous=old_video.get(item.track)
                 image=preview.frames.get(key)
                 adjacent=previous and ((abs(previous['end']-item.start)<1e-6 and abs(t-item.start)<.5) or (abs(previous['start']-item.start-item.duration)<1e-6 and abs(t-item.start-item.duration)<.5))
+                # Keep decoder sharing for continuous splits and aligned layers.
+                # If a clock tick skipped a deleted gap, the shared source must
+                # seek and reject its old frames even when drift is under 350 ms.
+                if previous and previous['id']!=item.id and previous['key']==key and not adjacent:
+                    position_needed=True
                 if image is None and previous and previous['id']!=item.id and adjacent:
                     held=previous.get('image')
                     if held is not None:self.boundary_holds[key]=(held,now+.5)
@@ -265,6 +278,10 @@ class TimelineTransport(QObject):
                 current_video[item.track]=dict(id=item.id,start=item.start,end=item.start+item.duration,key=key,
                                               image=image if image is not None else preview.fallback_frames.get(item.id))
             else:
+                # Keep a newly loading source silent until Qt has accepted its
+                # requested trim position. LoadingMedia may ignore setPosition.
+                if position_needed:self._position_requested(key,desired)
+                output.setMuted(key in self._loading_audio_seeks)
                 elapsed=t-item.start; fade=min(1.,elapsed/item.fade_in) if item.fade_in else 1.
                 if item.fade_out:fade*=min(1.,max(0.,item.duration-elapsed)/item.fade_out)
                 duck=10**(p.settings.duck_amount_db/20) if item.role=="music" and p.settings.auto_duck and any(i.role=="source_audio" and not i.muted and i.start<=t<i.start+i.duration for i in nearby) else 1.
@@ -275,15 +292,16 @@ class TimelineTransport(QObject):
             if key in controlled:continue
             controlled.add(key)
             player.setPlaybackRate(self.rate*(1 if audio_path else item.speed))
-            if position_needed:self._position_requested(key,desired)
-            if self.playing and key not in self._loading_video_seeks and player.playbackState()!=QMediaPlayer.PlayingState:player.play()
+            if video and position_needed:self._position_requested(key,desired)
+            loading=key in self._loading_video_seeks or key in self._loading_audio_seeks
+            if self.playing and not loading and player.playbackState()!=QMediaPlayer.PlayingState:player.play()
             elif created and video and not reused and key not in self._loading_video_seeks:
                 # A new paused decoder otherwise never produces its first frame.
                 # Prime only muted video; frame() pauses it without starting the clock.
                 player.play()
             elif not self.playing and key not in self._pending_video_seeks and player.playbackState()==QMediaPlayer.PlayingState:player.pause()
         # Keep decoders primed for clips in active transitions
-        for trans in (() if caption_focus else active_transitions):
+        for trans in active_transitions:
             if trans.contains_time(t):
                 for item_id, is_outgoing in ((trans.left_item_id, True), (trans.right_item_id, False)):
                     item = p.item_by_id(item_id)
@@ -336,7 +354,6 @@ class TimelineTransport(QObject):
         if not self.scrubbing:
             lanes=set(); candidates=[]
             for item in nearby:
-                if caption_focus and item.track not in p.audio_tracks:continue
                 if t<item.start<=t+.75:candidates.append((item.start-t,1,item,item.in_point))
                 elif t-.75<=item.start+item.duration<=t:candidates.append((t-item.start-item.duration,-1,item,item.source_time(item.start+item.duration)-item.speed/max(1,p.settings.fps)))
             for _,direction,item,source in sorted(candidates,key=lambda value:value[0]):
@@ -355,6 +372,7 @@ class TimelineTransport(QObject):
                     if not Path(media.path).is_file():continue
                 audio_path=self.processed_audio(item,media) if not video else ''
                 lanes.add(lane); key=(media.id,round(item.in_point-item.start*item.speed,4),item.speed,'video' if video else 'audio:'+item.track+audio_path)
+                if not video:key+=(item.id,item.in_point,item.duration)
                 if key in active or key in warm:continue
                 if len(warm)>=8:break
                 warm.add(key)
@@ -365,6 +383,7 @@ class TimelineTransport(QObject):
                     self.create_decoder(key,media,video,audio_path)
                 if created or key not in self.warm_keys:
                     player,output,_=self.decoders[key]
+                    output.setProperty('monitor_base_gain',0.)
                     output.setVolume(0.)
                     desired=(0 if direction>0 else max(0,item.duration-1/max(1,p.settings.fps))) if audio_path else max(item.in_point,source)
                     self.position_decoder(key,round(desired*1000))
@@ -410,7 +429,7 @@ class TimelineTransport(QObject):
                 self.decoders[key]=(player,output,sink);player._transport_key=key
                 player.mediaStatusChanged.connect(lambda status,p=player:self.decoder_loaded(p._transport_key,p,status))
                 return
-        player=QMediaPlayer(self); output=QAudioOutput(player); player.setAudioOutput(output)
+        player=QMediaPlayer(self); output=QAudioOutput(player); output.setVolume(0.); player.setAudioOutput(output)
         if not video:
             buffer_output=QAudioBufferOutput(player)
             player.setAudioBufferOutput(buffer_output)
@@ -478,7 +497,12 @@ class TimelineTransport(QObject):
         self.levelsChanged.emit({track:(*value,False) for track,value in self._meter_display.items()})
 
     def position_decoder(self,key,milliseconds):
-        player,_,sink=self.decoders[key]
+        player,output,sink=self.decoders[key]
+        if sink is None:
+            if player.mediaStatus()==QMediaPlayer.LoadingMedia or key in self._loading_audio_seeks:
+                self._loading_audio_seeks[key]=milliseconds
+                output.setMuted(True)
+                return
         if sink:
             gpu=getattr(self.window.preview,'gpu',None)
             if gpu:gpu.freeze(key)
@@ -530,7 +554,15 @@ class TimelineTransport(QObject):
         decoder=self.decoders.get(key)
         if not decoder or decoder[0] is not player:return
         if decoder[2] is None:
-            player.setActiveVideoTrack(-1); return
+            player.setActiveVideoTrack(-1)
+            target=self._loading_audio_seeks.pop(key,None)
+            if target is not None:
+                player.setPosition(target)
+                # Re-evaluate the current timeline after this callback returns.
+                # A seek, pause, edit or project switch can retire this source
+                # while it loads. Only an active clip may become audible.
+                self._audio_load_timer.start(0)
+            return
         # LoadedMedia is also emitted during ordinary seeks. Replay only a
         # request that actually waited for source loading, once; replaying every
         # buffered seek flushes it again and starts paused players unnecessarily.
@@ -670,6 +702,7 @@ class TimelineTransport(QObject):
         self._frame_epochs.pop(key,None)
         self._published_sequences.pop(key,None); self._cpu_frame_fallback.discard(key)
         self._pending_video_seeks.pop(key,None); self._video_seek_floor.pop(key,None); self._loading_video_seeks.pop(key,None)
+        self._loading_audio_seeks.pop(key,None)
         self._video_seek_started.pop(key,None)
         self._scrub_decoder_targets.pop(key,None)
         if not self._scrub_decoder_targets:self._scrub_retry_timer.stop()
@@ -716,7 +749,8 @@ class TimelineTransport(QObject):
             pending.replace(target); return key
         def failed(detail):
             self.audio_pending.discard(key); self.audio_failed.add(key)
-            self.window.statusBar().showMessage("Audio effect preview could not be prepared; export still applies the effect. Check FFmpeg settings.",7000)
+            if not self.closed and not getattr(self.window,'_closing',False):
+                self.window.statusBar().showMessage("Audio effect preview could not be prepared; export still applies the effect. Check FFmpeg settings.",7000)
         item_id=item.id
         def ready(_):
             self.remember_audio_preview(item_id,target); self.audio_ready(key)
@@ -768,6 +802,7 @@ class TimelineTransport(QObject):
         if cache:cache.close()
         self._scrub_timer.stop()
         self._scrub_retry_timer.stop()
+        self._audio_load_timer.stop()
         self._meter_timer.stop()
         self.result_timer.stop()
         for *_,future in self._frame_jobs:future.cancel()

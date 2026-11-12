@@ -47,9 +47,9 @@ class PlaybackCacheTests(unittest.TestCase):
             preview = touch(root / 'audio-preview-0123456789abcdef.wav')
             other = touch(root / 'keep-me.wav')
             clear_on_exit({CLEAR_PLAYBACK_ON_EXIT: False}, root)
-            self.assertTrue(proxy.exists()); self.assertFalse(wave.exists()); self.assertTrue(preview.exists())
+            self.assertTrue(proxy.exists()); self.assertTrue(wave.exists()); self.assertTrue(preview.exists())
             clear_on_exit({CLEAR_PLAYBACK_ON_EXIT: True}, root)
-            self.assertFalse(proxy.exists()); self.assertFalse(preview.exists())
+            self.assertFalse(proxy.exists()); self.assertFalse(preview.exists()); self.assertFalse(wave.exists())
             self.assertTrue(other.exists())     # only audio-preview-*.wav files are ever removed
 
     def test_startup_prunes_idle_audio_previews_even_without_proxies(self):
@@ -63,6 +63,23 @@ class PlaybackCacheTests(unittest.TestCase):
             self.assertEqual(count, 2)
             self.assertFalse(old.exists()); self.assertFalse(legacy.exists())
             self.assertTrue(fresh.exists()); self.assertTrue(other.exists())
+
+    def test_power_bin_source_previews_survive_automatic_but_not_manual_cleanup(self):
+        from types import SimpleNamespace
+        from kinetic_cut.cache_manager import clear
+        from kinetic_cut.media import proxy_path
+        from kinetic_cut.waveforms import cache_name, source_key
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            source=touch(root/'source.mp4')
+            wave=touch(root/'waveforms'/cache_name(source_key(source)))
+            proxy=touch(root/'proxies'/proxy_path(SimpleNamespace(path=str(source)),seek_cache=True).name)
+            project_wave=touch(root/'waveforms'/'project.npz')
+            power={'media':[{'media':{'kind':'video','path':str(source)}}]}
+            clear_on_exit({CLEAR_PLAYBACK_ON_EXIT: True}, root, power=power)
+            self.assertTrue(wave.exists()); self.assertTrue(proxy.exists())
+            self.assertFalse(project_wave.exists())
+            self.assertEqual(clear(('waveforms','proxies'),root)[0],2)
 
     def test_clearing_is_on_by_default_for_a_first_run(self):
         from unittest.mock import patch

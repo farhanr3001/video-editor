@@ -24,7 +24,7 @@ def begin(window,item_id=None,existing_index=None):
     if window.transport.closed or window.project is not project or current is not item or current!=snapshot or window.current_page!=0 or project.track_states.get(item.track,{}).get('locked'):
         window.statusBar().showMessage('The clip changed while tracking was open. No changes were applied.',7000); return
     effect=dialog.result_effect()
-    if not valid(effect,project.media_by_id(item.media_id),item):
+    if not valid(effect,project.media_by_id(item.media_id)):
         window.statusBar().showMessage('The source changed. Track the current source before applying.',7000); return
     if existing_index is None:current.effects.append(effect); index=len(current.effects)-1
     else:current.effects[existing_index]=effect; index=existing_index
@@ -58,6 +58,8 @@ class TrackingPanel(QWidget):
     def effect(self):return self.inspector.effect()
     def change(self,key,value):
         if self.updating or self.inspector.updating:return
+        for _,effect in self.inspector.effect_targets():
+            if effect.get('markers'):effect['markers'][0][key]=value
         if key=='loss_policy':
             for _,effect in self.inspector.effect_targets():effect.update(loss_policy=value,loss_reviewed=False)
             self.inspector.changed.emit()
@@ -68,6 +70,7 @@ class TrackingPanel(QWidget):
         from .tracking_effect import default_effect
         for _,effect in self.inspector.effect_targets():
             effect.update(mode=mode,loss_policy=default_effect(mode)['loss_policy'],loss_reviewed=False)
+            if effect.get('markers'):effect['markers'][0].update(mode=mode,loss_policy=effect['loss_policy'])
         self.inspector.changed.emit(); self.refresh(self.effect())
     def choose_color(self,key):
         effect=self.effect()

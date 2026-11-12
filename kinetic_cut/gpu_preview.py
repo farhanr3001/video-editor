@@ -16,6 +16,7 @@ from PySide6.QtQuick import QQuickItem
 from .quick_surface import Surface, enabled
 from .native_engine import LatestRequest
 from .creative_effects import NAMES as CREATIVE_NAMES, descriptor, clock as creative_clock
+from .colour_grade import publish as publish_grade
 
 
 def sampling_size(source_width,source_height,viewport_width,viewport_height,dpr=1.,view_zoom=1.):
@@ -33,7 +34,8 @@ def sampling_size(source_width,source_height,viewport_width,viewport_height,dpr=
 
 
 def shader_supported(item):
-    if item.role in ('title','graphic') or item.crop_softness or abs(item.contrast-1)>.001:return False
+    if item.role in ('title','graphic') or item.crop_softness:return False
+    if abs(item.contrast-1)>.001 and not item.colour_grade:return False
     if item.composite_mode!='Normal':return False
     effects=[e for e in item.effects if e.get('enabled',True)]
     return all(e.get('name')=='Gaussian Blur' or e.get('category')=='Visual FX' or e.get('name') in CREATIVE_NAMES for e in effects) and sum(e.get('name')=='Gaussian Blur' for e in effects)<=1
@@ -183,6 +185,7 @@ class GpuPreview(Surface):
         layer.setProperty('texture',texture);layer.setProperty('cropRect',crop or QVector4D(0,0,1,1))
         layer.setProperty('grade',QVector4D(item.brightness,item.contrast,0 if item.grayscale else item.saturation,
             self.canvas.project.settings.background_brightness if item.role=='background' else 1.) if item else QVector4D(0,1,1,1))
+        publish_grade(layer,item.colour_grade if item else {})
         layer.setProperty('alpha',alpha);layer.setProperty('ellipse',bool(item and item.transform.shape=='circle'))
         # Sharpen is a per-layer shader uniform, including at zero. It must not
         # retire every decoder/crop using this source just to reset one control.
@@ -213,8 +216,6 @@ class GpuPreview(Surface):
         if self.closed:return
         started=time.perf_counter();c=self.canvas;p=c.project
         self._used_textures=set()
-        if getattr(c,'caption_focus',False):
-            self.container.hide();return
         self.geometry(c.rect())
         frame=c.composition_rect()
         for prop,value in (('canvasX',frame.x()),('canvasY',frame.y()),('canvasWidth',frame.width()),('canvasHeight',frame.height())):self.root.setProperty(prop,value)
@@ -235,12 +236,12 @@ class GpuPreview(Surface):
         from .visual_fx import evaluate_visual_fx,apply_visual_fx_to_transform
         from .missing_media import unavailable
         from .native_animation import required as native_required
-        legacy=[i for i in items if i.role in ('title','graphic') and not native_required(i) and not i.muted
+        legacy=[i for i in items if i.role=='title' and not native_required(i) and not i.muted
                 and i.track in p.video_tracks and p.track_states.get(i.track,{}).get('visible',True)]
         legacy_ids={i.id for i in legacy}
         from .motion_gpu import is_motion
-        gpu_motion=[i for i in legacy if is_motion(i)]
-        legacy=[i for i in legacy if not is_motion(i)]
+        gpu_motion=[i for track,i in active.items() if track not in transition_tracks and is_motion(i)]
+        motion_ids={i.id for i in gpu_motion}
         whole_ids={i.id for i in active.values()}|legacy_ids
         whole_items=[i for i in items if i.id in whole_ids]
         for transition in transitions:
@@ -297,7 +298,7 @@ class GpuPreview(Surface):
                 pair=[p.item_by_id(v) for v in (transition.left_item_id,transition.right_item_id) if v]
                 jobs.append((key,[i for i in pair if i],[transition],[],z,True));shown.add(key);continue
             if item is None:continue
-            if item.id in legacy_ids:continue
+            if item.id in legacy_ids or item.id in motion_ids:continue
             if not shader_supported(item):
                 jobs.append((key,[item],[],[],z,True));shown.add(key);continue
             original=item;item=evaluated_items[item.id]
@@ -366,8 +367,8 @@ class GpuPreview(Surface):
             layer=self._place(key,texture,target,matrix,uv,item,alpha,blur,z)
             layer.setParentItem(pair_parent or self.item('canvas'));shown.add(key)
         if not whole and gpu_motion:
-            shown.update(self.motion.update(gpu_motion,p,at,local,len(tracks)+1))
-        elif self.motion.layers:self.motion.update([],p,at,local,0)
+            shown.update(self.motion.update(gpu_motion,p,at,local,{track:z for z,track in enumerate(tracks)}))
+        elif self.motion.layers:self.motion.update([],p,at,local,{})
         if not whole and legacy:
             jobs.append(('legacy-overlays',legacy,[],[],len(tracks)+1,True));shown.add('legacy-overlays')
         if not whole and captions and p.track_states.get('subtitle_1',{}).get('visible',True):
@@ -435,8 +436,17 @@ class GpuPreview(Surface):
         caption_ids=getattr(getattr(c.window(),'timeline',None),'selected_caption_ids',set())|{c.selected_caption_id}
         inspector=getattr(c.window(),'inspector',None);tabs=getattr(inspector,'tabs',None)
         selected=c.project.item_by_id(c.selected_item_id)
+        graphics=[]
+        if c.transform_controls_visible:
+            for track in c.project.video_tracks:
+                item=c._active(track)
+                if (item and item.role=='graphic' and item.id in ids and not item.keyframes
+                        and not c.project.track_states.get(track,{}).get('locked')):
+                    rect=c._graphic_rect(item,frame)
+                    if not rect.isEmpty():graphics.append((item,rect))
         key=(self.canvas.size(),frozenset(ids),frozenset(caption_ids),c.selected_item_id,tuple((i.id,repr(i.transform),r) for i,_,r in self.targets if i.id in ids),repr(self.bounds),c.transform_controls_visible,c.drag_mode,getattr(c,'center_guide_active',False),frame,self.notice,
-             tabs.currentIndex() if tabs else None,repr(selected.effects) if selected else None)
+             tabs.currentIndex() if tabs else None,repr(selected.effects) if selected else None,
+             tuple((i.id,repr(i.transform),r) for i,r in graphics),c.drag_handle)
         if key==getattr(self,'_control_key',None):return
         self._control_key=key
         image=QImage(max(1,c.width()),max(1,c.height()),QImage.Format_ARGB32_Premultiplied);image.fill(Qt.transparent)
@@ -445,11 +455,12 @@ class GpuPreview(Surface):
             if c.transform_controls_visible:
                 for item,_,target in self.targets:
                     if item.id in ids:c._draw_transform_box(painter,item,target)
+                for item,rect in graphics:
+                    c._draw_transform_box(painter,item,rect)
                 for (kind,identifier),bounds in c.text_rects.items():
-                    if identifier not in ids|caption_ids:continue
+                    if kind=='graphic' or identifier not in ids|caption_ids:continue
                     item=c.project.item_by_id(identifier)
-                    if kind=='graphic' and item:c._draw_transform_box(painter,item,c._graphic_rect(item,frame))
-                    elif c._is_headline(item):c._draw_transform_box(painter,item,c._headline_rect(item,frame))
+                    if c._is_headline(item):c._draw_transform_box(painter,item,c._headline_rect(item,frame))
                     else:c._draw_text_box(painter,bounds)
             c._draw_effect_center(painter,frame)
             if self.notice:

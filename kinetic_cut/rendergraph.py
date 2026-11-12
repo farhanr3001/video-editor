@@ -39,6 +39,7 @@ def audio_filters(item):
 
 
 def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffmpeg",ass_path=None,export_audio=True,prepared=None,window=None,transparent=False):
+    from .colour_grade import ffmpeg_filter as grade_filter
     from .transition_export import exact_names
     if any(t.name in exact_names() and t.track in project.video_tracks and project.track_states.get(t.track,{}).get('visible',True) for t in project.transitions):raise ValueError('Paired transitions require exact export preparation')
     from .motion_audio import expanded
@@ -167,6 +168,7 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
             if item.grayscale:prefix+=',hue=s=0'
             if abs(item.brightness)>.0001 or abs(item.contrast-1)>.0001 or abs(item.saturation-1)>.0001:prefix+=f',eq=brightness={item.brightness:.5f}:contrast={item.contrast:.5f}:saturation={item.saturation:.5f}'
             if item.sharpen>.0001:prefix+=f',unsharp=5:5:{min(5,max(0,item.sharpen*2)):.4f}:5:5:0'
+            if item.colour_grade:prefix+=','+grade_filter(item.colour_grade,'rgba')
             label=f'finishingSource{n}';filters.append(f'[{source}]{prefix}[{label}]')
             source=pixel_stack(label,f'T/{item.speed:.10f}+{elapsed:.10f}')
             pixels_baked=True
@@ -227,6 +229,8 @@ def command(project,output,preset,burn_captions=True,hardware="Auto",ffmpeg="ffm
         if not enhanced and not pixels_baked and (abs(item.brightness)>.0001 or abs(item.contrast-1)>.0001 or abs(item.saturation-1)>.0001):chain+=f",eq=brightness={item.brightness:.5f}:contrast={item.contrast:.5f}:saturation={item.saturation:.5f}"
         if item.sharpen>.0001 and not enhanced and not pixels_baked:
             amount=min(5,max(0,item.sharpen*2)); chain+=f",unsharp=5:5:{amount:.4f}:5:5:0"
+        if item.colour_grade and not pixels_baked:
+            chain+=','+grade_filter(item.colour_grade,'yuv420p' if opaque and item.role!='background' else 'rgba')
         if not animated:
             chain+=f",setpts=(PTS-STARTPTS)/{item.speed:.8f}"
             if elapsed:chain+=f",setpts=PTS+{elapsed:.6f}/TB"

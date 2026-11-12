@@ -1,12 +1,10 @@
-import copy,json,math,tempfile,unittest
+import copy,json,tempfile,unittest
 from pathlib import Path
 import numpy as np
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QImage,QPainter
-from PySide6.QtCore import Qt
+from PySide6.QtGui import QImage
 from kinetic_cut.model import Project,ProjectSettings,TimelineItem,Transform
 from kinetic_cut.motion_export_stream import samples,layers
-from kinetic_cut.native_animation import frame
 from kinetic_cut.gpu_export_decode import RawSource
 
 class MotionStreamTests(unittest.TestCase):
@@ -31,16 +29,18 @@ class MotionStreamTests(unittest.TestCase):
   p=self.project();second=copy.deepcopy(p.timeline[0]);second.id='second';second.start=1.35;second.duration=.2;p.timeline.append(second)
   with tempfile.TemporaryDirectory() as directory:
    before=copy.deepcopy(p.to_dict());group,sources=layers(p,p.timeline,directory);self.assertEqual(len(group),1);self.assertEqual(p.to_dict(),before)
-   spec=next(iter(sources.values()));source=RawSource(spec);first=math.ceil(p.timeline[0].start*30-1e-7)
+   spec=next(iter(sources.values()));path=Path(spec['command'][-1])
+   dense_path=Path(directory)/'dense.json';data=json.loads(path.read_text(encoding='utf-8'))
+   data['sample_frames']=list(range(spec['frames']));dense_path.write_text(json.dumps(data),encoding='utf-8')
+   dense=RawSource({**spec,'command':[*spec['command'][:-1],str(dense_path)],
+                   'sample_frames':data['sample_frames'],'log':str(dense_path.with_suffix('.log'))})
+   source=RawSource(spec)
    try:
     for n in range(spec['frames']):
-     at=(first+n)/30;image=QImage(160,284,QImage.Format_RGBA8888);image.fill(Qt.transparent);painter=QPainter(image)
-     for item in p.timeline:
-      if item.start<=at<item.start+item.duration:painter.drawImage(0,0,frame(p,item,(first+n-math.ceil(item.start*30-1e-7))/30))
-     painter.end();pixels=np.frombuffer(image.constBits(),np.uint8).reshape(284,160,4)
-     np.testing.assert_array_equal(source.frame(n/30),pixels)
+     np.testing.assert_array_equal(source.frame(n/30),dense.frame(n/30))
     self.assertEqual(source.process.poll(),0)
-   finally:source.close()
+    self.assertEqual(dense.process.poll(),0)
+   finally:source.close();dense.close()
 
  def test_strict_enhanced_stream_uses_cached_pixels_and_rejects_missing_frames(self):
   from kinetic_cut import enhance

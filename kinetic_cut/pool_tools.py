@@ -1,7 +1,7 @@
 """Pool presentation and source previews; never modify project media or edits."""
 from pathlib import Path
 import numpy as np
-from PySide6.QtCore import Qt,QSize,QRect,QUrl,QTimer,QObject,Slot,QEvent
+from PySide6.QtCore import Qt,QSize,QRect,QUrl,QTimer,QObject,Slot,QEvent,QPersistentModelIndex
 from PySide6.QtGui import QImage,QPixmap,QPainter,QColor,QIcon,QStandardItemModel
 from PySide6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
     QSlider,QStyledItemDelegate,QStyle,QHeaderView,QListWidget)
@@ -10,6 +10,8 @@ from .media_source import set_media_source
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from .controls import SafeSlider as QSlider
 
+GALLERY_CARD = QSize(98,82)
+GALLERY_ART = QSize(88,52)
 
 def metadata(media):
     seconds=max(0,round(media.duration))
@@ -20,9 +22,19 @@ def metadata(media):
 class PoolDelegate(QStyledItemDelegate):
     def __init__(self,panel):super().__init__(panel.grid); self.panel=panel
     def sizeHint(self,option,index):
-        return QSize(sum(self.panel.column_header.sectionSize(n) for n in range(4)),36) if self.panel.list_view else super().sizeHint(option,index)
+        return QSize(sum(self.panel.column_header.sectionSize(n) for n in range(4)),36) if self.panel.list_view else QSize(GALLERY_CARD)
     def paint(self,painter,option,index):
-        if not self.panel.list_view:return super().paint(painter,option,index)
+        audio_path=index.data(Qt.UserRole+5)
+        icon=self.panel.audio_thumbnails.icon(audio_path,index) if audio_path else None
+        media=index.data(Qt.UserRole+6)
+        if media is not None and not index.data(Qt.UserRole+4):
+            self.panel._request_thumbnail(media,QPersistentModelIndex(index))
+        if not self.panel.list_view:
+            if icon is None:return super().paint(painter,option,index)
+            self.initStyleOption(option,index)
+            option.icon=icon
+            option.widget.style().drawControl(QStyle.CE_ItemViewItem,option,painter,option.widget)
+            return
         painter.save(); painter.setClipRect(option.rect)
         selected=bool(option.state&QStyle.State_Selected)
         painter.fillRect(option.rect,option.palette.highlight() if selected else option.palette.base())
@@ -34,8 +46,8 @@ class PoolDelegate(QStyledItemDelegate):
         for n,value in enumerate(values):
             width=self.panel.column_header.sectionSize(n); cell=QRect(x+7,option.rect.top(),width-14,option.rect.height())
             if n==0:
-                icon=index.data(Qt.DecorationRole)
-                if icon:icon.paint(painter,QRect(x+5,option.rect.top()+5,36,26))
+                artwork=icon or index.data(Qt.DecorationRole)
+                if artwork:artwork.paint(painter,QRect(x+5,option.rect.top()+5,36,26))
                 cell.setLeft(x+47)
             painter.drawText(cell,Qt.AlignVCenter,painter.fontMetrics().elidedText(str(value),Qt.ElideRight,max(0,cell.width())))
             x+=width
@@ -60,8 +72,8 @@ def set_view(panel,enabled,persist=True):
     panel.list_view=bool(enabled); grid=panel.grid
     grid.setViewMode(QListWidget.ListMode if enabled else QListWidget.IconMode)
     grid.setFlow(QListWidget.TopToBottom if enabled else QListWidget.LeftToRight)
-    grid.setWrapping(not enabled); grid.setGridSize(QSize() if enabled else QSize(130,100))
-    grid.setIconSize(QSize(36,26) if enabled else QSize(110,65))
+    grid.setWrapping(not enabled); grid.setGridSize(QSize() if enabled else GALLERY_CARD)
+    grid.setIconSize(QSize(36,26) if enabled else GALLERY_ART); grid.setUniformItemSizes(True)
     grid.setMovement(QListWidget.Static); grid.setDragEnabled(True); grid.setAcceptDrops(True); grid.viewport().setAcceptDrops(True)
     panel.column_header.setVisible(enabled)
     panel.view_button.setText('Gallery' if enabled else 'List'); panel.view_button.setToolTip('Switch to gallery view' if enabled else 'Switch to list view')
@@ -93,32 +105,41 @@ def wave_image(path,ffmpeg):
 
 class AudioThumbnails(QObject):
     """One decoder job at a time; no selection resets or main-thread audio work."""
-    def __init__(self,panel):super().__init__(panel); self.panel=panel; self.cache={}; self.pending=[]; self.known=set(); self.busy=False
-    def icon(self,media):
+    def __init__(self,panel):super().__init__(panel); self.panel=panel; self.cache={}; self.pending={}; self.failed=set(); self.busy=False; self.current_key=None
+    def icon(self,path,index):
         try:
-            stat=Path(media.path).stat(); key=(media.path,stat.st_size,stat.st_mtime_ns)
-        except OSError:return QIcon()
-        if key not in self.known:
-            self.known.add(key); self.pending.append(key); QTimer.singleShot(0,self.next)
-        return self.cache.get(key,QIcon())
+            stat=Path(path).stat(); key=(path,stat.st_size,stat.st_mtime_ns)
+        except OSError:return None
+        if key not in self.cache and key not in self.failed and key != self.current_key:
+            if not self.pending and not self.busy:QTimer.singleShot(0,self.next)
+            self.pending[key]=QPersistentModelIndex(index)
+        return self.cache.get(key)
     @Slot()
     def next(self):
-        if self.busy or not self.pending:return
+        if self.busy or not self.pending or getattr(self.panel.window,'_closing',False):return
+        grid=self.panel.grid
+        while self.pending:
+            key=next(iter(self.pending))
+            index=self.pending.pop(key)
+            if grid.isVisible() and index.isValid() and grid.viewport().rect().intersects(grid.visualItemRect(grid.item(index.row()))):
+                break
+        else:return
         from .ui import Worker
-        self.busy=True; key=self.pending.pop(0); self.current_key=key
+        self.busy=True; self.current_key=key
         worker=Worker(wave_image,key[0],self.panel.window.settings.get('ffmpeg','ffmpeg'))
         worker.signals.result.connect(self.ready)
+        worker.signals.error.connect(self.error)
         worker.signals.finished.connect(self.finished)
         self.panel.window.start_worker(worker)
     @Slot(object)
     def ready(self,image):
         key=self.current_key
         icon=QIcon(QPixmap.fromImage(image)); self.cache[key]=icon
-        for n in range(self.panel.grid.count()):
-            item=self.panel.grid.item(n)
-            if item.toolTip()==key[0]:item.setIcon(icon)
+        self.panel.grid.viewport().update()
+    @Slot(str)
+    def error(self,_):self.failed.add(self.current_key)
     @Slot()
-    def finished(self):self.busy=False; QTimer.singleShot(0,self.next)
+    def finished(self):self.busy=False; self.current_key=None; QTimer.singleShot(0,self.next)
 
 
 class SourcePreview(QDialog):

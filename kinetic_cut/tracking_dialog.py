@@ -8,10 +8,12 @@ from PySide6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QFormLayout,QLabe
 from .controls import SafeDoubleSpinBox,SafeComboBox,SafeSlider
 from .model import Crop
 from .theme_widgets import set_ui_style
+from .tracking_design import TrackingCheckBox
 
 
 class RegionView(QWidget):
     regionChanged=Signal(object)
+    regionStarted=Signal()
     def __init__(self,parent=None):
         super().__init__(parent); self.image=QImage(); self.region=None; self.crop=Crop()
         self.drag_start=None; self.setMinimumSize(320,220); self.setMouseTracking(True)
@@ -24,6 +26,7 @@ class RegionView(QWidget):
         return QPointF(max(0,min(1,(point.x()-r.x())/max(1,r.width()))),max(0,min(1,(point.y()-r.y())/max(1,r.height()))))
     def mousePressEvent(self,event):
         if event.button()==Qt.LeftButton and self.image_rect().contains(event.position()):
+            self.regionStarted.emit()
             self.drag_start=self.position(event.position()); event.accept()
     def mouseMoveEvent(self,event):
         if self.drag_start is None:return
@@ -56,7 +59,7 @@ class TrackingDialog(QDialog):
         self.effect=copy.deepcopy(existing) if existing else default_effect()
         self.anchors=copy.deepcopy(self.effect.get('anchors',self.effect.get('analysis',{}).get('anchors',[]))); self.cancel=threading.Event()
         self._closed=False; self._busy=False; self._decoding=False; self.raw=QImage(); self._shown_time=None
-        self.dirty_track=not valid(self.effect,self.media,self.item); self.fps=max(1,window.project.settings.fps)
+        self.dirty_track=not valid(self.effect,self.media); self.fps=max(1,window.project.settings.fps)
         self.setWindowTitle('Object Tracking · '+media.name); self.resize(980,750)
         self.setWindowModality(Qt.WindowModal); root=QVBoxLayout(self)
         hint=QLabel('Draw a tight box around the object in the full source. Track the clip, scrub to review it, and add correction points where needed. The blue guide shows the clip crop.')
@@ -66,7 +69,7 @@ class TrackingDialog(QDialog):
         transport=QHBoxLayout(); self.timeline=SafeSlider(Qt.Horizontal,self)
         self.timeline.setRange(0,max(1,math.ceil(item.duration*self.fps)-1)); transport.addWidget(self.timeline,1)
         self.time_label=QLabel(); transport.addWidget(self.time_label); root.addLayout(transport)
-        self.before=QCheckBox('Show original'); self.before.setChecked(True)
+        self.before=TrackingCheckBox('Show original'); self.before.setChecked(True)
         self.before.toggled.connect(self.refresh_preview); transport.addWidget(self.before)
         self._decode_timer=QTimer(self); self._decode_timer.setSingleShot(True); self._decode_timer.timeout.connect(self.request_frame)
         self.timeline.valueChanged.connect(self.seek)
@@ -85,7 +88,7 @@ class TrackingDialog(QDialog):
         self.anchor_list=QTableWidget(0,2,self); self.anchor_list.setHorizontalHeaderLabels(['Source time','Region']); self.anchor_list.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch); self.anchor_list.setMaximumHeight(90); self.anchor_list.cellClicked.connect(self.seek_anchor); root.addWidget(self.anchor_list)
         self.progress_bar=QProgressBar(self); self.progress_bar.setRange(0,100); root.addWidget(self.progress_bar)
         self.info=QLabel('Choose a reference frame and draw a box to start.'); self.info.setWordWrap(True); root.addWidget(self.info)
-        self.loss_review=QCheckBox('I reviewed the frames where tracking was lost',self); self.loss_review.setChecked(self.effect.get('loss_reviewed',False)); self.loss_review.toggled.connect(self.review_changed); root.addWidget(self.loss_review)
+        self.loss_review=TrackingCheckBox('I reviewed the frames where tracking was lost',self); self.loss_review.setChecked(self.effect.get('loss_reviewed',False)); self.loss_review.toggled.connect(self.review_changed); root.addWidget(self.loss_review)
         footer=QHBoxLayout(); footer.addStretch(); self.cancel_button=QPushButton('Cancel',self); self.cancel_button.clicked.connect(self.reject); footer.addWidget(self.cancel_button)
         self.apply_button=QPushButton('Apply',self); self.apply_button.clicked.connect(self.accept); footer.addWidget(self.apply_button); root.addLayout(footer)
         self.refresh_anchors(); self.set_busy(False)
@@ -176,10 +179,15 @@ class TrackingDialog(QDialog):
         if self._busy or not self.view.region or not self.settled_frame():return
         from .object_tracking import analyze
         from .ui import Worker
+        analysis_item=self.analysis_item() if hasattr(self,'analysis_item') else self.item
         reference=self.source_time(); region=list(self.view.region); anchors=copy.deepcopy(self.anchors)
+        low,high=analysis_item.in_point,analysis_item.in_point+analysis_item.source_duration
+        if not low-1e-6<=reference<=high+1e-6:
+            self.info.setText('Move the playhead inside the analysis range, then draw the target and analyse.'); return
+        anchors=[a for a in anchors if low<=a['time']<=high]
         options=dict(sample_fps=self.sample_fps.value(),search_radius=self.search_radius.value(),confidence_threshold=self.confidence_threshold.value())
         self.cancel=threading.Event(); self.window_._tracking_cancel=self.cancel; self.set_busy(True); self.progress_bar.setValue(0)
-        worker=Worker(lambda:analyze(self.media,self.item,reference,region,anchors,lambda percent,message:worker.signals.progress.emit((percent,message)),self.cancel,**options))
+        worker=Worker(lambda:analyze(self.media,analysis_item,reference,region,anchors,lambda percent,message:worker.signals.progress.emit((percent,message)),self.cancel,**options))
         worker.signals.progress.connect(self.analysis_progress)
         def finish():
             if self.window_._tracking_cancel is self.cancel:self.window_._tracking_cancel=None
@@ -202,7 +210,7 @@ class TrackingDialog(QDialog):
     def accept(self):
         from .tracking_effect import validate,valid,export_error
         try:
-            if self._busy or self.dirty_track or not valid(self.effect,self.media,self.item):raise ValueError('Track this clip before applying the effect.')
+            if self._busy or self.dirty_track or not valid(self.effect,self.media):raise ValueError('Track this clip before applying the effect.')
             validate(self.effect)
             error=export_error(self.effect,self.media,self.item)
             if error:raise ValueError(error)
@@ -210,3 +218,7 @@ class TrackingDialog(QDialog):
         self._closed=True; self._decode_timer.stop(); super().accept()
     def reject(self):
         self.cancel.set(); self._closed=True; self._decode_timer.stop(); super().reject()
+
+
+LegacyTrackingDialog = TrackingDialog
+from .tracking_workspace import TrackingWorkspace as TrackingDialog

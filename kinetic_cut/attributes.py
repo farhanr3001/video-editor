@@ -66,6 +66,8 @@ def apply(project,source,targets,category,selected):
                 elif key=="grade":
                     for attr in ("grayscale","brightness","contrast","saturation","sharpen"):
                         if attr in source:setattr(item,attr,copy.deepcopy(source[attr]))
+                    from .colour_grade import clean
+                    item.colour_grade=clean(source.get("colour_grade"))
                 elif not key.startswith("crop_") and key in source:setattr(item,key,copy.deepcopy(source[key]))
                 elif key=="crop_softness":item.crop_softness=source.get("crop_softness",0)
             if {"scale_x","scale_y"}&selected:item.transform.scale_linked=transform.get("scale_linked",True) if {"scale_x","scale_y"}<=selected else False

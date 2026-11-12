@@ -6,6 +6,7 @@ import re
 import shutil
 import sys
 import threading
+import time
 import traceback
 import copy
 import logging
@@ -40,10 +41,12 @@ from .icons import lucide_icon
 from .silence import detect
 from .theme import STYLESHEET
 from .editing import edit_only
+from .effects_library import remember_use
 from .widgets import CropDialog, MediaList, PreviewCanvas, TimelineWidget, extract_frame
 
 
 class WorkerSignals(QObject):
+    started = Signal(float)
     result = Signal(object)
     error = Signal(str)
     progress = Signal(object)
@@ -62,8 +65,10 @@ class Worker(QRunnable):
     @Slot()
     def run(self):
         label=getattr(self.function,'__qualname__',getattr(self.function,'__name__','task'))
-        if not getattr(self,'maintenance',False):record_action('job.start',function=label)
+        tracked = not getattr(self,'maintenance',False)
+        if tracked:record_action('job.start',function=label)
         try:
+            if tracked:self.signals.started.emit(time.monotonic())
             value=self.function(*self.args, **self.kwargs)
             try:self.signals.result.emit(value)
             except RuntimeError:return
@@ -79,7 +84,9 @@ class Worker(QRunnable):
             try:self.signals.error.emit(traceback.format_exc())
             except RuntimeError:return
         finally:
-            if not getattr(self,'maintenance',False):record_action('job.finished',function=label)
+            if tracked:
+                self.signals.task_finished_at = time.monotonic()
+                record_action('job.finished',function=label)
             try:self.signals.finished.emit()
             except RuntimeError:pass
 
@@ -222,9 +229,11 @@ class MainWindow(QMainWindow):
         progress=startup_progress or (lambda *_:None)
         progress(45,"Loading preferences and project services")
         super().__init__(); self.settings=load_settings(); self.project=Project(); self.thread_pool=QThreadPool.globalInstance(); self.current_media_id=""; self.current_play_item:TimelineItem|None=None; self.loading=False; self.shortcut_actions={}; self.proxies={}; self._workers=set(); self._history=[]; self._history_index=-1; self._restoring=False
+        from .background_persistence import register as register_persistence
+        register_persistence(self)
         from .cache_manager import clear_on_exit, prune_idle_playback
         prune_idle_playback()  # before any project can pick up a playback copy
-        self.shutdownFinished.connect(lambda *_: clear_on_exit(self.settings))
+        self.shutdownFinished.connect(lambda *_: clear_on_exit(self.settings, power=self.media_panel.power.data))
         self.setWindowTitle("Kinetic Cut"); self.resize(1480,900); self.setMinimumSize(1100,700); self.setAcceptDrops(True)
         from .icons import resource_path
         self.setWindowIcon(QIcon(str(resource_path("assets","kinetic-cut.svg"))))
@@ -262,7 +271,7 @@ class MainWindow(QMainWindow):
         self.assistant_connection=AssistantConnection(self)
         self.assistant_button=button('AI Assistant',self.assistant_connection.show,quiet=True,tooltip='MCP connection setup and status — no built-in chatbot',icon='sparkles')
         self.assistant_button.setObjectName('assistantConnectionButton')
-        self.menuBar().setCornerWidget(self.assistant_button,Qt.TopRightCorner)
+        self.header_actions_layout.insertWidget(0,self.assistant_button)
         self.assistant_connection.changed.connect(self.assistant_connection.refresh_button)
         self.assistant_connection.refresh_button()
         crashed_previous=SESSION_LOCK_PATH.exists() and AUTOSAVE_PATH.exists() and AUTOSAVE_PATH.stat().st_size>50
@@ -348,6 +357,7 @@ class MainWindow(QMainWindow):
     def set_project(self,project:Project):
         record_action('project.switch',name=project.name,path=project.path,items=len(project.timeline),captions=len(project.captions))
         self.flush_text_edit()
+        self._waveform_wanted=set()
         if getattr(self,"current_page",0):
             from .workspace import set_page
             set_page(self,0)
@@ -365,11 +375,20 @@ class MainWindow(QMainWindow):
         if not self._restoring:self._history=[copy.deepcopy(project)]; self._history_index=0
         from .enhance_storage import observe as observe_enhancement_cache
         observe_enhancement_cache(self)
-        for media in project.media:
-            self.request_waveform(media)
+        self.request_timeline_previews()
         if hasattr(self,'compounds'):self.compounds.switched()
         if hasattr(self,'delivery') and not (hasattr(self,'compounds') and self.compounds.navigating):self.delivery.activate_project(project)
         self.preview_quality.apply(); self.preview_quality.request()
+
+    def request_timeline_previews(self):
+        self._waveform_wanted = set()
+        audio_tracks = set(self.project.audio_tracks)
+        audio_ids = {item.media_id for item in self.project.timeline if item.track in audio_tracks}
+        for media_id in dict.fromkeys(item.media_id for item in self.project.timeline if item.media_id):
+            media = self.project.media_by_id(media_id)
+            if media is None:continue
+            if media_id in audio_ids:self.request_waveform(media)
+            if media.kind in ('image','video'):self.media_panel._request_thumbnail(media)
 
     def request_waveform(self,media):
         from .missing_media import is_missing
@@ -379,6 +398,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self,'_waveform_sources'):self._waveform_sources={}
         from .waveforms import source_key
         key=(media.id,source_key(media.path))
+        if not hasattr(self,'_waveform_wanted'):self._waveform_wanted=set()
+        self._waveform_wanted.add(key)
         if self._waveform_sources.get(media.id)!=key:
             self.timeline.waveforms.pop(media.id,None)
             self.timeline.waveform_failures.discard(media.id)
@@ -392,19 +413,35 @@ class MainWindow(QMainWindow):
         self._waveform_pending.add(key)
         media_id=media.id; source=media.path
         def current_matches():
+            if getattr(self,'_closing',False):return False
             current=self.project.media_by_id(media_id)
             return current and (media_id,source_key(current.path))==key
+        skipped=False
         def ready(values):
-            if current_matches():
+            if values is not None and current_matches():
                 self.timeline.waveform_failures.discard(media_id)
                 self.timeline.set_waveform(media_id,values)
-        worker=Worker(waveform,source,self.settings.get('ffmpeg','ffmpeg'))
+        ffmpeg=self.settings.get('ffmpeg','ffmpeg')
+        def generate():
+            nonlocal skipped
+            if key not in self._waveform_wanted or getattr(self,'_closing',False):
+                skipped=True
+                return None
+            return waveform(source,ffmpeg)
+        worker=Worker(generate)
+        worker.task_label='Generate audio waveform'
+        if not hasattr(self,'_waveform_pool'):
+            self._waveform_pool=QThreadPool(self)
+            self._waveform_pool.setMaxThreadCount(1)
+        worker.pool=self._waveform_pool
         def failed(_):
             if current_matches():self.timeline.waveform_failures.add(media_id)
         def finished():
             self._waveform_pending.discard(key)
             if current_matches():self.timeline.waveform_pending.discard(media_id)
-            self.timeline.viewport().update()
+            if skipped and key in self._waveform_wanted and not getattr(self,'_closing',False) and current_matches():
+                self.request_waveform(self.project.media_by_id(media_id))
+            if not getattr(self,'_closing',False):self.timeline.viewport().update()
         worker.signals.result.connect(ready); worker.signals.error.connect(failed); worker.signals.finished.connect(finished); self.start_worker(worker)
 
     def _history_key(self,project):
@@ -475,7 +512,7 @@ class MainWindow(QMainWindow):
             self.transport.seek(self.project.playhead)
         self.compounds.synchronize(); self.compounds.request_caches()
         self.preview_quality.request()
-        for media in self.project.media:self.request_waveform(media)
+        self.request_timeline_previews()
     @edit_only
     def undo(self):
         record_action('undo',index=self._history_index)
@@ -494,6 +531,8 @@ class MainWindow(QMainWindow):
             worker.signals.deleteLater()
             return
         self._workers.add(worker)
+        if not getattr(worker,'maintenance',False) and hasattr(self,'background_tasks'):
+            self.background_tasks.add(worker)
         self.update_job_status()
         worker.signals.finished.connect(self.worker_finished,Qt.QueuedConnection)
         getattr(worker,'pool',self.thread_pool).start(worker)
@@ -504,9 +543,8 @@ class MainWindow(QMainWindow):
         # Keep its lifetime tracked for shutdown without relayout/animation on
         # every no-change scan while the owner plays or interacts with the UI.
         count=sum(not getattr(job,'maintenance',False) for job in self._workers)
-        self.job_status.setVisible(count>0); self.job_progress.setVisible(count>0)
-        self.job_status.setText(f"{count} background task{'s' if count!=1 else ''}")
-        self.job_status.setToolTip("Processing media, audio previews or renders. The workspace remains responsive.")
+        self.job_progress.setVisible(count>0)
+        self.job_status.setText(f"{count} background task{'s' if count!=1 else ''}" if count else "Background tasks")
 
     @Slot()
     def worker_finished(self):
@@ -514,6 +552,7 @@ class MainWindow(QMainWindow):
         worker=next((job for job in self._workers if job.signals is signals),None)
         if worker is None:return
         self._workers.discard(worker)
+        if hasattr(self,'background_tasks'):self.background_tasks.finish(signals)
         # Release signal callbacks and their captured project/media snapshots once
         # queued result/error handlers have run. Never destroy them in Worker.run.
         signals.deleteLater()
@@ -528,7 +567,11 @@ class MainWindow(QMainWindow):
         def poll():
             if not ready(): return
             timer.stop(); timer.deleteLater()
-            QTimer.singleShot(settle,lambda:callback() if self.isVisible() else None)
+            delayed=QTimer(self);delayed.setSingleShot(True)
+            def run_ready():
+                delayed.deleteLater()
+                if not getattr(self,'_closing',False) and self.isVisible():callback()
+            delayed.timeout.connect(run_ready);delayed.start(settle)
         timer.timeout.connect(poll); timer.start()
 
     def check_crash_recovery(self):
@@ -1044,15 +1087,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Collecting source media into {destination.name}…",5000)
 
     def autosave(self):
-        document=self.compounds.root()
-        if document.media or document.timeline:
-            original=document.path
-            try:
-                document.save(AUTOSAVE_PATH)
-            except Exception as error:
-                logging.warning("Autosave skipped: %s", error)
-            finally:
-                document.path=original
+        from .background_persistence import recovery
+        recovery(self, AUTOSAVE_PATH)
 
     @edit_only
     def import_media(self):
@@ -1111,7 +1147,7 @@ class MainWindow(QMainWindow):
             items=[]
             for path in valid:
                 if cancel.is_set():raise InterruptedError('Import cancelled')
-                items.append(probe(path,settings.get('ffprobe','ffprobe'),settings.get('ffmpeg','ffmpeg'),timeout=30))
+                items.append(probe(path,settings.get('ffprobe','ffprobe'),settings.get('ffmpeg','ffmpeg'),timeout=30,defer_thumbnail=True))
             return items
         def ready(items):
             if not cancel.is_set() and self.project is destination and not getattr(self,'_closing',False):self.media_added(items)
@@ -1127,7 +1163,6 @@ class MainWindow(QMainWindow):
         if items:self.current_media_id=items[0].id
         self.commit_history()
         for media in items:
-            self.request_waveform(media)
             if media.kind=="video" and media.video_codec=="av1":
                 # Begin the compatibility job while the clip is still in the
                 # pool, so placing it on the timeline need not start the wait.
@@ -1194,8 +1229,7 @@ class MainWindow(QMainWindow):
             stage,added,captions=plan(self.project,assets,track,initial,auto_layout or None)
         except (ValueError,KeyError,TypeError) as error:self.statusBar().showMessage(str(error),4500); return
         commit(self.project,stage)
-        for media in self.project.media:
-            self.request_waveform(media)
+        self.request_timeline_previews()
         self.timeline.select_ids(added,next((i.id for i in self.project.timeline if i.id in added),""))
         if captions and not added:self.timeline.select_captions(captions)
         self.timeline.selected_caption_ids=captions
@@ -1213,6 +1247,7 @@ class MainWindow(QMainWindow):
         self.add_media_batch([media_id],track,start)
 
     @edit_only
+    @remember_use('name')
     def add_title_object(self,name="Text",track="",start=None):
         from .effects import GRAPHICS
         if track=='__new_video':track=self.project.add_track('video')
@@ -1235,6 +1270,7 @@ class MainWindow(QMainWindow):
         self.project.timeline.append(item); self.timeline.select_ids({item.id},item.id); self.model_changed(); self.select_item(item.id); self.seek(start)
 
     @edit_only
+    @remember_use('name')
     def add_graphic_object(self,name="Circle",track="",start=None,duration=None,properties=None):
         from .graphics import default_graphic_data, GRAPHICS_CATALOG
         start=self.project.playhead if start is None else max(0.,float(start))
@@ -1437,7 +1473,6 @@ class MainWindow(QMainWindow):
         if self.timeline.drag_mode!='marquee':
             self.inspector_toggle.setChecked(True); self.inspector.select_caption(caption_id)
         self.preview.select_caption(caption_id)
-        if hasattr(self,'caption_focus'):self.caption_focus.selected(caption_id)
         self.retime_button.update_state()
 
     def select_transition(self,transition_id:str):
@@ -1457,6 +1492,7 @@ class MainWindow(QMainWindow):
         self.timeline.viewport().update()
 
     @edit_only
+    @remember_use('name')
     def apply_transition(self,name:str,track:str="",left_item_id:str="",right_item_id:str="",cut_time:float=None,duration:float=0.80,alignment:str="center",properties:dict=None):
         import copy
         from .transitions import Transition, SUBSECTION_BY_TRANSITION, default_transition_properties
@@ -1592,6 +1628,7 @@ class MainWindow(QMainWindow):
             self.timeline.select_ids({item_id},item_id); self.apply_effect(name)
 
     @edit_only
+    @remember_use('effect')
     def apply_visual_fx(self, item_id: str, effect: str, properties: dict | None = None):
         item = self.project.item_by_id(str(item_id))
         if not item:
@@ -1916,6 +1953,7 @@ class MainWindow(QMainWindow):
         self.model_changed()
 
     @edit_only
+    @remember_use('name')
     def apply_effect(self,name:str):
         from .creative_effects import NAMES as CREATIVE_NAMES, default_effect as creative_default
         from .speed_presets import NAMES as SPEED_NAMES, apply as apply_speed
@@ -2012,10 +2050,12 @@ class MainWindow(QMainWindow):
         if image.isNull() and media.thumbnail:image=QImage(media.thumbnail)
         if image.isNull():
             image=QImage(max(16,media.width or 1280),max(16,media.height or 720),QImage.Format_RGB32); image.fill(QColor("black"))
+        destination=self.project
         dialog=CropDialog(image,item.crop,self.project.track_names.get(item.track,"video layer"),self)
         self._crop_dialogs=getattr(self,"_crop_dialogs",set()); self._crop_dialogs.add(dialog)
         def commit():
-            target=self.project.item_by_id(item.id)
+            if self.project is not destination or getattr(self,'_closing',False):return
+            target=destination.item_by_id(item.id)
             if target:target.crop=copy.deepcopy(dialog.crop); self.model_changed()
         dialog.accepted.connect(commit)
         dialog.finished.connect(lambda _:(self._crop_dialogs.discard(dialog),dialog.deleteLater()))
@@ -2025,9 +2065,13 @@ class MainWindow(QMainWindow):
         # arrives.
         if media.kind=="video" and not exact:
             at=item.source_time(max(item.start,min(item.start+item.duration,self.project.playhead)))
-            worker=Worker(extract_frame,media.path,at,self.settings.get("ffmpeg","ffmpeg"))
-            worker.signals.result.connect(lambda decoded,d=dialog:d.set_image(decoded) if d in getattr(self,"_crop_dialogs",set()) else None)
-            QTimer.singleShot(0,lambda w=worker:self.start_worker(w))
+            cancel=threading.Event();dialog.finished.connect(lambda *_:cancel.set())
+            worker=Worker(extract_frame,media.path,at,self.settings.get("ffmpeg","ffmpeg"),cancel_check=cancel.is_set)
+            worker.cancel_callback=cancel.set
+            worker.signals.result.connect(lambda decoded,d=dialog:d.set_image(decoded) if not cancel.is_set() and d in getattr(self,"_crop_dialogs",set()) else None)
+            timer=QTimer(dialog);timer.setSingleShot(True)
+            timer.timeout.connect(lambda:self.start_worker(worker) if not cancel.is_set() else worker.signals.deleteLater())
+            timer.start(0)
 
     @edit_only
     def split_selected(self):

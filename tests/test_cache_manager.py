@@ -90,13 +90,14 @@ class CacheManagerTests(unittest.TestCase):
             thumb=Path(directory)/'rebuilt.png'
             picture=QImage(32,18,QImage.Format_RGB32); picture.fill(QColor('blue')); picture.save(str(thumb))
             media=MediaItem('cache-video',str(source),'video','clip',1,32,18,thumbnail=str(Path(directory)/'missing.png'))
-            window=MainWindow(); window.autosave_timer.stop()
+            window=MainWindow(); window.autosave_timer.stop(); window.show()
             try:
                 with patch('kinetic_cut.media.make_thumbnail',return_value=str(thumb)) as make:
                     window.set_project(Project(media=[media]))
-                    QApplication.processEvents()
-                    QThreadPool.globalInstance().waitForDone(10000)
-                    QApplication.processEvents()
+                    from PySide6.QtCore import QEventLoop,QTimer
+                    for _ in range(100):
+                        if media.thumbnail==str(thumb):break
+                        loop=QEventLoop();QTimer.singleShot(10,loop.quit);loop.exec()
                     self.assertEqual(media.thumbnail,str(thumb))
                     self.assertEqual(make.call_count,1)
                     self.assertEqual(make.call_args.args,(str(source),'video',window.settings.get('ffmpeg','ffmpeg')))

@@ -87,7 +87,7 @@ class PreviewQuality(QComboBox):
         w.transport.sync(False)
 
     def request(self):
-        if getattr(self.w.preview,'caption_focus',False) or getattr(getattr(self.w,'transport',None),'closed',False):return
+        if getattr(getattr(self.w,'transport',None),'closed',False):return
         w=self.w
         used={i.media_id for i in w.project.timeline if i.track in w.project.video_tracks}|self.extra_ids
         from .video_worker import enabled_for

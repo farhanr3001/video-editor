@@ -42,16 +42,16 @@ class GpuMotionTests(unittest.TestCase):
         self.assertAlmostEqual(first(f)['matrix'][0] * 2, first(big)['matrix'][0], places=4)
 
     def test_preview_motion_layers_do_not_call_the_cpu_renderer(self):
-        s, d = scene('Chat Story'); item = fake_item(s)
+        s, d = scene('Chat Story'); item = fake_item(s,track='video_1',keyframes={})
         project = SimpleNamespace(settings=SimpleNamespace(width=1080, height=1920, fps=30))
         layer = Mock(); surface = SimpleNamespace(create=Mock(return_value=layer), item=Mock(return_value=None))
         motion = MotionLayers(surface)
         with patch.object(M, 'draw', side_effect=AssertionError('CPU renderer used')), patch.object(M, 'draw_uncached', side_effect=AssertionError('CPU renderer used')):
-            shown = motion.update([item], project, 1.2, QRectF(0, 0, 540, 960), 3)
+            shown = motion.update([item], project, 1.2, QRectF(0, 0, 540, 960), {item.track:3})
         self.assertEqual(shown, {'motion:g1'}); surface.create.assert_called_once_with('GpuMotion.qml', None)
         values = {c.args[0]: c.args[1] for c in layer.setProperty.call_args_list}
         self.assertTrue(values['frame']['items']); self.assertAlmostEqual(values['k'], .5)
-        motion.update([], project, 1.2, QRectF(0, 0, 540, 960), 3); layer.setVisible.assert_called_with(False)
+        motion.update([], project, 1.2, QRectF(0, 0, 540, 960), {}); layer.setVisible.assert_called_with(False)
 
     def test_is_motion_and_fades(self):
         s, _ = scene(); item = fake_item(s); self.assertTrue(is_motion(item))

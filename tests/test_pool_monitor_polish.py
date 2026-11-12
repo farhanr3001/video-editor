@@ -84,6 +84,26 @@ class PoolMonitorTests(unittest.TestCase):
         control.toggle(); self.assertEqual(control.level,37); self.assertEqual(before,self.w.project.to_dict())
         self.w.resize(1100,750); QApplication.processEvents(); self.assertTrue(control.slider.isHidden())
         control.popup(); self.assertTrue(control._menu.isVisible()); control._menu.close()
+    def test_compact_volume_click_opens_slider_without_muting_and_has_separate_mute(self):
+        before=self.w.project.to_dict(); control=self.w.monitor_control
+        self.w.resize(1100,750); QApplication.processEvents(); control.set_level(37)
+        control.button.click(); QApplication.processEvents()
+        self.assertFalse(control.muted); self.assertTrue(control._menu.isVisible())
+        self.assertEqual(control.popup_slider.orientation(),Qt.Vertical)
+        control.mute_button.click(); self.assertTrue(control.muted); self.assertEqual(self.w.transport.monitor_gain,0)
+        control.mute_button.click(); control.popup_slider.setValue(52)
+        self.assertEqual(self.w.transport.monitor_gain,.52); self.assertEqual(control.slider.value(),52)
+        control._menu.close(); self.assertEqual(before,self.w.project.to_dict())
+    def test_expanded_volume_handle_has_right_edge_clearance(self):
+        from PySide6.QtWidgets import QStyleOptionSlider,QStyle
+        self.w.resize(1480,900); QApplication.processEvents(); control=self.w.monitor_control
+        self.assertFalse(control.slider.isHidden()); control.set_level(100)
+        option=QStyleOptionSlider(); control.slider.initStyleOption(option)
+        handle=control.slider.style().subControlRect(QStyle.CC_Slider,option,QStyle.SC_SliderHandle,control.slider)
+        right=control.slider.mapTo(self.w,QPoint(handle.right(),0)).x()
+        self.assertGreaterEqual(self.w.width()-right,14)
+        self.assertLessEqual(control.slider.geometry().right(),control.width()-8)
+        control.button.click(); self.assertTrue(control.muted)
     def test_media_snap_hold_and_fade_corner_priority(self):
         t=self.w.timeline; self.w.project.timeline.append(TimelineItem('other','1','video_1',8,2)); t.set_zoom(50); t.setProperty('snapping',True); t._range(); QApplication.processEvents()
         # The clip may be partly above the independently scrolled video pane.

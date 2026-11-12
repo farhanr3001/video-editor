@@ -18,6 +18,8 @@ from pathlib import Path
 
 VERSION = 1
 MAX_DURATION = 600.0
+# Persisted older tracks remain readable; new work is deliberately bounded.
+MAX_ANALYSIS_DURATION = 30.0
 MAX_RECORDS = 10000
 MAX_BYTES = 1024 * 1024
 ANALYSIS_EDGE = 640
@@ -227,7 +229,23 @@ def _sums(integral, height, width):
     return integral[height:, width:] - integral[:-height, width:] - integral[height:, :-width] + integral[:-height, :-width]
 
 
-def _correlation(image, template):
+@lru_cache(maxsize=128)
+def _fft_size(minimum):
+    """Small-factor FFT padding avoids doubling both large search dimensions."""
+    best=1 << (minimum-1).bit_length()
+    a=1
+    while a<best:
+        b=a
+        while b<best:
+            c=b
+            while c<minimum:c*=5
+            best=min(best,c)
+            b*=3
+        a*=2
+    return best
+
+
+def _correlation(image, template, cache=None):
     """Normalized correlation using FFT and integral local variance, without cv2."""
     import numpy as np
     height, width = template.shape
@@ -238,11 +256,17 @@ def _correlation(image, template):
     energy = float((centered * centered).sum())
     if energy < 1e-6:
         return None
-    shape = tuple(1 << (n - 1).bit_length() for n in (image.shape[0] + height - 1, image.shape[1] + width - 1))
-    numerator = np.fft.irfft2(np.fft.rfft2(image, shape) * np.fft.rfft2(centered[::-1, ::-1], shape), shape)
+    shape = tuple(_fft_size(n) for n in (image.shape[0] + height - 1, image.shape[1] + width - 1))
+    if cache is None:
+        cache = {}
+    if 'integrals' not in cache:
+        cache['integrals'] = (_integral(image), _integral(image.astype('float64') ** 2))
+    if shape not in cache:
+        cache[shape] = np.fft.rfft2(image, shape)
+    numerator = np.fft.irfft2(cache[shape] * np.fft.rfft2(centered[::-1, ::-1], shape), shape)
     numerator = numerator[height - 1:image.shape[0], width - 1:image.shape[1]]
-    sums = _sums(_integral(image), height, width)
-    squares = _sums(_integral(image.astype("float64") ** 2), height, width)
+    sums = _sums(cache['integrals'][0], height, width)
+    squares = _sums(cache['integrals'][1], height, width)
     variance = np.maximum(0, squares - sums * sums / (height * width))
     result = np.clip(numerator / np.sqrt(np.maximum(variance * energy, 1e-12)), -1, 1)
     # A flat occluder has no matchable texture. Floating-point residue divided
@@ -292,6 +316,7 @@ class RegionTracker:
         bottom = min(self.height, int(predicted[1] + height / 2 + radius_y + 1))
         search = frame[top:bottom, left:right]
         best = None
+        correlations = {}
         sizes = {(max(6, round(width * sx)), max(6, round(height * sy)))
                  for sx, sy in ((1, 1), (.92, 1), (1.08, 1), (1, .92), (1, 1.08), (.92, .92), (1.08, 1.08))}
         # Pixel-sized refinement matters for small crops: an 8% step alone can
@@ -303,7 +328,7 @@ class RegionTracker:
             if candidate_width > self.width or candidate_height > self.height:
                 continue
             template = _resize(self.template, candidate_width, candidate_height)
-            correlation = _correlation(search, template)
+            correlation = _correlation(search, template, correlations)
             if correlation is None or not correlation.size:
                 continue
             iy, ix = np.unravel_index(int(correlation.argmax()), correlation.shape)
@@ -458,8 +483,8 @@ def analyze(media, item, reference_source_time, region, anchors=None, progress=N
     start, end = float(item.in_point), float(item.in_point + item.source_duration)
     if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
         raise ValueError("The clip must have a valid positive source interval.")
-    if end - start > MAX_DURATION:
-        raise ValueError("Track clips up to 10 minutes at a time. Split a longer source into shorter clips first.")
+    if end - start > MAX_ANALYSIS_DURATION + .000001:
+        raise ValueError("Analyse up to 30 seconds of source video at a time. Choose a shorter analysis range in Object Tracking, or split the clip first.")
     if not _number(reference_source_time) or not start <= reference_source_time <= end:
         raise ValueError("The reference frame must be inside the selected clip's source interval.")
     if anchors is None:

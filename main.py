@@ -6,6 +6,14 @@ from kinetic_cut.process import install_desktop_process_policy
 
 
 if __name__ == "__main__":
+    if len(sys.argv)==3 and sys.argv[1]=='--audio-cut-selftest':
+        install_desktop_process_policy()
+        from kinetic_cut.audio_cut_diagnostics import run
+        sys.exit(run(sys.argv[2]))
+    if len(sys.argv)==3 and sys.argv[1]=='--colour-grade-selftest':
+        install_desktop_process_policy()
+        from kinetic_cut.colour_grade_diagnostics import run
+        sys.exit(run(sys.argv[2]))
     if len(sys.argv)==3 and sys.argv[1]=='--preview-sampling-selftest':
         install_desktop_process_policy()
         from kinetic_cut.preview_sampling_diagnostics import run
@@ -155,9 +163,6 @@ if __name__ == "__main__":
         sys.exit(run(sys.argv[2]))
     elif len(sys.argv)==3 and sys.argv[1]=='--keyframe-selftest':
         from kinetic_cut.keyframe_diagnostics import run
-        sys.exit(run(sys.argv[2]))
-    elif len(sys.argv)==3 and sys.argv[1]=='--focus-selftest':
-        from kinetic_cut.focus_diagnostics import run
         sys.exit(run(sys.argv[2]))
     elif len(sys.argv)==3 and sys.argv[1]=='--pool-selftest':
         from kinetic_cut.pool_diagnostics import run

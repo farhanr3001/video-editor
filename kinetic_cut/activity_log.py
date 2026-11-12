@@ -6,6 +6,7 @@ Each line has a sequence number; sort by it after the ring wraps.
 """
 import atexit
 import json
+import logging
 import math
 import mmap
 import os
@@ -22,8 +23,23 @@ CAPACITY=512
 class ActivityLog:
     def __init__(self,path,*,capacity=CAPACITY):
         self.path=Path(path);self.path.parent.mkdir(parents=True,exist_ok=True)
-        if self.path.exists():self.path.replace(self.path.with_suffix(self.path.suffix+'.1'))
-        self.file=self.path.open('w+b');self.capacity=capacity
+        requested=self.path
+        try:
+            if self.path.exists():self.path.replace(self.path.with_suffix(self.path.suffix+'.1'))
+            self.file=self.path.open('x+b')
+        except (PermissionError,FileExistsError):
+            # Another editor may still own the mapped ring after its window
+            # closes. Give this session its own ring instead of losing actions.
+            self.path=self.path.with_name(f'{self.path.stem}-{os.getpid()}-{time.time_ns()}{self.path.suffix}')
+            self.file=self.path.open('x+b')
+        try:
+            old_logs=sorted(self.path.parent.glob(f'{requested.stem}-*-*{self.path.suffix}'),
+                            key=lambda p:p.stat().st_mtime,reverse=True)
+            for old in old_logs[8:]:
+                try:old.unlink()
+                except OSError:pass
+        except OSError:pass
+        self.capacity=capacity
         self.file.truncate(capacity*SLOT_BYTES)
         self.mapping=mmap.mmap(self.file.fileno(),capacity*SLOT_BYTES,access=mmap.ACCESS_WRITE)
         self.mapping[:]=(b' '*(SLOT_BYTES-1)+b'\n')*capacity
@@ -69,7 +85,9 @@ class ActivityLog:
 
 def install(directory):
     global _active
-    if _active is None or _active.closed:_active=ActivityLog(Path(directory)/'user-actions.log')
+    if _active is None or _active.closed:
+        _active=ActivityLog(Path(directory)/'user-actions.log')
+        logging.info('Recent-action log for process %s: %s',os.getpid(),_active.path.name)
     return _active
 
 

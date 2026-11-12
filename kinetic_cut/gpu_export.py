@@ -35,6 +35,7 @@ def recipe(project, preset, directory, burn_captions=True, prepared=None):
     from .exporter import _target_size
     from .effects import MATRICES
     from .creative_effects import NAMES as CREATIVE_NAMES, descriptor
+    from .colour_grade import coefficients
     if burn_captions and project.captions:raise Unsupported('caption rasterization')
     from .animated_transitions import native_names
     paired_names=native_names()
@@ -76,6 +77,9 @@ def recipe(project, preset, directory, burn_captions=True, prepared=None):
         if not enhanced and (item.brightness or item.contrast!=1 or item.saturation!=1):
             operations.append(dict(kind='grade',brightness=item.brightness,contrast=item.contrast,saturation=item.saturation))
         if item.sharpen and not enhanced:operations.append(dict(kind='sharpen',amount=min(5.,max(0.,item.sharpen*2))))
+        if item.colour_grade:
+            slope,bias,power,saturation=coefficients(item.colour_grade)
+            operations.append(dict(kind='colour-grade',rows=[slope,bias,[*power,saturation]]))
         for effect in ([] if enhanced else effects):
             name=effect.get('name')
             if name in ('Chroma Key','Green Screen'):
@@ -371,7 +375,9 @@ def worker(path):
         library=ctypes.CDLL(str(resource_path('assets','native','gpu_export.dll')))
         library.kc_export_abi.restype=ctypes.c_uint
         abi=library.kc_export_abi()
-        if abi not in (2,3,4,5):raise RuntimeError('Unsupported native export ABI')
+        if abi not in (2,3,4,5,6):raise RuntimeError('Unsupported native export ABI')
+        if abi<6 and any(op.get('kind')=='colour-grade' for layer in job['layers'] for op in layer.get('operations',[])):
+            raise RuntimeError('Advanced Colours requires native export ABI6')
         if abi<5 and any(layer.get('source_times') or layer.get('pair',{}).get('legacy') or (layer.get('operations') and layer.get('geometry')) for layer in job['layers']):raise RuntimeError('Animated effect geometry requires native export ABI5')
         if abi<4 and any(any(len(s)>6 for s in layer.get('geometry',[])) for layer in job['layers']):raise RuntimeError('Perspective geometry requires native export ABI4')
         decoder=Decoder(job.get('raw_sources'),reuse_frames=abi>=3)

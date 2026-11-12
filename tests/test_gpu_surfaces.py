@@ -15,6 +15,25 @@ from kinetic_cut.native_engine import LIB as INDEX_LIB,LatestRequest
 
 
 class GpuSurfaceTests(unittest.TestCase):
+    def test_dynamic_timeline_chrome_uses_nonblocking_image_requests(self):
+        from unittest.mock import Mock
+        from kinetic_cut.timeline import TimelineWidget
+        from kinetic_cut.gpu_timeline_chrome import refresh
+        timeline=TimelineWidget();timeline.resize(900,420);timeline.set_project(Project())
+        surface=SimpleNamespace(timeline=timeline,images=Mock(),view=timeline.viewport(),create=Mock(side_effect=lambda _:Mock()))
+        try:
+            refresh(surface,timeline._palette())
+            nodes=(surface.ruler_texture,surface.clock_texture,surface.cursor_texture)
+            for node in nodes:
+                calls=[call.args for call in node.setProperty.call_args_list]
+                self.assertEqual(calls[0],('asynchronous',True))
+                self.assertEqual(calls[1][0],'source')
+            created=surface.create.call_count
+            timeline.project.playhead=1.2
+            refresh(surface,timeline._palette())
+            self.assertEqual(surface.create.call_count,created)
+        finally:timeline.close();timeline.deleteLater()
+
     def test_prepared_text_tracks_current_canvas_geometry_before_raster_finishes(self):
         from kinetic_cut.gpu_preview import GpuPreview
         from PySide6.QtCore import QRectF,QSizeF

@@ -3,6 +3,8 @@ import hashlib
 import io
 import json
 import os
+import marshal
+import zlib
 from pathlib import Path
 import struct
 import sys
@@ -18,6 +20,10 @@ root = Path.cwd().resolve()
 ONLY = None
 if '--only' in sys.argv:
     ONLY = {name.strip() for name in sys.argv[sys.argv.index('--only') + 1].split(',') if name.strip()}
+REMOVE = set()
+if '--remove' in sys.argv:
+    REMOVE = {'kinetic_cut.'+name.strip().removeprefix('kinetic_cut.') for name in sys.argv[sys.argv.index('--remove')+1].split(',') if name.strip()}
+UPDATE_ENTRY = '--entry-script' in sys.argv
 
 
 def update_exe_pe_checksum(path):
@@ -47,6 +53,7 @@ def rebuild_exe(exe_path: Path):
     codes = {}
     entries = []
     for name, (kind, offset, length) in z.toc.items():
+        if name in REMOVE: continue
         entries.append(
             (
                 name,
@@ -63,8 +70,12 @@ def rebuild_exe(exe_path: Path):
 
     targets = []
     added = []
+    removed = set(z.toc) & REMOVE
+    entry_code = compile((root/'main.py').read_bytes(),'main.py','exec') if UPDATE_ENTRY else None
+    entry_changed = UPDATE_ENTRY and marshal.loads(old.extract('main')) != entry_code
     for source in (root / 'kinetic_cut').glob('*.py'):
         name = 'kinetic_cut.' + source.stem if source.stem != '__init__' else 'kinetic_cut'
+        if name in REMOVE: continue
         if ONLY is not None and source.stem not in ONLY:
             continue
         compiled = compile(source.read_bytes(), 'kinetic_cut/' + source.name, 'exec')
@@ -77,11 +88,13 @@ def rebuild_exe(exe_path: Path):
             entries.append((name, 'module.py', 'PYMODULE'))
             codes[name] = compiled; targets.append(name); added.append(name)
 
-    if not targets:
+    if not targets and not removed and not entry_changed:
         print(f"{exe_path} is already completely up to date with source.")
         return exe_path, []
 
     print(f"Updating {len(targets)} modules in {exe_path.name}: {targets}")
+    if removed: print(f'Removing obsolete modules: {sorted(removed)}')
+    if entry_changed: print('Updating main entry script')
 
     pyz_temp = exe_path.with_name(f"{exe_path.stem}-patched.pyz")
     ZlibArchiveWriter(str(pyz_temp), entries, codes)
@@ -92,6 +105,10 @@ def rebuild_exe(exe_path: Path):
     toc = []
     for name, (offset, size, uncompressed, compressed, kind) in old.toc.items():
         data = payload if name == pyz_name else raw[old._start_offset + offset : old._start_offset + offset + size]
+        if name == 'main' and entry_changed:
+            entry_payload=marshal.dumps(entry_code)
+            data=zlib.compress(entry_payload) if compressed else entry_payload
+            uncompressed=len(entry_payload)
         assert name != pyz_name or compressed == 0
         toc.append(
             (
@@ -134,9 +151,9 @@ def rebuild_exe(exe_path: Path):
     new = CArchiveReader(str(pending))
     assert new.options == old.options and set(new.toc) == set(old.toc)
     nz = new.open_embedded_archive(pyz_name)
-    assert set(nz.toc) == set(z.toc) | set(added)
+    assert set(nz.toc) == (set(z.toc) | set(added)) - removed
 
-    changed = [name for name in z.toc if z.extract(name) != nz.extract(name)] + added
+    changed = [name for name in z.toc if name not in removed and z.extract(name) != nz.extract(name)] + added
 
     assert set(changed) == set(targets), (changed, targets)
     for target in targets:
@@ -146,7 +163,9 @@ def rebuild_exe(exe_path: Path):
         )
 
     for name in old.toc:
-        if name != pyz_name:
+        if name == 'main' and entry_changed:
+            assert marshal.loads(new.extract(name)) == entry_code
+        elif name != pyz_name:
             assert old.extract(name) == new.extract(name), name
 
     # Atomic swap. A running Windows app keeps its exe locked against replacement but allows renaming.
@@ -157,7 +176,7 @@ def rebuild_exe(exe_path: Path):
         os.rename(exe_path, aside); os.replace(pending, exe_path)
         print(f"Original exe was in use; moved to {aside.name} (delete it after restarting the app)")
     print(f"Successfully updated {exe_path} (new SHA: {f.digest(exe_path)})")
-    return exe_path, targets
+    return exe_path, targets + sorted(removed) + (['main'] if entry_changed else [])
 
 
 def update_manifest(folder: Path):

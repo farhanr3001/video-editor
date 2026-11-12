@@ -189,7 +189,7 @@ class PropertiesPanel(QWidget):
                 shape=item.transform.shape; item.transform=Transform(.5,.5,1); item.transform.shape=shape
             elif section=="cropping":item.crop=Crop(); item.crop_softness=0.; item.retain_image_position=False
             elif section=="composite":item.composite_mode="Normal"; item.opacity=100.
-            elif section=="colour":item.grayscale=False; item.brightness=0.; item.contrast=1.; item.saturation=1.; item.sharpen=0.
+            elif section=="colour":item.grayscale=False; item.brightness=0.; item.contrast=1.; item.saturation=1.; item.sharpen=0.; item.colour_grade={}
         self.changed.emit()
 
     def reset_audio_section(self,*attrs):
@@ -238,7 +238,8 @@ class PropertiesPanel(QWidget):
     def set_audio_levels(self,levels):
         if not hasattr(self,"level_bars") or not getattr(self.window,"project",None):return
         item=self.window.project.item_by_id(self.item_id)
-        track=item.track if item and item.track in self.window.project.audio_tracks else ""
+        audio=self.targets(True)
+        track=item.track if item and item.track in self.window.project.audio_tracks else audio[0].track if audio else ""
         left,right,clipped=levels.get(track,(0.,0.,False))
         from .audio_levels import peak_db
         for bar,peak in zip(self.level_bars,(left,right)):
@@ -390,6 +391,11 @@ class PropertiesPanel(QWidget):
 
     def build_colors(self):
         panel=QWidget(); root=QVBoxLayout(panel); root.setContentsMargins(0,0,0,0)
+        self.advanced_colours=QPushButton("Advanced Colours…")
+        self.advanced_colours.setToolTip("Grade the selected clip with colour wheels, tone controls and presets.")
+        self.advanced_colours.clicked.connect(self.open_advanced_colours)
+        self.advanced_colours.setEnabled(False)
+        root.addWidget(self.advanced_colours)
         presets=QHBoxLayout(); presets.addWidget(QLabel("Presets"))
         for label,values in [("Neutral",(False,0,1,1,0)),("HD Pop",(False,.04,1.16,1.12,.35)),("Cinematic",(False,-.03,1.12,.82,.18)),("B&W",(True,0,1.08,0,.2))]:
             button=QPushButton(label); button.clicked.connect(lambda _,v=values:self.apply_color_preset(v)); presets.addWidget(button)
@@ -398,6 +404,41 @@ class PropertiesPanel(QWidget):
         for label,attr,lo,hi,default,step in [("Brightness","brightness",-.5,.5,0,.01),("Contrast","contrast",0,2,1,.01),("Saturation","saturation",0,2,1,.01),("Sharpen","sharpen",0,2,0,.01)]:
             row=ValueRow(lo,hi,default,step); form.addRow(label,row); self.color_bindings.append((attr,row)); row.edited.connect(lambda value,delta,a=attr,r=row:self.edit_color(a,value,delta,r.mixed))
         root.addStretch(); return panel
+
+    def grade_target(self):
+        from .missing_media import unavailable
+        from .quick_surface import enabled
+        if not enabled():return None,None
+        project=self.window.project
+        item=project.item_by_id(self.item_id)
+        media=project.media_by_id(item.media_id) if item else None
+        if (not item or item.track not in project.video_tracks or item.role in ("title","graphic")
+                or project.track_states.get(item.track,{}).get("locked")
+                or not media or media.kind not in ("video","image") or media.compound or unavailable(media,item)):
+            return None,None
+        return item,media
+
+    def open_advanced_colours(self):
+        item,media=self.grade_target()
+        if item is None:return
+        from .colour_grade_dialog import GradeDialog
+        window=self.window; project=window.project
+        window.flush_text_edit(); window.transport.pause(); window.player.pause()
+        dialog=GradeDialog(window,item,media)
+        # Application-scope editor shortcuts must stay out of the modal
+        # workspace, including when a nested preset popup owns the focus.
+        actions=[a for a in window.shortcut_actions.values() if a.shortcutContext()==Qt.ApplicationShortcut and a.isEnabled()]
+        try:
+            for action in actions:action.setEnabled(False)
+            accepted=dialog.exec()
+        finally:
+            for action in actions:action.setEnabled(True)
+            dialog.deleteLater()
+        if (accepted and window.project is project and project.item_by_id(item.id) is item
+                and not project.track_states.get(item.track,{}).get("locked")
+                and item.colour_grade != dialog.current):
+            item.colour_grade=dialog.current
+            self.changed.emit()
 
     def edit_color(self,attr,value,delta=float("nan"),mixed=False):
         if self.updating:return
@@ -422,6 +463,16 @@ class PropertiesPanel(QWidget):
             items=[item for identifier in sorted(ids,key=lambda identifier:self._target_order.get(identifier,len(p.timeline)))
                    if (item:=p.item_by_id(identifier)) is not None]
         primary=p.item_by_id(self.item_id)
+        if audio is True and primary and primary.track in p.video_tracks and primary.role not in {'title','graphic'} and self.window.timeline.linked_selection:
+            def link(item):return item.group_id if item.link_id is None else item.link_id
+            keys={link(i) for i in items if i.track in p.video_tracks and i.role not in {'title','graphic'}}-{None,''}
+            if not keys:return []
+            candidates=[i for i in items if i.track in p.audio_tracks and link(i) in keys]
+            if not candidates:
+                index=p.runtime_index
+                candidates=[i for track in p.audio_tracks for i in index.track_items.get(track,{}).values() if link(i) in keys]
+                candidates.sort(key=lambda i:index.order['timeline'].get(id(i),0))
+            return [i for i in candidates if not p.track_states.get(i.track,{}).get('locked')]
         def kind(item):return 'title' if item.role=='title' else 'audio' if item.track in p.audio_tracks else 'video'
         return [i for i in items if not p.track_states.get(i.track,{}).get('locked') and (audio is None or (i.track in p.audio_tracks)==audio) and (not primary or kind(i)==kind(primary))]
 
@@ -522,16 +573,18 @@ class PropertiesPanel(QWidget):
             self.tabs.setCurrentIndex(0); self.updating=False; self.refresh_graphic(); return
         if self.caption_id and not item and self.current_caption() and self.window.timeline.selected_caption==self.caption_id:self.refresh_caption(); return
         self.caption_id=""; self.video_stack.setCurrentIndex(0); self.updating=True
-        audio=bool(item and item.track in p.audio_tracks); video=bool(item and not audio)
+        primary_audio=bool(item and item.track in p.audio_tracks)
+        audio=primary_audio or bool(self.targets(True)); video=bool(item and not primary_audio)
         has_effects=bool(item and item.effects)
         self.video.setVisible(video); self.audio.setVisible(audio); self.effects.setVisible(has_effects); self.colors.setVisible(video)
         self.video.setEnabled(video); self.audio.setEnabled(audio); self.effects.setEnabled(has_effects); self.colors.setEnabled(video)
         source=p.media_by_id(item.media_id) if item else None
+        self.advanced_colours.setEnabled(bool(video and self.grade_target()[0]))
         self.tabs.setTabEnabled(0,video); self.tabs.setTabEnabled(1,audio or any(m.has_audio for m in p.media)); self.tabs.setTabEnabled(2,has_effects); self.tabs.setTabEnabled(3,video)
         # Keep tab selection stable across video/empty selections. Disabling a
         # tab makes Qt silently choose another one and loses the user's choice.
         self.audio_subtabs.widget(1).setEnabled(audio)
-        if item and item_id!=previous_item:self.tabs.setCurrentIndex(1 if audio else 0)
+        if item and item_id!=previous_item:self.tabs.setCurrentIndex(1 if primary_audio else 0)
         self.filename.setText(p.media_by_id(item.media_id).name if item and p.media_by_id(item.media_id) else "No clip selected")
         if item:
             bg=next((e for e in item.effects if e.get("inspector_background_blur")),{})

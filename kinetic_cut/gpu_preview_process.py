@@ -289,9 +289,7 @@ def _renderer(connection, desktop, host, parent_pid):
         clock=payload['clock'];transport.origin,transport.started,transport.rate,transport.playing,transport.scrubbing=clock
         transport.position=max(0.,transport.origin+(time.monotonic()-transport.started)*transport.rate) if transport.playing else payload['at']
         window.project.playhead=transport.position
-        if canvas.caption_focus:gpu.container.hide()
-        else:
-            gpu.container.show();gpu.view.update()
+        gpu.container.show();gpu.view.update()
         transport.sync(payload['force'])
         if transport.playing:transport.timer.start()
         else:transport.timer.stop()

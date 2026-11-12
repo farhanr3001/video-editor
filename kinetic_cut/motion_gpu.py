@@ -5,7 +5,7 @@ A motion composition is never rasterised on the CPU: Python evaluates the keyfra
 """
 import json
 from PySide6.QtCore import QRectF
-from PySide6.QtGui import QTransform, QMatrix4x4
+from PySide6.QtGui import QMatrix4x4
 from . import motion as M
 from . import motion_frame as F
 
@@ -30,10 +30,9 @@ def scene_of(project, item, cache):
 
 
 def placement(item, project, frame_rect):
+    from .graphics import graphic_transform
     sf = frame_rect.width() / max(1., float(project.settings.width)); w, h = project.settings.width, project.settings.height
-    t = item.transform; m = QTransform()
-    m.translate(frame_rect.left() + t.x * frame_rect.width(), frame_rect.top() + t.y * frame_rect.height())
-    m.translate(t.anchor_x * sf, t.anchor_y * sf); m.rotate(t.rotation); m.scale(t.scale * sf, t.effective_scale_y * sf); m.translate(-t.anchor_x, -t.anchor_y)
+    m = graphic_transform(project,item,frame_rect)
     m.translate(-w / 2, -h / 2); m.scale(1 / sf, 1 / sf)
     return m
 
@@ -44,6 +43,23 @@ def opacity_of(item, elapsed):
     return (getattr(item, 'opacity', 100.) / 100.) * fade
 
 
+def publish_motion(layer, item, scene, project, elapsed, frame_rect, alpha):
+    # Render an aspect-correct scene texture within the output budget, then
+    # map its two axes into the project canvas just as the compatibility
+    # painter does. A portrait asset in a landscape project must not clip at
+    # the landscape height before its scene coordinates have been mapped.
+    sw,sh=scene.get('canvas',(project.settings.width,project.settings.height))
+    factor=min(frame_rect.width()/max(1,sw),frame_rect.height()/max(1,sh))
+    size=(max(2,round(sw*factor)),max(2,round(sh*factor)))
+    matrix=placement(item,project,frame_rect)
+    matrix.scale(frame_rect.width()/size[0],frame_rect.height()/size[1])
+    layer.setWidth(size[0]);layer.setHeight(size[1])
+    layer.setProperty('k',size[0]/max(1,sw))
+    layer.setProperty('placement',QMatrix4x4(matrix))
+    layer.setProperty('alpha',alpha)
+    layer.setProperty('frame',F.frame(scene,item.in_point+elapsed*item.speed,size,project.settings.fps))
+
+
 class MotionLayers:
     """Owns one GpuMotion.qml item per visible motion graphic."""
     def __init__(self, surface):
@@ -51,9 +67,10 @@ class MotionLayers:
 
     def update(self, items, project, at, frame_rect, z):
         import time
+        from .keyframes import evaluated
         started = time.perf_counter(); shown = set()
         for item in items:
-            elapsed = at - item.start; alpha = opacity_of(item, elapsed)
+            elapsed = at - item.start; item=evaluated(item,elapsed); alpha = opacity_of(item, elapsed)
             if alpha <= .001: continue
             key = 'motion:' + item.id; layer = self.layers.get(key)
             if layer is None:
@@ -62,13 +79,10 @@ class MotionLayers:
                     install(self.surface.view.engine())
                 except Exception: pass
                 layer = self.surface.create('GpuMotion.qml', self.surface.item('canvas')); self.layers[key] = layer
-            size = (max(2, round(frame_rect.width())), max(2, round(frame_rect.height())))
             scene = scene_of(project, item, self.scenes)
-            description = F.frame(scene, item.in_point + elapsed * item.speed, size, project.settings.fps)
-            layer.setVisible(True); layer.setZ(z); layer.setWidth(size[0]); layer.setHeight(size[1])
-            layer.setProperty('k', size[0] / max(1, scene.get('canvas', [project.settings.width])[0]))
-            layer.setProperty('placement', QMatrix4x4(placement(item, project, frame_rect)))
-            layer.setProperty('alpha', alpha); layer.setProperty('frame', description); shown.add(key)
+            layer.setVisible(True); layer.setZ(z[item.track])
+            publish_motion(layer,item,scene,project,elapsed,frame_rect,alpha)
+            shown.add(key)
         for key, layer in self.layers.items():
             if key not in shown: layer.setVisible(False)
         self.count = len(shown); self.frame_ms = (time.perf_counter() - started) * 1000

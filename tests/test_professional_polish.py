@@ -154,7 +154,7 @@ class PolishTests(unittest.TestCase):
         mime=QMimeData(); mime.setData("application/x-kinetic-effect",b"Sepia")
         move=QDragMoveEvent(pos,Qt.CopyAction,mime,Qt.LeftButton,Qt.NoModifier); t.dragMoveEvent(move)
         self.assertTrue(move.isAccepted()); self.assertEqual(t.effect_hover[1],"v")
-        after=t.viewport().grab().toImage(); sample=pos-QPoint(0,20)
+        after=t.viewport().grab().toImage(); visible=t.visible_item_rect(w.project.timeline[0]); sample=QPoint(round(visible.right()-5),round(visible.center().y()))
         self.assertNotEqual(before.pixelColor(sample),after.pixelColor(sample))
         self.assertIsNone(t.effect_target("Sepia",t.item_rect(w.project.timeline[1]).center()))
         w.project.track_states["video_1"]={"locked":True}; self.assertIsNone(t.effect_target("Sepia",QPointF(pos)))

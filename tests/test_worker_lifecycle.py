@@ -6,7 +6,7 @@ import weakref
 from unittest.mock import patch
 
 from PySide6.QtCore import QEvent, QObject, QThread, QThreadPool
-from PySide6.QtWidgets import QApplication, QLabel, QProgressBar
+from PySide6.QtWidgets import QApplication, QLabel, QProgressBar, QWidget
 from types import SimpleNamespace
 
 from kinetic_cut.ui import MainWindow, Worker
@@ -129,12 +129,46 @@ class WorkerLifecycleTests(unittest.TestCase):
         owner=SimpleNamespace(_workers={maintenance},job_status=label,job_progress=progress)
         try:
             MainWindow.update_job_status(owner)
-            self.assertTrue(label.isHidden()); self.assertTrue(progress.isHidden())
+            self.assertEqual(label.text(),'Background tasks'); self.assertTrue(progress.isHidden())
             owner._workers.add(ordinary); MainWindow.update_job_status(owner)
-            self.assertFalse(label.isHidden()); self.assertFalse(progress.isHidden())
+            self.assertFalse(progress.isHidden())
             self.assertEqual(label.text(),'1 background task')
             owner._workers.remove(ordinary); MainWindow.update_job_status(owner)
-            self.assertTrue(label.isHidden()); self.assertTrue(progress.isHidden())
+            self.assertEqual(label.text(),'Background tasks'); self.assertTrue(progress.isHidden())
         finally:
             label.deleteLater(); progress.deleteLater()
             maintenance.signals.deleteLater(); ordinary.signals.deleteLater()
+
+    def test_background_task_history_keeps_active_jobs_and_bounds_finished_rows(self):
+        from kinetic_cut.workspace import BackgroundTasks
+        owner = QWidget()
+        panel = BackgroundTasks(owner)
+        panel.show()
+        try:
+            active = Worker(lambda: None)
+            active.task_label = 'Render video'
+            panel.add(active)
+            self.assertIn('Queued', panel.rows.item(0).text())
+            active.signals.started.emit(100.0)
+            self.app.processEvents()
+            self.assertIn('Running', panel.rows.item(0).text())
+            for index in range(12):
+                finished = Worker(lambda: None)
+                finished.task_label = f'Waveform {index}'
+                panel.add(finished)
+                panel.finish(finished.signals)
+            self.assertEqual(len(panel.history), 10)
+            self.assertEqual(panel.rows.count(), 10)
+            self.assertIn('Render video', panel.rows.item(0).text())
+            self.assertIn('Waveform 11', panel.rows.item(1).text())
+            self.assertFalse(panel.rows.item(1).icon().isNull())
+            panel.clear_button.click()
+            self.assertEqual(panel.rows.count(), 1)
+            active.signals.error.emit('Operation cancelled.')
+            self.app.processEvents()
+            active.signals.task_finished_at = 172.5
+            panel.finish(active.signals)
+            self.assertIn('Cancelled  ·  1m 12s', panel.rows.item(0).text())
+        finally:
+            panel.close()
+            owner.deleteLater()

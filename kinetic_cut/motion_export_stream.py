@@ -23,8 +23,10 @@ def samples(project,item,frames):
     if item.fade_out:interval(item.duration-item.fade_out,item.duration)
     from .motion_presets import is_motion
     if item.role!='graphic' or not is_motion(item.graphic_type):
-        # Only arrows have no implicit time-driven drawing in this branch.
-        if item.role!='graphic' or 'arrow' not in item.graphic_type.lower():return list(range(frames))
+        from .graphics import GRAPHICS_CATALOG
+        kind=GRAPHICS_CATALOG.get(item.graphic_type,{}).get('kind')
+        if item.role!='graphic' or kind not in ('circle','arrow','square','rectangle','speech_bubble','callout_badge'):
+            return list(range(frames))
         return sorted(result)
     from .motion import validate
     scene=validate(item.graphic_data.get('scene',{}))

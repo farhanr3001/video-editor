@@ -63,3 +63,9 @@ assets_xqc_wealth_series_20261014/
 
 # Private video research; keep it out of source backups.
 /wealth_search.jsonl
+/assets_aya/
+/assets_umbrella/
+/assets_moonlight/
+
+# Private owner-specific MCP composition builder; preserve locally.
+/scripts/motion_examples/overnight_scene_builder.py

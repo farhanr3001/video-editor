@@ -67,6 +67,8 @@ def run_action(window,cut_words=False,on_complete=None):
         if ids:window.timeline.select_ids(set(ids),ids[0])
         else:window.timeline.select_ids(set())
         window.model_changed(); window.seek(min(project.playhead,project.duration))
+        from .effects_library import used
+        used(window, 'Cut curse words' if cut_words else 'Remove Silence')
         window.statusBar().showMessage(title+" complete · original files unchanged · Undo available",6000)
         if on_complete:on_complete()
     def failed(detail):

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 from kinetic_cut.cache_manager import clear_waveforms_on_exit
 from kinetic_cut.ui import MainWindow,Worker
 from kinetic_cut.waveforms import waveform,RATE
+from kinetic_cut.model import Project
 
 
 class WaveformExitTests(unittest.TestCase):
@@ -36,6 +37,9 @@ class WaveformExitTests(unittest.TestCase):
             path=Path(directory)/'waveforms/keep.npz';path.parent.mkdir();path.write_bytes(b'cache')
             window=MainWindow();window.autosave_timer.stop()
             try:
+                window.set_project(Project(name='New project'))
+                window.set_project(Project(name='Other project'))
+                self.assertTrue(path.exists())
                 with patch('kinetic_cut.close_guard.confirm_close',return_value=False):
                     event=QCloseEvent();window.closeEvent(event)
                 self.assertFalse(event.isAccepted());self.assertEqual(path.read_bytes(),b'cache')
@@ -84,7 +88,13 @@ class WaveformExitTests(unittest.TestCase):
                 output.setnchannels(2);output.setsampwidth(2);output.setframerate(RATE);output.writeframes(values.tobytes())
             original=source.read_bytes()
             with patch('kinetic_cut.config.CACHE_DIR',root):
-                first=waveform(source);self.assertEqual(len(list((root/'waveforms').glob('*.npz'))),1)
+                from concurrent.futures import ThreadPoolExecutor
+                from kinetic_cut.process import popen
+                with patch('kinetic_cut.waveforms.popen',wraps=popen) as decoder, ThreadPoolExecutor(2) as workers:
+                    first, shared = list(workers.map(waveform, [source, source]))
+                decoder.assert_called_once()
+                self.assertTrue(np.array_equal(first.peaks,shared.peaks))
+                self.assertEqual(len(list((root/'waveforms').glob('*.npz'))),1)
                 self.assertEqual(clear_waveforms_on_exit(root)[0],1)
                 from kinetic_cut.process import popen
                 with patch('kinetic_cut.waveforms.popen',wraps=popen) as decoder:second=waveform(source)

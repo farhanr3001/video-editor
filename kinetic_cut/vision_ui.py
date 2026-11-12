@@ -96,6 +96,8 @@ def begin(window,name=None,reanalyse=False):
             if existing:existing.update(dialog.result_effect())
             else:current.effects.append(dialog.result_effect())
             window.model_changed(); window.select_item(current.id); window.inspector.tabs.setCurrentIndex(2)
+            from .effects_library import used
+            used(window, name)
             index=next(n for n,e in enumerate(current.effects) if e['name']=='Custom Face')
             window.inspector.effect_picker.setCurrentIndex(index)
             window.statusBar().showMessage(f'Custom Face applied · {detected}/{info["frames"]} frames tracked · Undo available',7000)
@@ -106,6 +108,8 @@ def begin(window,name=None,reanalyse=False):
         if effect:effect.update(enabled=True,analysis=copy.deepcopy(info))
         else:current.effects.append(dict(name=name,enabled=True,analysis=copy.deepcopy(info)))
         window.model_changed(); window.select_item(current.id); window.inspector.tabs.setCurrentIndex(2)
+        from .effects_library import used
+        used(window, name)
         index=next(n for n,e in enumerate(current.effects) if e['name']==name); window.inspector.effect_picker.setCurrentIndex(index)
         window.statusBar().showMessage(f'{name} applied · detection in {detected}/{info["frames"]} frames · Undo available',7000)
         if name in FACE_NAMES and detected<info['frames']*.9:QMessageBox.information(window,'Face tracking completed',f'Face detected in {detected} of {info["frames"]} analysed frames. The face filter disappears when tracking is lost, so no stale distortion remains on the image. Review playback before exporting.')

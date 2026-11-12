@@ -58,9 +58,17 @@ struct Texture {
     std::shared_ptr<size_t> reservation;
 };
 // Constant layout is shared by all export shaders, in 16-byte registers.
-struct Params {float crop[4],box[4],grade[4],extra[4],direction[4],row0[4],row1[4],row2[4],legacyCropA[4],legacyCropB[4];};
+struct Params {float crop[4],box[4],grade[4],extra[4],direction[4],row0[4],row1[4],row2[4],legacyCropA[4],legacyCropB[4],colourSlope[4],colourBias[4],colourPower[4];};
+static void readColourGrade(const QJsonObject& operation,Params& p){
+    auto rows=operation["rows"].toArray();
+    float* values[]={p.colourSlope,p.colourBias,p.colourPower};
+    for(int r=0;r<3;++r){
+        auto row=rows.at(r).toArray();
+        for(qsizetype c=0;c<row.size() && c<4;++c)values[r][c]=float(row.at(c).toDouble());
+    }
+}
 static const char* shaders=R"HLSL(
-cbuffer P:register(b0){float4 crop;float4 box;float4 grade;float4 extra;float4 direction;float4 row0;float4 row1;float4 row2;float4 legacyCropA;float4 legacyCropB;};
+cbuffer P:register(b0){float4 crop;float4 box;float4 grade;float4 extra;float4 direction;float4 row0;float4 row1;float4 row2;float4 legacyCropA;float4 legacyCropB;float4 colourSlope;float4 colourBias;float4 colourPower;};
 Texture2D image:register(t0);Texture2D original:register(t1);SamplerState sampleImage:register(s0);
 struct V{float4 position:SV_Position;float2 uv:TEXCOORD0;};
 V vertex(uint id:SV_VertexID){
@@ -104,6 +112,14 @@ float4 gradePixel(V v):SV_Target{
 }
 float4 matrixPixel(V v):SV_Target{
  float4 c=samplePixel(v.uv);return float4(saturate(float3(dot(c.rgb,row0.rgb),dot(c.rgb,row1.rgb),dot(c.rgb,row2.rgb))),c.a);
+}
+float3 advancedColour(float3 input){
+ float3 rgb=pow(saturate(input*colourSlope.rgb+colourBias.rgb),colourPower.rgb);
+ float luma=dot(rgb,float3(.2126,.7152,.0722));
+ return saturate(lerp(luma.xxx,rgb,colourPower.w));
+}
+float4 colourGradePixel(V v):SV_Target{
+ float4 c=samplePixel(v.uv);return float4(advancedColour(c.rgb),c.a);
 }
 // BEGIN GENERATED FINISHING EFFECTS
 #ifdef KINETIC_CREATIVE_MODE
@@ -7806,7 +7822,7 @@ weight=t195;
 return lerp(image.SampleLevel(sampleImage,saturate(uvA),0),original.SampleLevel(sampleImage,saturate(uvB),0),weight);}
 #endif
 // END GENERATED TRANSITION MAPS
-float4 placePixel(V v):SV_Target{
+float4 placeLayer(V v,bool advanced){
  float2 center=v.uv*direction.xy-box.xy-box.zw*.5;float a=extra.x;
  float2 at=float2(cos(a)*center.x+sin(a)*center.y,-sin(a)*center.x+cos(a)*center.y)/box.zw+.5;
  if(direction.z>.5){float3 positionUv=float3(v.uv*direction.xy,1);float w=dot(row2.xyz,positionUv);if(abs(w)<.000001)discard;at=float2(dot(row0.xyz,positionUv),dot(row1.xyz,positionUv))/w;}
@@ -7814,6 +7830,7 @@ float4 placePixel(V v):SV_Target{
  if(any(at<0)||any(at>1)){if(extra.w>.5)return under;discard;}
  float4 c=samplePixel(crop.xy+at*crop.zw);float gray=dot(c.rgb,float3(.299,.587,.114));
  c.rgb=lerp(gray.xxx,c.rgb,grade.z);c.rgb=saturate((c.rgb-.5)*grade.y+.5+grade.x)*grade.w;
+ if(advanced)c.rgb=advancedColour(c.rgb);
  float mask=extra.y;if(extra.z>.5)mask*=1-smoothstep(1-fwidth(length((at-.5)*2)),1,length((at-.5)*2));
  c.a*=mask;
  if(extra.w>.5){
@@ -7822,6 +7839,8 @@ float4 placePixel(V v):SV_Target{
  }
  c.rgb*=c.a;return c;
 }
+float4 placePixel(V v):SV_Target{return placeLayer(v,false);}
+float4 placeGradePixel(V v):SV_Target{return placeLayer(v,true);}
 )HLSL"
 #include "legacy_transitions.inc"
 ;
@@ -7832,7 +7851,7 @@ public:
     ComPtr<IMFDXGIDeviceManager> manager;
     ComPtr<ID3D11VideoDevice> video;ComPtr<ID3D11VideoContext> videoContext;
     ComPtr<ID3D11VertexShader> vertex;
-    ComPtr<ID3D11PixelShader> copy,blur,place,matrix,mix,grade,mask,sharp,key;
+    ComPtr<ID3D11PixelShader> copy,blur,place,matrix,mix,grade,mask,sharp,key,colourGrade,placeGrade;
     std::map<int,ComPtr<ID3D11PixelShader>> creativeShaders;
     std::map<int,ComPtr<ID3D11PixelShader>> transitionShaders;
     ComPtr<ID3D11Buffer> constants;
@@ -7881,6 +7900,12 @@ public:
         auto code=compile(mode>=25?"legacyTransitionPixel":"transitionPixel","ps_5_0",mode,true);ComPtr<ID3D11PixelShader> shader;
         hr(device->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&shader),"Create transition shader");
         return transitionShaders.emplace(mode,shader).first->second.Get();
+    }
+    void prepareColourGrade(){
+        auto effect=compile("colourGradePixel","ps_5_0");
+        hr(device->CreatePixelShader(effect->GetBufferPointer(),effect->GetBufferSize(),nullptr,&colourGrade),"Create colour grade shader");
+        auto placement=compile("placeGradePixel","ps_5_0");
+        hr(device->CreatePixelShader(placement->GetBufferPointer(),placement->GetBufferSize(),nullptr,&placeGrade),"Create graded placement shader");
     }
     ComPtr<ID3DBlob> compile(const char* entry,const char* model,int mode=-1,bool transition=false){
         std::string value=std::to_string(mode);D3D_SHADER_MACRO macros[]={{transition?"KINETIC_TRANSITION_MODE":"KINETIC_CREATIVE_MODE",value.c_str()},{nullptr,nullptr}};
@@ -8107,7 +8132,7 @@ public:
 };
 
 extern "C" __declspec(dllexport) void kc_export_set_cpu_reader(CpuRead callback){cpuRead=callback;}
-extern "C" __declspec(dllexport) unsigned kc_export_abi(){return 5;}
+extern "C" __declspec(dllexport) unsigned kc_export_abi(){return 6;}
 static int exportJob(const wchar_t* jobPath){
     QString status;bool com=false,mf=false;
     try{
@@ -8125,6 +8150,12 @@ static int exportJob(const wchar_t* jobPath){
             std::map<QString,std::pair<Texture,Texture>> transitionSurfaces;
             std::map<QString,std::pair<Texture*,QJsonArray>> legacySources;
             std::vector<QJsonObject> layers;for(auto value:job["layers"].toArray())layers.push_back(value.toObject());
+            if(std::any_of(layers.begin(),layers.end(),[](const QJsonObject& layer){
+                auto operations=layer["operations"].toArray();
+                return std::any_of(operations.begin(),operations.end(),[](const QJsonValue& operation){
+                    return operation.toObject()["kind"].toString()=="colour-grade";
+                });
+            }))gpu.prepareColourGrade();
             std::vector<size_t> starts,ends;for(size_t i=0;i<layers.size();i++){starts.push_back(i);ends.push_back(i);}
             std::sort(starts.begin(),starts.end(),[&](size_t a,size_t b){return val(layers[a],"start")<val(layers[b],"start");});
             std::sort(ends.begin(),ends.end(),[&](size_t a,size_t b){return val(layers[a],"end")<val(layers[b],"end");});
@@ -8187,6 +8218,11 @@ static int exportJob(const wchar_t* jobPath){
                     auto operations=layer["operations"].toArray();
                     if(operations.isEmpty()&&(val(layer,"blur_x")>.01||val(layer,"blur_y")>.01))
                         operations.append(QJsonObject{{"kind","blur"},{"x",val(layer,"blur_x")},{"y",val(layer,"blur_y")},{"reflect",layer["reflect"]}});
+                    QJsonObject inlineGrade;
+                    if(operations.size()==1 && operations.at(0).toObject()["kind"].toString()=="colour-grade"
+                            && !layer.value("pair").toObject().value("legacy").toBool()){
+                        inlineGrade=operations.at(0).toObject();operations=QJsonArray();
+                    }
                     Texture* ready=source;
                     auto crop=layer["crop"].toArray();
                     if(!operations.isEmpty()){
@@ -8210,6 +8246,9 @@ static int exportJob(const wchar_t* jobPath){
                         }else if(op["kind"].toString()=="grade"){
                             p.grade[0]=float(val(op,"brightness"));p.grade[1]=float(val(op,"contrast",1));p.grade[2]=float(val(op,"saturation",1));p.extra[0]=bt709?1.f:0.f;
                             gpu.draw(surfaces[one],surfaces[active],gpu.grade.Get(),p);active=one;
+                        }else if(op["kind"].toString()=="colour-grade"){
+                            readColourGrade(op,p);
+                            gpu.draw(surfaces[one],surfaces[active],gpu.colourGrade.Get(),p);active=one;
                         }else if(op["kind"].toString()=="creative"){
                             double effectTime=at-val(layer,"effect_origin",start);if(layer.contains("pair"))effectTime=std::clamp(effectTime,0.,std::max(0.,val(layer,"source_duration")-1/fps));
                             p.extra[0]=float(val(op,"mode"));p.extra[1]=float(effectTime+val(op,"offset"));p.extra[2]=op["flip_x"].toBool()?1.f:0.f;p.extra[3]=op["flip_y"].toBool()?1.f:0.f;
@@ -8260,6 +8299,10 @@ static int exportJob(const wchar_t* jobPath){
                     if(fadeOut>0)opacity*=std::clamp((layer.contains("pair")?val(layer,"source_duration")-localTime:end-at)/fadeOut,0.,1.);
                     p.extra[1]=float(opacity);
                     p.extra[3]=float(val(layer,"blend_mode"));
+                    auto* placement=gpu.place.Get();
+                    if(!inlineGrade.isEmpty()){
+                        readColourGrade(inlineGrade,p);placement=gpu.placeGrade.Get();
+                    }
                     if(layer.contains("pair")){
                         auto pair=layer["pair"].toObject();auto id=pair["id"].toString();
                         if(pair["legacy"].toBool()){
@@ -8283,15 +8326,15 @@ static int exportJob(const wchar_t* jobPath){
                         if(!transitionSurfaces.count(id))transitionSurfaces.emplace(id,std::make_pair(gpu.texture(width,height),gpu.texture(width,height)));
                         auto& surfaces=transitionSurfaces.at(id);
                         if(!usedPairs.count(id)){float clear[4]={0,0,0,0};gpu.context->ClearRenderTargetView(surfaces.first.rtv.Get(),clear);gpu.context->ClearRenderTargetView(surfaces.second.rtv.Get(),clear);usedPairs.insert(id);}
-                        bool incoming=val(pair,"side")>.5;gpu.draw(incoming?surfaces.second:surfaces.first,*ready,gpu.place.Get(),p,true);
+                        bool incoming=val(pair,"side")>.5;gpu.draw(incoming?surfaces.second:surfaces.first,*ready,placement,p,true);
                         if(incoming){
                             double phase=std::clamp((at-val(pair,"start"))/std::max(.05,val(pair,"duration",1)),0.,1.);auto easing=pair["easing"].toString();
                             if(easing=="Ease In")phase*=phase;else if(easing=="Ease Out")phase=1-(1-phase)*(1-phase);else if(easing=="Smooth S-Curve")phase=phase*phase*(3-2*phase);else if(easing!="Linear")phase=phase<.5?2*phase*phase:1-std::pow(-2*phase+2,2)/2;
                             Params t{};t.extra[1]=float(phase);auto values=pair["params"].toArray();for(int k=0;k<3;k++){t.row0[k]=float(values[k].toDouble());t.row1[k]=float(values[k+3].toDouble());}t.row1[3]=float(width)/height;
                             gpu.draw(*composed,surfaces.first,gpu.transitionShader(int(val(pair,"mode"))),t,true,false,&surfaces.second);
                         }
-                    }else if(p.extra[3]>.5){auto* next=composed==&target?&alternate:&target;gpu.draw(*next,*ready,gpu.place.Get(),p,false,false,composed);composed=next;}
-                    else gpu.draw(*composed,*ready,gpu.place.Get(),p,true);
+                    }else if(p.extra[3]>.5){auto* next=composed==&target?&alternate:&target;gpu.draw(*next,*ready,placement,p,false,false,composed);composed=next;}
+                    else gpu.draw(*composed,*ready,placement,p,true);
                 }
                 // Keep source clocks and scratch surfaces proportional to active
                 // layers, never to the number of cuts in the entire project.

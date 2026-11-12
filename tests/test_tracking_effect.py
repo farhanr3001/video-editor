@@ -35,6 +35,50 @@ def fixture(root, duration=4., width=256, height=144):
 
 
 class TrackingEffectTests(unittest.TestCase):
+    def test_nested_image_marker_changes_invalidate_the_cached_layer(self):
+        media,item,effect,image=fixture(self.root)
+        stamp=self.root/'stamp.png'
+        image.save(str(stamp))
+        marker=tracking.default_effect('Image')
+        marker['image']=str(stamp)
+        effect['markers']=[marker]
+        before=tracking.cache_key(item,media,1)
+        changed=QImage(40,40,QImage.Format_RGB32)
+        changed.fill(Qt.red)
+        changed.save(str(stamp))
+        self.assertNotEqual(before,tracking.cache_key(item,media,1))
+    def test_sparse_appearance_holds_properties_and_validates_every_export_state(self):
+        from kinetic_cut.tracking_appearance import edit,evaluate
+        media,item,effect,image=fixture(self.root)
+        marker=tracking.default_effect('Circle');effect['markers']=[marker]
+        edit(marker,[1.,2.],dict(mode='Arrow',color='#00ff00'))
+        edit(marker,[1.5],dict(rotation=40))
+        self.assertEqual(tracking.render_effects(item,.999)[0]['mode'],'Circle')
+        self.assertEqual(tracking.render_effects(item,1)[0]['mode'],'Arrow')
+        self.assertEqual(tracking.render_effects(item,1.75)[0]['rotation'],40)
+        self.assertEqual(tracking.render_effects(item,2.5)[0]['rotation'],40)
+        self.assertFalse(tracking.export_error(effect,media,item))
+        edit(marker,[3],dict(width=-5))
+        self.assertTrue(tracking.export_error(effect,media,item))
+        with self.assertRaises(ValueError):evaluate(dict(marker,appearance_keys=[dict(time=float('nan'),values={'mode':'Circle'})]),1)
+        with self.assertRaises(ValueError):evaluate(dict(marker,appearance_keys=[dict(time=1,values={'analysis':{}})]),1)
+
+    def test_temporal_follow_crop_and_marker_pixels_use_source_time_after_trim_retime(self):
+        from kinetic_cut.tracking_appearance import edit
+        media,item,effect,image=fixture(self.root)
+        marker=tracking.default_effect('Rectangle');marker.update(fill=True,color='#ff0000')
+        effect['markers']=[marker];edit(marker,[1.],dict(color='#00ff00'))
+        edit(marker,[2.],dict(mode='Follow Crop',width=40,height=60))
+        item.in_point=.5;item.speed=2.;item.duration=1.5
+        first=tracking.apply(image,item,media,.75)
+        second=tracking.apply(image,item,media,1.5)
+        self.assertNotEqual(first,second)
+        self.assertIsNone(tracking.follow_effect(item,1.5))
+        self.assertIsNotNone(tracking.follow_effect(item,2))
+        self.assertLess(tracking.effective_crop(item,media,2.2).width,1)
+        self.assertEqual(tracking.effective_crop(item,media,1.5),item.crop)
+        self.assertEqual(item.source_time(item.start+.75),2.)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.root = Path(self.temp.name)
 
@@ -55,7 +99,8 @@ class TrackingEffectTests(unittest.TestCase):
         self.assertAlmostEqual(at, 3.)
         self.assertAlmostEqual(tracking.box_at(right.effects[0], media, right, at)[0], .55)
         right.duration = 2.; self.assertFalse(tracking.valid(right.effects[0], media, right))
-        self.assertIn('range changed', tracking.export_error(right.effects[0], media, right))
+        self.assertEqual('', tracking.export_error(right.effects[0], media, right))
+        self.assertEqual(tracking.apply(image,right,media,5).pixelColor(20,20),QColor('black'))
 
     def test_censor_losses_and_invalid_analysis_fail_closed_even_with_low_opacity(self):
         media, item, effect, image = fixture(self.root)

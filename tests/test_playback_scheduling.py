@@ -69,8 +69,6 @@ class PlaybackSchedulingTests(unittest.TestCase):
         self.assertIsNone(self.canvas.frame_work('decoder',self.image))
         self.item.effects=[dict(name='AI Enhance')]
         self.assertIsNone(self.canvas.frame_work('decoder',self.image))
-        self.canvas.caption_focus=True
-        self.assertIsNone(self.canvas.frame_work('decoder',self.image))
     def test_static_filter_snapshots_match_paused_scrub_and_playback_quality(self):
         self.canvas.active_frames[self.item.id]='decoder'
         self.item.effects=[dict(name='Gaussian Blur',horizontal=12.,vertical=12.)]

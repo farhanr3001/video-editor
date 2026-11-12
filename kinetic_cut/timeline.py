@@ -1,6 +1,7 @@
 """Interactive NLE timeline: selection and links are independent of layout roles."""
 import copy
 import math
+from .activity_log import record as record_action
 from collections import OrderedDict
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal, QTimer
 from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetrics, QImage, QKeySequence, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRegion
@@ -21,6 +22,7 @@ class TimelineWidget(BaseTimeline):
     captionSelected=Signal(str)
     captionBladeRequested=Signal(str,float)
     effectDropped=Signal(str,str)
+    effectUsed=Signal(str)
     titleDropped=Signal(str,str,float)
     mediaBatchDropped=Signal(object,str,float)
     filesDropped=Signal(object,str,float)
@@ -1557,6 +1559,8 @@ class TimelineWidget(BaseTimeline):
 
     def mouseMoveEvent(self,event):
         if not self.project:return
+        if self.drag_mode:
+            record_action('timeline.drag',throttle=.25,mode=self.drag_mode,x=event.position().x(),y=event.position().y())
         if self.drag_mode=='pan':
             delta=event.position()-self.pan_origin; horizontal,vertical=self.pan_offsets
             self.horizontalScrollBar().setValue(horizontal-round(delta.x()))
@@ -1585,6 +1589,10 @@ class TimelineWidget(BaseTimeline):
                 else:
                     self.viewport().setCursor(Qt.ArrowCursor); return
             hit,cap=self._fast_hit_at(event.position())
+            hovered=(hit.id if hit else '',cap.id if cap else '')
+            if hovered!=getattr(self,'_action_hover',None):
+                self._action_hover=hovered
+                record_action('timeline.hover',item_id=hovered[0],caption_id=hovered[1],position=self.project.playhead)
             new_hover_id=hit.id if hit else ""
             if self.tool=="blade":
                 new_blade_id=hit.id if hit else ""
@@ -2047,6 +2055,7 @@ class TimelineWidget(BaseTimeline):
                 self.select_captions(set(),"")
                 self.transitionSelected.emit(trans.id)
                 self.itemChanged.emit("")
+                self.effectUsed.emit(trans_name)
                 self.viewport().update()
                 event.acceptProposedAction()
                 return

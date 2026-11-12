@@ -70,7 +70,7 @@ class CompoundController:
         wanted={str(cache_path(m.compound)) for m in project.media if m.compound and m.id in used}
         for target,token in self.cancellations.items():
             if target not in wanted:token.set()
-        if self.pending or getattr(w.transport,'closed',False) or getattr(w.preview,'caption_focus',False):return
+        if self.pending or getattr(w.transport,'closed',False):return
         for media in project.media:
             if not media.compound or media.id not in used:continue
             from .missing_media import is_missing

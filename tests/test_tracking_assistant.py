@@ -48,7 +48,10 @@ class TrackingAssistantTests(unittest.TestCase):
     def reset_project(self):
         self.w.transport.closed = False
         self.w.current_page = 0
-        media = MediaItem("m", str(self.source), "image", "source", width=160, height=100)
+        # This fixture measures tracking's single edit, after import metadata is
+        # available; do not race an unrelated thumbnail job against its history.
+        media = MediaItem("m", str(self.source), "image", "source", width=160, height=100,
+                          thumbnail=str(self.source))
         item = TimelineItem("clip", media.id, "video_1", 0, 2)
         self.w.set_project(Project(media=[media], timeline=[item]))
         self.app.processEvents()

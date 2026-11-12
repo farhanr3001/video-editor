@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 
 from kinetic_cut import auto_layout
 from kinetic_cut.media_insert import plan
-from kinetic_cut.model import MediaItem, Project
+from kinetic_cut.model import MediaItem, Project, Crop
 from kinetic_cut.video_presets import KEY, apply, validate
 
 W, H = 1080, 1920
@@ -266,6 +266,39 @@ class AutoLayoutUiTests(unittest.TestCase):
                 self.assertEqual(auto_layout.ask(self.w, [self.m]), dict(mode='crop', crop=(0., 0., .3, .3)))
             with patch.object(auto_layout.AutoLayoutDialog, 'exec', return_value=QDialog.Rejected):
                 self.assertIsNone(auto_layout.ask(self.w, [self.m]))
+
+    def test_source_image_does_not_decode_video_on_the_gui_thread(self):
+        with patch('kinetic_cut.widgets.extract_frame',side_effect=AssertionError('GUI decode')):
+            image=auto_layout.source_image(self.w,self.m)
+        self.assertFalse(image.isNull())
+
+    def test_crop_dialog_opens_while_slow_decode_is_cancelled_and_keeps_crop(self):
+        import threading,time
+        from PySide6.QtCore import QTimer,QEventLoop
+        started=threading.Event();cancelled=threading.Event();threads=[];observed=[]
+        desired=(.12,.18,.55,.48)
+        def decode(*args,cancel_check=None):
+            threads.append(threading.get_ident());started.set();deadline=time.monotonic()+2
+            while time.monotonic()<deadline:
+                if cancel_check and cancel_check():cancelled.set();raise InterruptedError()
+                time.sleep(.005)
+            raise AssertionError('decode was not cancelled')
+        def choose():
+            from PySide6.QtWidgets import QApplication
+            dialog=QApplication.activeModalWidget()
+            if not isinstance(dialog,auto_layout.AutoLayoutDialog):
+                observed.append(False);return
+            observed.append(dialog.isVisible());dialog.set_crop(Crop(*desired));dialog.accept()
+        with patch('kinetic_cut.widgets.extract_frame',decode):
+            QTimer.singleShot(100,choose)
+            QTimer.singleShot(2500,lambda: QApplication.activeModalWidget().reject() if QApplication.activeModalWidget() else None)
+            at=time.monotonic();result=auto_layout.ask(self.w,[self.m])
+            self.assertLess(time.monotonic()-at,.7)
+            deadline=time.monotonic()+2
+            while self.w._workers and time.monotonic()<deadline:self.app.processEvents();time.sleep(.005)
+        self.assertEqual(observed,[True]);self.assertTrue(started.is_set());self.assertTrue(cancelled.is_set())
+        self.assertTrue(all(t!=threading.get_ident() for t in threads));self.assertEqual(result['mode'],'crop')
+        for a,b in zip(result['crop'],desired):self.assertAlmostEqual(a,b)
 
     def test_audio_only_drop_never_prompts(self):
         self.w.auto_layout_tool.setChecked(True)

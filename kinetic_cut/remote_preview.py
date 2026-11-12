@@ -57,7 +57,7 @@ class RemotePreview(Surface):
 
     def _expose(self):
         self._expose_pending=False
-        if not self.closed and self.viewport.isVisible() and not getattr(self.canvas,'caption_focus',False):
+        if not self.closed and self.viewport.isVisible():
             self.container.show();self.view.update()
 
     def schedule(self):
@@ -124,7 +124,7 @@ class RemotePreview(Surface):
             proxies=dict(getattr(window,'proxies',{})),cpu_media=tuple(getattr(self,'_cpu_media',())),
             size=(max(1,c.width()),max(1,c.height())),zoom=c.view_zoom,pan=(c.view_pan.x(),c.view_pan.y()),
             canvas={name:getattr(c,name,None) for name in ('selected_item_id','selected_caption_id','transform_controls_visible',
-                'caption_focus','drag_mode','drag_handle','drag_text','drag_origin','center_guide_active','read_only')},
+                'drag_mode','drag_handle','drag_text','drag_origin','center_guide_active','read_only')},
             drag_item=getattr(getattr(c,'drag_item',None),'id',''),selected=tuple(getattr(selected,'selected_ids',())),
             captions=tuple(getattr(selected,'selected_caption_ids',())),inspector=(tabs.currentIndex(),tabs.tabText(tabs.currentIndex())) if tabs else (0,'Video'),
             inspector_open=toggle.isChecked() if toggle else True,background=getattr(c,'_viewer_bg','#191a1d'),
@@ -139,8 +139,7 @@ class RemotePreview(Surface):
             self.gpu_frames=self._diagnostics.get('gpu_source_frames',0);self.cpu_frames=self._diagnostics.get('cpu_source_frames',0)
             if status.get('signature')==self._signature:
                 self.bounds=status['bounds'];self.sources=status['sources'];self.cpu_ready=status['cpu_frames']
-                if not getattr(self.canvas,'caption_focus',False):
-                    self.canvas.text_rects={key:rect.translated(self.canvas.composition_rect().topLeft()) for key,rect in self.bounds.items()}
+                self.canvas.text_rects={key:rect.translated(self.canvas.composition_rect().topLeft()) for key,rect in self.bounds.items()}
             if self.frames!=self._last_frame:self._last_frame=self.frames;self.view.frameSwapped.emit()
         if self.peer.error:self._diagnostics['renderer_error']=self.peer.error
         if self.peer.error and not self.peer.active and not self.closed and not self.suspended and self._restarts<2:

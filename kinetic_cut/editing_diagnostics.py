@@ -1,5 +1,9 @@
 """Opt-in native checks for precise placement and inspector editing (isolated home)."""
 def run(output,project_path=None):
+    import os
+    if os.environ.get('KINETIC_EFFECTS_LIBRARY_DIAGNOSTIC') == '1':
+        from .effects_library_diagnostics import run as library_check
+        return library_check(output)
     import os,sys,json,traceback,hashlib,copy
     from pathlib import Path
     output=Path(output).resolve(); output.mkdir(parents=True,exist_ok=True)

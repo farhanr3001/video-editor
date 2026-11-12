@@ -71,6 +71,7 @@ class BinTimelineCaptionTests(unittest.TestCase):
     def test_drag_to_power_bin_restores_original_before_drop(self):
         w=self.window(); m=self.image_media(); w.project.media=[m]; clip=TimelineItem("v",m.id,"video_1",1,3); clip.transform.x=.31; w.project.timeline=[clip]; w.model_changed(); self.app.processEvents()
         panel=w.media_panel; panel.power=PowerBins(self.directory/"bins.json"); panel.rebuild_tree(); t=w.timeline; origin=t.item_rect(clip).center().toPoint(); original=asdict(clip)
+        w.left_panels.select('Media'); panel.source_tabs.setCurrentIndex(1); self.app.processEvents()
         QTest.mousePress(t.viewport(),Qt.LeftButton,pos=origin); self.motion(t,origin+QPoint(50,0)); self.assertTrue(t.move_preview)
         class Drag:
             def __init__(self,*_):pass

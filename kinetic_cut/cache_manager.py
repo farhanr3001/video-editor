@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import os
 import logging
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal, Slot
 from PySide6.QtWidgets import (QCheckBox, QDialog, QGroupBox, QHBoxLayout, QLabel,
@@ -122,11 +124,13 @@ class _ScanJob(QRunnable):
                 pass
 
 
-def clear(categories, root: Path = CACHE_DIR) -> tuple[int, int]:
+def clear(categories, root: Path = CACHE_DIR, *, keep=()) -> tuple[int, int]:
     root = Path(root).resolve(strict=True)
     count = size = 0
     for category in categories:
         for path in _files(root, category):
+            if (category, path.name) in keep:
+                continue
             # A second check at deletion time limits races with directory swaps.
             if path.is_symlink() or not path.resolve().is_relative_to(root):
                 continue
@@ -140,7 +144,42 @@ def clear(categories, root: Path = CACHE_DIR) -> tuple[int, int]:
     return count, size
 
 
-def clear_waveforms_on_exit(root=None):
+def power_cache_files(power=None):
+    """Identify shared, source-keyed caches used by persistent Power Bin items."""
+    from .config import DATA_DIR
+    from .media import proxy_path
+    from .waveforms import source_key, cache_name
+    if power is None:
+        try:power=json.loads((DATA_DIR/'powerbins.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError):return set()
+    if not isinstance(power, dict) or not isinstance(power.get('media'),list):return set()
+    keep=set()
+    sources={}
+    for entry in power.get('media', []):
+        if not isinstance(entry, dict) or not isinstance(entry.get('media'), dict):continue
+        media=entry['media']
+        preset=media.get('timeline_preset')
+        nested=preset.get('media') if isinstance(preset,dict) else None
+        if not isinstance(nested,list):nested=[]
+        for item in [media,*nested]:
+            if not isinstance(item,dict) or not isinstance(item.get('path'),str) or not item['path']:continue
+            path=item['path']
+            sources[path]=sources.get(path,False) or item.get('kind')=='video'
+    for path,is_video in sources.items():
+        try:
+            key=source_key(path)
+            if key[1] is None:continue
+            keep.add(('waveforms',cache_name(key)))
+            if is_video:
+                for compatibility,seek_cache in ((False,False),(True,False),(False,True)):
+                    name=proxy_path(SimpleNamespace(path=path),compatibility=compatibility,seek_cache=seek_cache).name
+                    keep.add(('proxies',name))
+        except (OSError,ValueError):
+            continue
+    return keep
+
+
+def clear_waveforms_on_exit(root=None, *, keep=()):
     """Run only at terminal shutdown, after all retained writers have finished."""
     root=Path(root) if root is not None else CACHE_DIR
     folder=root/'waveforms'
@@ -148,7 +187,7 @@ def clear_waveforms_on_exit(root=None):
         if not folder.is_dir() or folder.is_symlink():return (0,0)
         # A Windows junction must not turn this into cleanup outside the cache.
         if not folder.resolve().is_relative_to(root.resolve()):return (0,0)
-        return clear(('waveforms',),root)
+        return clear(('waveforms',),root,keep=keep)
     except (OSError,ValueError):
         logging.exception('Could not clear waveform cache on exit')
         return (0,0)
@@ -171,7 +210,9 @@ def prune_idle_playback(root=None, max_idle=PLAYBACK_IDLE_SECONDS, now=None):
     count = size = 0
     try:
         proxies_ok = folder.is_dir() and not folder.is_symlink() and folder.resolve().is_relative_to(root.resolve())
+        keep = power_cache_files() if proxies_ok else set()
         for path in (_files(root, 'proxies') if proxies_ok else ()):
+            if ('proxies',path.name) in keep:continue
             try:
                 info = path.stat()
                 if now - info.st_mtime < max_idle or not path.resolve().is_relative_to(root.resolve()):
@@ -196,15 +237,17 @@ def prune_idle_playback(root=None, max_idle=PLAYBACK_IDLE_SECONDS, now=None):
     return (count, size)
 
 
-def clear_on_exit(settings=None, root=None):
-    """Terminal shutdown: waveforms always; playback proxies and processed audio previews unless the user turned it off (default on)."""
-    result = clear_waveforms_on_exit(root)
-    if settings and settings.get(CLEAR_PLAYBACK_ON_EXIT, True):
+def clear_on_exit(settings=None, root=None, *, power=None):
+    """Clear disposable project previews only after terminal shutdown."""
+    result = (0,0)
+    if (settings or {}).get(CLEAR_PLAYBACK_ON_EXIT, True):
+        keep=power_cache_files(power)
+        result=clear_waveforms_on_exit(root,keep=keep)
         try:
             base = Path(root) if root is not None else CACHE_DIR
             folder = base / 'proxies'
             if folder.is_dir() and not folder.is_symlink() and folder.resolve().is_relative_to(base.resolve()):
-                clear(('proxies',), base)
+                clear(('proxies',), base, keep=keep)
         except (OSError, ValueError):
             logging.exception('Could not clear playback cache on exit')
         try:
@@ -238,13 +281,13 @@ class CacheManagerDialog(QDialog):
         title = QLabel('Cache Manager')
         set_ui_style(title, 'font-size:18px; font-weight:600;')
         layout.addWidget(title)
-        note = QLabel('Free space used by previews that Kinetic Cut can rebuild. Audio waveform files are cleared automatically on exit, and playback proxies not used for a day are removed at startup; both are rebuilt when needed. Projects, original media, recovery copies, generated speech, and face analysis are protected.')
+        note = QLabel('Free space used by previews that Kinetic Cut can rebuild. Automatic cleanup keeps Power Bin waveforms and proxies. Unused project playback copies expire after a day. Projects, original media, recovery copies, generated speech, and face analysis are protected.')
         note.setWordWrap(True)
         set_ui_style(note, 'color:@text_sub;')
         layout.addWidget(note)
-        self.clear_on_exit = QCheckBox('Clear playback proxies and audio previews when Kinetic Cut closes')
+        self.clear_on_exit = QCheckBox('Clear project waveforms and playback caches when Kinetic Cut closes')
         self.clear_on_exit.setObjectName('clearPlaybackOnExit')
-        self.clear_on_exit.setToolTip('Keeps no playback proxies or processed audio previews between sessions. They are rebuilt in the background when a project is opened, so seeking may be slower at first.')
+        self.clear_on_exit.setToolTip('Clear project waveforms, proxies and processed audio previews on exit. Power Bin waveforms and proxies are kept unless you clear them here.')
         self.clear_on_exit.setChecked(bool(getattr(window, 'settings', {}).get(CLEAR_PLAYBACK_ON_EXIT, True)))
         self.clear_on_exit.toggled.connect(self.set_clear_on_exit)
         self.settings_group = QGroupBox('Cache Manager settings')

@@ -4,6 +4,7 @@ import math
 import os
 import subprocess
 import tempfile
+from threading import Lock
 from pathlib import Path
 import numpy as np
 from .process import popen
@@ -12,6 +13,7 @@ RATE=24000
 BIN_SAMPLES=24  # One millisecond, independent of recording length.
 BIN_SECONDS=BIN_SAMPLES/RATE
 BIN_BYTES=BIN_SAMPLES*2*2  # Two channels, signed 16-bit samples.
+_decode_lock = Lock()
 
 def source_key(path):
     source=Path(path).resolve()
@@ -47,12 +49,23 @@ class Waveform:
         return np.column_stack((low,high)).astype(float)/32768.
 
 
+def cache_name(key):
+    source, size, modified = key
+    return hashlib.sha256(f'{source}:{size}:{modified}:signed-stereo-ms-v1'.encode()).hexdigest()[:24]+'.npz'
+
+
 def waveform(path,ffmpeg='ffmpeg',points=None):
+    # Pool thumbnails and timeline clips share one cache and one decoder.
+    with _decode_lock:
+        return _load_or_decode(path,ffmpeg)
+
+
+def _load_or_decode(path,ffmpeg):
     # points is accepted for old callers, but never caps detail by file length.
     from .config import CACHE_DIR
-    source=Path(path).resolve(); stat=source.stat()
-    key=hashlib.sha256(f'{source}:{stat.st_size}:{stat.st_mtime_ns}:signed-stereo-ms-v1'.encode()).hexdigest()[:24]
-    folder=CACHE_DIR/'waveforms'; folder.mkdir(parents=True,exist_ok=True); target=folder/(key+'.npz')
+    key=source_key(path); source=Path(key[0])
+    if key[1] is None:source.stat()  # Report an unreadable or removed input.
+    folder=CACHE_DIR/'waveforms'; folder.mkdir(parents=True,exist_ok=True); target=folder/cache_name(key)
     try:
         with np.load(target,allow_pickle=False) as cached:
             peaks=cached['peaks']
