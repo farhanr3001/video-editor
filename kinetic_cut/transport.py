@@ -238,8 +238,9 @@ class TimelineTransport(QObject):
             # A native seek can legitimately take longer than the drift threshold.
             # Re-seeking it on every clock tick prevents long-GOP decoding from
             # ever catching up. Explicit user seeks still supersede immediately.
+            playback_rate=self.rate*(1 if audio_path else item.speed)
             drift=abs(player.position()-desired)
-            position_needed=force or created or (key not in self._pending_video_seeks and drift>350)
+            position_needed=force or created or (key not in self._pending_video_seeks and drift>self.drift_limit(playback_rate))
             if not video:
                 # A warmed clip is already at its own in-point. Keep its primed
                 # audio for an ordinary tick, but correct a delayed handoff.
@@ -291,7 +292,7 @@ class TimelineTransport(QObject):
             # it too: three layers must not flush the same seek three times.
             if key in controlled:continue
             controlled.add(key)
-            player.setPlaybackRate(self.rate*(1 if audio_path else item.speed))
+            player.setPlaybackRate(playback_rate)
             if video and position_needed:self._position_requested(key,desired)
             loading=key in self._loading_video_seeks or key in self._loading_audio_seeks
             if self.playing and not loading and player.playbackState()!=QMediaPlayer.PlayingState:player.play()
@@ -341,7 +342,7 @@ class TimelineTransport(QObject):
                     output.setVolume(0.)
                     if key in controlled:continue
                     controlled.add(key)
-                    if force or created or abs(player.position() - desired) > 350:
+                    if force or created or abs(player.position() - desired) > self.drift_limit(self.rate*item.speed):
                         self._position_requested(key, desired)
                     if created and key not in self._loading_video_seeks:
                         player.play()
@@ -403,6 +404,14 @@ class TimelineTransport(QObject):
         else:self.frame_timer.stop()
         self.window.preview.update()
         if remote:preview.gpu.sync_transport(force)
+
+    def drift_limit(self,playback_rate):
+        # Qt reports position in coarse wall-clock intervals (around 250 ms).
+        # At 3.45x that ordinary notification delay is ~860 source ms, not a
+        # broken decoder clock. A fixed 350 source-ms limit repeatedly flushes
+        # healthy playback. Keep the same wall-time allowance at higher rates;
+        # explicit seeks, cut/gap gates and loading seeks remain unconditional.
+        return 350*max(1.,abs(playback_rate)) if self.playing else 350
 
     def ensure_video_backend(self,key,media):
         gpu=getattr(self.window.preview,'gpu',None);decoder=self.decoders.get(key)

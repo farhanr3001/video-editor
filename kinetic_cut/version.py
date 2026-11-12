@@ -1,3 +1,3 @@
 """Single application release version shared by the updater and installer."""
-VERSION = "1.1.29"
+VERSION = "1.1.30"
 REPOSITORY = "farhanr3001/video-editor"

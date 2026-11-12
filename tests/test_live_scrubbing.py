@@ -73,6 +73,37 @@ class LiveScrubbingTests(unittest.TestCase):
         owner.transport.finish_scrub.assert_called_once_with()
         owner.active_main.assert_not_called(); owner.player.setPosition.assert_not_called()
 
+    def test_fast_linked_layers_tolerate_coarse_position_without_reseeking(self):
+        # A backend position notification 300 wall-ms old is normal. At 3.45x
+        # its source timestamp trails by >1s; repeatedly seeking cannot fix it.
+        for speed,shuttle in ((1.25,1.),(2.,1.),(3.451612903,1.),(8.,1.),(1.,2.),(2.,-2.)):
+            with self.subTest(speed=speed,shuttle=shuttle):
+                self.transport.decoders.clear()
+                for item in self.project.timeline:item.speed=speed
+                key=('source',0.,speed,'video');self.create(key)
+                player=self.created[key][0]
+                player.position.return_value=round((2*speed-.3*abs(speed*shuttle))*1000)
+                player.playbackState.return_value=QMediaPlayer.PlayingState
+                self.transport.playing=True;self.transport.rate=shuttle;self.transport.position=2.
+                self.transport.sync();self.transport.frame_timer.stop()
+                player.setPosition.assert_not_called()
+                player.setPlaybackRate.assert_called_once_with(speed*shuttle)
+                self.assertEqual(set(self.window.preview.active_frames.values()),{key})
+                # Real drift still corrects, and explicit user seeks always win.
+                player.position.return_value=0
+                self.transport.sync();self.transport.frame_timer.stop()
+                player.setPosition.assert_called_once_with(round(2*speed*1000))
+                player.setPosition.reset_mock()
+                self.transport.sync(True);self.transport.frame_timer.stop()
+                player.setPosition.assert_called_once_with(round(2*speed*1000))
+                self.transport._pending_video_seeks.clear();self.transport.previous_video.clear()
+
+    def test_paused_or_slow_playback_does_not_widen_seek_tolerance(self):
+        self.transport.playing=True
+        self.assertEqual(self.transport.drift_limit(.25),350)
+        self.transport.playing=False
+        self.assertEqual(self.transport.drift_limit(8.),350)
+
     def test_layout_copies_issue_one_native_seek_and_rate_change(self):
         self.transport.position=2.; self.transport.sync(True)
         player=self.created[self.key][0]

@@ -82,7 +82,7 @@ class Engine:
 class NativeVideoPlayer(QObject):
     mediaStatusChanged=Signal(object)
     def __init__(self,transport,sink,path):
-        super().__init__(transport);self.engine=Engine(sink,path);self._loaded=0;self._status=None;self._rate=1.
+        super().__init__(transport);self.engine=Engine(sink,path);self._loaded=0;self._status=None;self._rate=1.;self._requested_rate=1.
         self._transport_key=None
     def poll(self):
         state=self.engine.read()
@@ -95,9 +95,20 @@ class NativeVideoPlayer(QObject):
     def position(self):return round(self.engine.read()[0])
     def setPosition(self,value):self.engine.command(0,value)
     def setPlaybackRate(self,value):
+        self._requested_rate=value;self._apply_rate()
+    def _apply_rate(self):
+        if self.engine.closed:return
+        transport=self.parent()
+        active=transport.playing and self._transport_key in transport.window.preview.active_frames.values()
+        # Muted Qt playback is needed to finish paused/loading seeks. Running
+        # its clock normally can overshoot the in-point before the first frame
+        # reaches the sampler, particularly on long-GOP files. A near-stationary
+        # priming clock keeps warmed clips at their target. Activation restores
+        # the exact requested rate before play; audio uses a separate player.
+        value=self._requested_rate if active else .01
         if value!=self._rate:self._rate=value;self.engine.command(2,value)
     @Slot()
-    def play(self):self.engine.command(1,QMediaPlayer.PlayingState.value)
+    def play(self):self._apply_rate();self.engine.command(1,QMediaPlayer.PlayingState.value)
     @Slot()
     def pause(self):self.engine.command(1,QMediaPlayer.PausedState.value)
     @Slot()

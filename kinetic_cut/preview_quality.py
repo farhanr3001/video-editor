@@ -100,7 +100,7 @@ class PreviewQuality(QComboBox):
             cached=proxy_path(media,seek_cache=True)
             if cached.is_file() and self.seek_signatures.get(media.id)!=signature:
                 self.seek_ready[media.id]=str(cached); self.seek_signatures[media.id]=signature; restored=True
-        if restored:self.apply(force=True)
+        if restored:self.apply()
         # A project switch can retire a decoder just as a cached compatibility
         # worker reports success. Reconcile the path on every request so a
         # ready preview cannot remain black until the user toggles quality.
@@ -178,7 +178,9 @@ class PreviewQuality(QComboBox):
                 self.w.statusBar().showMessage('AV1 preview ready · '+snapshot.name,5000)
             elif kind=='seek':
                 self.seek_ready[snapshot.id]=value; self.seek_signatures[snapshot.id]=signature
-                self.apply(force=True)
+                # Optional seek copies must not flush a healthy playing decoder
+                # mid-clip. The existing pause handler applies them when idle.
+                self.apply()
             else:
                 self.ready[snapshot.id]=value
                 self.ready_signatures[snapshot.id]=signature

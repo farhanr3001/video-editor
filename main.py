@@ -6,6 +6,14 @@ from kinetic_cut.process import install_desktop_process_policy
 
 
 if __name__ == "__main__":
+    if len(sys.argv)==4 and sys.argv[1]=='--cut-preview-selftest':
+        install_desktop_process_policy()
+        from kinetic_cut.cut_preview_diagnostics import run
+        sys.exit(run(sys.argv[2],sys.argv[3]))
+    if len(sys.argv)==4 and sys.argv[1]=='--speed-preview-selftest':
+        install_desktop_process_policy()
+        from kinetic_cut.speed_preview_diagnostics import run
+        sys.exit(run(sys.argv[2],sys.argv[3]))
     if len(sys.argv)==3 and sys.argv[1]=='--audio-cut-selftest':
         install_desktop_process_policy()
         from kinetic_cut.audio_cut_diagnostics import run

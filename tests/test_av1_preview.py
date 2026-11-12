@@ -129,6 +129,34 @@ class AV1PreviewTests(unittest.TestCase):
         self.assertEqual(self.window.proxies.get(self.media.id), str(compatible))
         start.assert_not_called()
 
+    def test_optional_seek_proxy_restored_during_play_waits_for_pause(self):
+        self.media.video_codec='h264'
+        self.window.start_worker=lambda worker:None
+        cached=Path(self.folder.name)/'full-seek.mp4';cached.write_bytes(b'complete')
+        key=(self.media.id,0.,1.,'video')
+        self.window.transport.decoders[key]=object()
+        self.window.transport.playing=True
+        with patch('kinetic_cut.media.proxy_path',return_value=cached),patch.object(self.quality,'_start'):
+            self.quality.request()
+        self.assertEqual(self.window.proxies,{})
+        self.assertEqual(self.calls,[])
+        self.assertEqual(self.quality.seek_ready[self.media.id],str(cached))
+        self.window.transport.playing=False;self.quality.apply()
+        self.assertEqual(self.window.proxies[self.media.id],str(cached))
+        self.assertIn(key,self.calls)
+
+    def test_completed_seek_copy_does_not_interrupt_playing_original(self):
+        self.media.video_codec='h264'
+        cached=Path(self.folder.name)/'completed.mp4';cached.write_bytes(b'complete')
+        self.window.transport.playing=True
+        workers=[];self.window.start_worker=workers.append
+        self.quality._start('seek',self.media,self.quality._signature(self.media))
+        workers[0].signals.result.emit(str(cached))
+        self.assertEqual(self.window.proxies,{})
+        self.assertEqual(self.calls,[])
+        self.window.transport.playing=False;self.quality.apply()
+        self.assertEqual(self.window.proxies[self.media.id],str(cached))
+
     def test_unknown_legacy_codec_is_not_inspected_forever(self):
         self.media.video_codec = ''
         signature = self.quality._signature(self.media)
