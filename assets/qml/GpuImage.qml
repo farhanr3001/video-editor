@@ -11,4 +11,7 @@ Image {
     cache: false
     retainWhileLoading: true
     fillMode: Image.Stretch
+    // Invoked queued from Python (Surface.publish) so image loads start from
+    // Qt's event loop instead of inside a GIL-holding setProperty call.
+    function publishProperty(name, value) { image[name] = value }
 }

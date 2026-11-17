@@ -143,7 +143,9 @@ class GpuPreview(Surface):
         if obj.property('_imageIdentity')==identity:return obj
         obj.setProperty('_imageIdentity',identity)
         self.serial+=1;self.images.put(identifier,image)
-        obj.setProperty('source',f'image://prepared/{identifier}?v={self.serial}')
+        # publish() below is this preview's completed-result callback. Invoke
+        # the queued image-source helper explicitly rather than that callback.
+        Surface.publish(self,obj,'source',f'image://prepared/{identifier}?v={self.serial}')
         return obj
     def _file_texture(self,path):
         from PySide6.QtCore import QUrl
@@ -468,7 +470,7 @@ class GpuPreview(Surface):
                 painter.setPen(QColor('#ffdd88'));painter.setFont(QFont('Segoe UI',9));painter.drawText(c.rect().adjusted(12,8,-12,-8),Qt.AlignBottom|Qt.AlignHCenter,self.notice)
         finally:painter.end()
         self.images.put('controls',image);self.serial+=1
-        self.overlay.setWidth(c.width());self.overlay.setHeight(c.height());self.overlay.setProperty('source',f'image://prepared/controls?v={self.serial}')
+        self.overlay.setWidth(c.width());self.overlay.setHeight(c.height());Surface.publish(self,self.overlay,'source',f'image://prepared/controls?v={self.serial}')
     def _start(self):
         if self.closed or self.future is not None:return
         request=self.mailbox.take()

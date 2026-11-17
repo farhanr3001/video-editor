@@ -89,7 +89,7 @@ class GpuInteractionRegressions(unittest.TestCase):
     def test_marquee_movement_does_not_upload_a_viewport_texture(self):
         from kinetic_cut.gpu_timeline_controls import refresh
         t=TimelineWidget();t.resize(900,420);t.set_project(Project())
-        surface=SimpleNamespace(timeline=t,images=Mock(),create=Mock(return_value=Mock()),view=t.viewport())
+        surface=SimpleNamespace(timeline=t,images=Mock(),create=Mock(return_value=Mock()),view=t.viewport(),publish=Mock())
         try:
             t.drag_mode='marquee';t.marquee=QRectF(0,0,20,30)
             refresh(surface,t.viewport().rect());count=surface.images.put.call_count

@@ -77,4 +77,4 @@ def refresh(surface,area):
         surface.affordances=surface.create('GpuImage.qml');surface.affordances.setVisible(True);surface.affordances.setZ(100005)
     surface.affordances.setWidth(image.width());surface.affordances.setHeight(image.height())
     surface.images.put('affordances',image);surface._affordance_revision=getattr(surface,'_affordance_revision',0)+1
-    surface.affordances.setProperty('source',f'image://prepared/affordances?v={surface._affordance_revision}')
+    surface.publish(surface.affordances,'source',f'image://prepared/affordances?v={surface._affordance_revision}')

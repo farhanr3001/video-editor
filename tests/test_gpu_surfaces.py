@@ -15,24 +15,101 @@ from kinetic_cut.native_engine import LIB as INDEX_LIB,LatestRequest
 
 
 class GpuSurfaceTests(unittest.TestCase):
+    def test_preview_controls_and_prepared_pixels_use_queued_helper_despite_publish_callback(self):
+        from kinetic_cut.widgets import PreviewCanvas
+        from kinetic_cut.gpu_preview import GpuPreview
+        from kinetic_cut.model import ProjectSettings,Transform
+        from PySide6.QtCore import QRectF
+        app=QApplication.instance() or QApplication([])
+        canvas=PreviewCanvas();canvas.resize(800,500)
+        item=TimelineItem('selected','','video_1',0,5,transform=Transform(scale=.65))
+        canvas.set_project(Project(settings=ProjectSettings(width=960,height=540),timeline=[item]))
+        canvas.select_item(item.id);surface=GpuPreview(canvas);surface.timer.stop()
+        source=QImage(80,40,QImage.Format_RGBA8888);source.fill(Qt.red)
+        try:
+            # A real subclass has an unrelated argument-free publish callback;
+            # a SimpleNamespace publish=Mock fixture cannot expose this collision.
+            target=QRectF(120,100,400,225);surface.targets=[(item,source,target)]
+            surface._controls(canvas.composition_rect())
+            self.assertEqual(surface.overlay.property('source').toString(),'')
+            surface.flush_published()
+            self.assertIn('image://prepared/controls?',surface.overlay.property('source').toString())
+            overlay=surface.images.images['controls']
+            self.assertGreater(overlay.pixelColor(120,100).alpha(),0)
+            texture=surface._texture('prepared-title',source)
+            self.assertEqual(texture.property('source').toString(),'')
+            surface.flush_published()
+            self.assertIn('image://prepared/prepared-title?',texture.property('source').toString())
+            self.assertIs(surface._texture('prepared-title',source),texture)
+            self.assertIsNone(surface.publish()) # Original completed-result callback is intact.
+        finally:surface.close();canvas.close();canvas.deleteLater();app.processEvents()
+
     def test_dynamic_timeline_chrome_uses_nonblocking_image_requests(self):
         from unittest.mock import Mock
         from kinetic_cut.timeline import TimelineWidget
         from kinetic_cut.gpu_timeline_chrome import refresh
         timeline=TimelineWidget();timeline.resize(900,420);timeline.set_project(Project())
-        surface=SimpleNamespace(timeline=timeline,images=Mock(),view=timeline.viewport(),create=Mock(side_effect=lambda _:Mock()))
+        surface=SimpleNamespace(timeline=timeline,images=Mock(),view=timeline.viewport(),create=Mock(side_effect=lambda _:Mock()),publish=Mock())
         try:
             refresh(surface,timeline._palette())
             nodes=(surface.ruler_texture,surface.clock_texture,surface.cursor_texture)
             for node in nodes:
                 calls=[call.args for call in node.setProperty.call_args_list]
-                self.assertEqual(calls[0],('asynchronous',True))
-                self.assertEqual(calls[1][0],'source')
+                self.assertEqual(calls,[('asynchronous',True)])
+            # A source write inside setProperty holds the GIL in Qt Quick's image
+            # locks (the recorded editor deadlock); sources go through publish.
+            published=[call.args for call in surface.publish.call_args_list]
+            self.assertEqual([(args[0],args[1]) for args in published],[(node,'source') for node in nodes])
+            self.assertTrue(all(args[2].startswith('image://prepared/') for args in published))
             created=surface.create.call_count
             timeline.project.playhead=1.2
             refresh(surface,timeline._palette())
             self.assertEqual(surface.create.call_count,created)
         finally:timeline.close();timeline.deleteLater()
+
+    def test_image_sources_are_published_from_the_event_loop_not_inside_set_property(self):
+        import shiboken6
+        from PySide6.QtCore import QCoreApplication,QEvent
+        from kinetic_cut.icons import resource_path
+        app=QApplication.instance() or QApplication([])
+        engine=QQmlEngine()
+        component=QQmlComponent(engine,QUrl.fromLocalFile(str(resource_path('assets','qml','GpuImage.qml'))))
+        node=component.create();self.assertIsNotNone(node,component.errors())
+        doomed=component.create()
+        plain=QQmlComponent(engine);plain.setData(b'import QtQml\nQtObject { property string source: "" }',QUrl())
+        legacy=plain.create();self.assertIsNotNone(legacy,plain.errors())
+        surface=SimpleNamespace(closed=False)
+        try:
+            Surface.publish(surface,node,'source','image://prepared/a?v=1')
+            # Nothing is loaded while Python still holds the GIL in this call.
+            self.assertEqual(node.property('source').toString(),'')
+            # A target retired before delivery (as timeline nodes are): Qt drops its event.
+            Surface.publish(surface,doomed,'source','image://prepared/b?v=1')
+            doomed.deleteLater();QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
+            self.assertFalse(shiboken6.isValid(doomed))
+            app.processEvents()
+            self.assertEqual(node.property('source').toString(),'image://prepared/a?v=1')
+            Surface.publish(surface,node,'source','image://prepared/a?v=2')
+            Surface.flush_published(surface)
+            self.assertEqual(node.property('source').toString(),'image://prepared/a?v=2')
+            # Objects without the QML hook keep the previous direct behaviour.
+            Surface.publish(surface,legacy,'source','x');self.assertEqual(legacy.property('source'),'x')
+            surface.closed=True;Surface.publish(surface,node,'source','image://prepared/a?v=3');app.processEvents()
+            self.assertEqual(node.property('source').toString(),'image://prepared/a?v=2')
+        finally:
+            for obj in (node,legacy):obj.deleteLater()
+            QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
+            del component,plain;engine.deleteLater()
+
+    def test_every_prepared_image_target_exposes_the_queued_publish_hook(self):
+        from kinetic_cut.icons import resource_path
+        for name in ('GpuImage.qml','GpuTimeline.qml','GpuMotionEditor.qml'):
+            self.assertIn('function publishProperty(',Path(resource_path('assets','qml',name)).read_text(encoding='utf-8'),name)
+        root=Path(__file__).resolve().parent.parent/'kinetic_cut'
+        for path in root.glob('*.py'):
+            if path.name=='gpu_transition_stage.py':continue  # export helper process; grabs synchronously, no editor GUI
+            for line in path.read_text(encoding='utf-8').splitlines():
+                if 'setProperty(' in line and 'image://' in line:self.fail(f'{path.name}: image source written with setProperty: {line.strip()}')
 
     def test_prepared_text_tracks_current_canvas_geometry_before_raster_finishes(self):
         from kinetic_cut.gpu_preview import GpuPreview
@@ -74,7 +151,7 @@ class GpuSurfaceTests(unittest.TestCase):
         from PySide6.QtCore import QRect
         from unittest.mock import Mock
         timeline=TimelineWidget();timeline.resize(900,420);timeline.set_project(Project())
-        surface=SimpleNamespace(timeline=timeline,images=Mock(),root=Mock(),create=Mock(return_value=Mock()),updates=0)
+        surface=SimpleNamespace(timeline=timeline,images=Mock(),root=Mock(),create=Mock(return_value=Mock()),updates=0,publish=Mock())
         area=QRect(timeline.LABEL_WIDTH+1,timeline.RULER_HEIGHT+1,700,300)
         timeline.paint_track_header=Mock(wraps=timeline.paint_track_header)
         try:
@@ -95,7 +172,7 @@ class GpuSurfaceTests(unittest.TestCase):
         from PySide6.QtCore import QRect
         from unittest.mock import Mock
         timeline=TimelineWidget();timeline.resize(900,420);timeline.set_project(Project())
-        surface=SimpleNamespace(timeline=timeline,images=Mock(),create=Mock(return_value=Mock()),view=timeline.viewport())
+        surface=SimpleNamespace(timeline=timeline,images=Mock(),create=Mock(return_value=Mock()),view=timeline.viewport(),publish=Mock())
         area=QRect(0,0,900,420)
         try:
             refresh(surface,area);before=surface.images.put.call_count

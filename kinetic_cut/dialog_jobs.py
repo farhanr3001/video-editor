@@ -9,6 +9,7 @@ import time
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 
 _retained: set["RetainedThread"] = set()
+_stranded: list = []  # workers whose thread did not end in time; kept alive, never freed concurrently
 
 
 class RetainedThread(QObject):
@@ -24,7 +25,11 @@ class RetainedThread(QObject):
         # quit() cannot interrupt run(). Every worker emits settled in finally,
         # including cancellation/failure; direct quit permits shutdown waits.
         worker.settled.connect(self.thread.quit, Qt.DirectConnection)
-        self.thread.finished.connect(worker.deleteLater)
+        # One owner deletes the worker: Python, on the GUI thread, after the
+        # thread has ended (_retire). Also asking Qt to deleteLater() it from
+        # the finishing thread let both threads destroy the same C++ object
+        # when the last Python reference was dropped at that moment: an
+        # intermittent access violation after a speech preview/availability job.
         self.thread.finished.connect(self._retire, Qt.QueuedConnection)
 
     def start(self):
@@ -49,9 +54,18 @@ class RetainedThread(QObject):
     @Slot()
     def _retire(self):
         thread = self.thread
-        self.worker = None
+        if thread is not None:
+            # finished() is emitted just before the native thread exits. Join
+            # it (already ending, so this is immediate) so the worker, which
+            # lives in that thread, is only released once nothing runs there.
+            thread.wait(2000)
+        worker, self.worker = self.worker, None
         self.thread = None
         _retained.discard(self)
+        if worker is not None and thread is not None and thread.isRunning():
+            # Never observed; do not free an object under a still-running thread.
+            _stranded.append(worker)
+        del worker
         if thread is not None:
             thread.deleteLater()
         self.finished.emit()

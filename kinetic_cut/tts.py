@@ -18,6 +18,7 @@ import weakref
 from pathlib import Path
 from typing import Callable
 import edge_tts
+import aiohttp
 from .config import CACHE_DIR
 
 VOICES = [
@@ -207,14 +208,58 @@ def synthesize_elevenlabs(
     return str(target)
 
 
+class SpeechServiceUnavailable(RuntimeError):
+    """Public, URL-free explanation of an unavailable online speech provider."""
+
+
+def check_speech_client():
+    version=tuple(edge_tts.__version_info__[:3])
+    if version < (7,3,1):
+        raise SpeechServiceUnavailable('The voice component is out of date. Please update Kinetic Cut to restore online voices.')
+
+
+def speech_connection_error(error):
+    if isinstance(error,SpeechServiceUnavailable):return error
+    if isinstance(error,edge_tts.exceptions.NoAudioReceived):
+        return SpeechServiceUnavailable('The online voice service returned no audio. Please retry.')
+    if getattr(error,'status',None) in (401,403):
+        return SpeechServiceUnavailable('The online voice service rejected the connection (HTTP '+str(error.status)+'). '
+            'Try again later and check for a Kinetic Cut update if this continues.')
+    return SpeechServiceUnavailable('The online voice service could not be reached. Check your connection and retry.')
+
+
 async def _synthesize_async(text: str, voice: str, rate: str, pitch: str, target: Path, cancel_check=None):
+    check_speech_client()
     target.parent.mkdir(parents=True, exist_ok=True)
     temp_target = target.with_suffix(".tmp.mp3")
-    com = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
-    await _await_cancellable(com.save(str(temp_target)), cancel_check)
+    async def request():
+        # A new connection and output stream are required on each attempt;
+        # Communicate instances cannot be streamed twice. Never append a retry
+        # to any partial audio from an earlier attempt.
+        temp_target.unlink(missing_ok=True)
+        com = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+        await com.save(str(temp_target))
+    try:
+        await _retry_speech_request(request, cancel_check)
+    except Exception as error:
+        if isinstance(error,(aiohttp.ClientError,asyncio.TimeoutError,edge_tts.exceptions.EdgeTTSException)):
+            raise speech_connection_error(error) from error
+        raise
     _check_cancel(cancel_check)
     if temp_target.exists():
         temp_target.replace(target)
+
+
+async def _retry_speech_request(request, cancel_check=None):
+    """Recover a transient empty response, keeping the exact voice and script."""
+    for attempt in range(3):
+        _check_cancel(cancel_check)
+        try:return await _await_cancellable(request(),cancel_check)
+        except edge_tts.exceptions.NoAudioReceived:
+            if attempt==2:raise
+            import logging
+            logging.info('Voice service returned no audio; retrying request (%s/3)',attempt+2)
+            await _await_cancellable(asyncio.sleep((.35,.9)[attempt]),cancel_check)
 
 
 def synthesize_speech(

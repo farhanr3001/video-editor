@@ -7,5 +7,6 @@ Rectangle {
     color: "#191a1e"
     Rectangle { objectName: "board"; color: "#111317" }
     Item { objectName: "canvas"; anchors.fill: parent }
-    Image { objectName: "overlay"; anchors.fill: parent; z: 100000; cache: false; asynchronous: false; smooth: false }
+    Image { id: overlay; objectName: "overlay"; anchors.fill: parent; z: 100000; cache: false; asynchronous: false; smooth: false
+        function publishProperty(name, value) { overlay[name] = value } }
 }

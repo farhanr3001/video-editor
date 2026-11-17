@@ -86,6 +86,9 @@ if __name__ == "__main__":
     if len(sys.argv)==4 and sys.argv[1]=='--enhance-selftest':
         from kinetic_cut.enhance_diagnostics import run
         sys.exit(run(sys.argv[2],sys.argv[3]))
+    if len(sys.argv)==3 and sys.argv[1]=='--tts-provider-selftest':
+        from kinetic_cut.tts_provider_diagnostics import run
+        sys.exit(run(sys.argv[2]))
     if len(sys.argv)==3 and sys.argv[1]=='--tts-stability-selftest':
         from kinetic_cut.tts_stability_diagnostics import run
         sys.exit(run(sys.argv[2]))

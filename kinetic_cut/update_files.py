@@ -256,7 +256,7 @@ def commit(root, verify=lambda: None):
     shutil.rmtree(journal.parent)
 
 
-def apply_job(job_path, verify=lambda: None, replace=os.replace):
+def apply_job(job_path, verify=lambda: None, replace=os.replace, before_apply=lambda root,names:None):
     job = json.loads(Path(job_path).read_text(encoding='utf-8')); validate_manifest(job['manifest'])
     root = Path(job['root']).resolve(); stage = Path(job['stage']).resolve()
     if job.get('schema') != 1 or root == stage or stage.is_relative_to(root):raise ValueError('Invalid update job location')
@@ -274,6 +274,9 @@ def apply_job(job_path, verify=lambda: None, replace=os.replace):
     if json.loads((stage / MANIFEST).read_text(encoding='utf-8')) != job['manifest']:raise ValueError('Staged manifest mismatch')
     inventory = '\n'.join([*sorted(job['manifest']['files']), MANIFEST, INVENTORY]) + '\n'
     if (stage / INVENTORY).read_text(encoding='utf-8') != inventory:raise ValueError('Staged application inventory mismatch')
+    # The independent helper can wait for sibling windows/helpers and test file
+    # access only after the entire job has been validated, before any mutation.
+    before_apply(root,tuple(dict.fromkeys([*job['changed'],*job['removed']])))
     prepare_transaction(root, job['changed'], job['expected'], job['removed'])
     try:
         for name in job['removed']:target_path(root, name).unlink()

@@ -49,6 +49,9 @@ Name: "vocals"; Description: "Vocal separation (+{#VocalsMB} MB)"; ExtraDiskSpac
 [Files]
 Source: "..\build\cleanup_phone_helpers.exe"; DestDir: "{app}\_internal"; Flags: ignoreversion
 #ifndef UninstallerRepair
+#ifndef Migration
+Source: "..\build\distribution-stage\KineticCut\KineticCutUpdater.exe"; Flags: dontcopy
+#endif
 #ifdef Migration
 Source: "..\build\incremental-update\migration\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Components: main
 Source: "..\release\KineticCut-Baseline-1.1.0.json"; Flags: dontcopy
@@ -87,6 +90,18 @@ Filename: "{app}\KineticCut.exe"; Description: "Open Kinetic Cut"; Flags: nowait
 var
   SizeLabel: TNewStaticText;
   ManagedFiles: TArrayOfString;
+#ifndef Migration
+#ifndef UninstallerRepair
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var ResultCode: Integer;
+begin
+  ExtractTemporaryFile('KineticCutUpdater.exe');
+  if not Exec(ExpandConstant('{tmp}\KineticCutUpdater.exe'), 'recover "' + ExpandConstant('{app}') + '" --no-restart --quiet', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+    Result := 'Kinetic Cut could not finish closing or recover an earlier update. Finish saving in the remaining editor window, then retry. The new update has not been installed.'
+  else Result := '';
+end;
+#endif
+#endif
 #ifdef Migration
   MigrationPrepared, MigrationCommitted: Boolean;
 

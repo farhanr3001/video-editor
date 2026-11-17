@@ -302,7 +302,7 @@ def _renderer(connection, desktop, host, parent_pid):
             latest,commands=data;captures=[value for command,value in commands if command=='capture']
             if latest is not None:apply(latest)
             from .preview_process import pack
-            if captures:gpu.refresh()
+            if captures:gpu.refresh();gpu.flush_published()
             for serial in captures:connection.send(('capture',(serial,pack(gpu.view.grabWindow()))))
             now=time.monotonic()
             if now-state['last_status']>=.05:

@@ -29,6 +29,9 @@ def run(output,project_path=None):
         report['checks'].append(dict(name=name,passed=bool(condition)))
         (out/'report.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
         assert condition,name
+    if os.environ.get('KINETIC_PREVIEW_CONTROLS_SELFTEST')=='1':
+        from .preview_controls_diagnostics import run
+        return run(out,app,report,check)
     if os.environ.get('KINETIC_NUMERIC_FOCUS_SELFTEST')=='1':
         from .ui import MainWindow
         import time

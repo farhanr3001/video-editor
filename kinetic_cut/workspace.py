@@ -1223,7 +1223,7 @@ def build_workspace(w):
     w.timeline.filesDropped.connect(w.timeline.file_drop_controller.drop)
     def reflect_zoom(value):
         w.timeline_zoom.blockSignals(True); w.timeline_zoom.setValue(zoom_to_slider(value)); w.timeline_zoom.blockSignals(False)
-    w.timeline_zoom.valueChanged.connect(lambda value:w.timeline.set_zoom(slider_to_zoom(value))); w.timeline.zoomChanged.connect(reflect_zoom); layout.addWidget(w.timeline); w.center_split.addWidget(tl); w.center_split.setSizes([530,300])
+    w.timeline_zoom.valueChanged.connect(lambda value:w.timeline.zoom_about_playhead(slider_to_zoom(value))); w.timeline.zoomChanged.connect(reflect_zoom); layout.addWidget(w.timeline); w.center_split.addWidget(tl); w.center_split.setSizes([530,300])
     w.right_stack=QStackedWidget(); w.right_stack.setFixedWidth(350); w.viewer_split.addWidget(w.right_stack); w.viewer_split.setStretchFactor(0,1); w.viewer_split.setStretchFactor(1,0); w.viewer_split.handle(1).setEnabled(False)
     w.inspector=PropertiesPanel(w); w.inspector.changed.connect(w.model_changed); w.inspector.requestCrop.connect(w.frame_source); w.right_stack.addWidget(w.inspector)
     w.inspector.filename.setFixedHeight(30); w.inspector.tabs.tabBar().setFixedHeight(HEADER_HEIGHT-30)

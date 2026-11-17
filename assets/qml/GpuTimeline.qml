@@ -12,6 +12,7 @@ Rectangle {
     property real fps: 60
     property string clockText: "00:00:00:00"
     property string headerSource: ""
+    function publishProperty(name, value) { root[name] = value }
     property color rulerColor: "#26272c"
     property color textColor: "#b7bac1"
     property rect marquee: Qt.rect(0,0,0,0)

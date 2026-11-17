@@ -12,7 +12,7 @@ from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
     QSlider, QPushButton, QCheckBox, QGroupBox, QFormLayout,
-    QProgressBar, QMessageBox, QWidget, QFrame, QDialogButtonBox
+    QProgressBar, QMessageBox, QWidget, QFrame, QDialogButtonBox, QScrollArea
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
@@ -97,9 +97,17 @@ class TTSDialog(QDialog):
         self._build_ui(initial_text)
 
     def _build_ui(self, initial_text: str):
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 12, 12, 12)
+        content = QWidget()
+        root = QVBoxLayout(content)
         root.setSpacing(12)
-        root.setContentsMargins(18, 16, 18, 16)
+        root.setContentsMargins(6, 4, 6, 4)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QScrollArea.NoFrame)
+        area.setWidget(content)
+        outer.addWidget(area, 1)
 
         # Header
         header = QHBoxLayout()
@@ -154,8 +162,11 @@ class TTSDialog(QDialog):
         # Select default
         idx = next((i for i, (_, vid) in enumerate(VOICES) if vid == DEFAULT_VOICE), 0)
         self.voice_combo.setCurrentIndex(idx)
-        set_ui_style(self.voice_combo, 'QComboBox { min-height: 28px; font-size: 12px; }')
+        set_ui_style(self.voice_combo, 'QComboBox { combobox-popup: 0; min-height: 28px; font-size: 12px; }')
         voice_layout.addRow("Narrator Voice:", self.voice_combo)
+        from .tts_availability import VoiceAvailability
+        self.voice_availability=VoiceAvailability(self,voice_layout)
+        self._preview_player.playbackStateChanged.connect(self.voice_availability.refresh)
 
         # Speed / Rate slider
         speed_row = QHBoxLayout()
@@ -246,12 +257,12 @@ class TTSDialog(QDialog):
         self.progress_bar.setFixedHeight(6)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setVisible(False)
-        root.addWidget(self.progress_bar)
+        outer.addWidget(self.progress_bar)
 
         self.status_lbl = QLabel("")
         set_ui_style(self.status_lbl, 'color: @info; font-size: 11px;')
         self.status_lbl.setVisible(False)
-        root.addWidget(self.status_lbl)
+        outer.addWidget(self.status_lbl)
 
         # Dialog Buttons
         btn_box = QHBoxLayout()
@@ -268,7 +279,7 @@ class TTSDialog(QDialog):
         self.generate_btn.clicked.connect(self._on_generate_clicked)
         btn_box.addWidget(self.generate_btn)
 
-        root.addLayout(btn_box)
+        outer.addLayout(btn_box)
 
         self._update_counter()
 
@@ -305,6 +316,8 @@ class TTSDialog(QDialog):
         if self._preview_player.playbackState() == QMediaPlayer.PlayingState:
             self._cancel_preview()
             return
+
+        if not self.voice_availability.allowed():return
 
         text = self.text_edit.toPlainText().strip()
         if not text:
@@ -347,6 +360,7 @@ class TTSDialog(QDialog):
         self._preview_thread = None
         self.preview_btn.setText(" Preview Voice")
         self.preview_btn.setEnabled(not self._is_generating)
+        self.voice_availability.refresh()
 
     @Slot(str, object)
     def _on_preview_done(self, path, token=None):
@@ -359,6 +373,7 @@ class TTSDialog(QDialog):
         from .media_source import set_media_source
         set_media_source(self._preview_player, QUrl.fromLocalFile(path))
         self._preview_player.play()
+        self.voice_availability.refresh()
 
     @Slot(str, object)
     def _on_preview_error(self, err, token=None):
@@ -369,11 +384,14 @@ class TTSDialog(QDialog):
         self.preview_btn.setEnabled(True)
         self.preview_btn.setText(" Preview Voice")
         self.status_lbl.setVisible(False)
+        self.voice_availability.failure(err)
+        self.voice_availability.refresh()
         QMessageBox.warning(self, "Preview Failed", f"Could not generate voice preview:\n{err}")
 
     def _on_generate_clicked(self):
         if self._closed or self._is_generating:
             return
+        if not self.voice_availability.allowed():return
         text = self.text_edit.toPlainText().strip()
         if not text:
             QMessageBox.information(self, "No Text", "Please enter narration text to synthesize.")
@@ -434,6 +452,8 @@ class TTSDialog(QDialog):
         self.generate_btn.setEnabled(True)
         self.preview_btn.setEnabled(True)
         self._set_inputs_enabled(True)
+        self.voice_availability.failure(err)
+        self.voice_availability.refresh()
         QMessageBox.critical(self, "Synthesis Error", f"Failed to generate speech:\n{err}")
 
     def _set_inputs_enabled(self, enabled):
@@ -441,8 +461,10 @@ class TTSDialog(QDialog):
         for widget in (self.voice_combo, self.speed_slider, self.pitch_slider,
                        self.insert_timeline_chk, self.track_combo, self.generate_captions_chk):
             widget.setEnabled(enabled)
+        self.voice_availability.refresh()
 
     def done(self, result):
+        self.voice_availability.close()
         self._closed = True
         self._cancel_preview()
         if self._active_worker:

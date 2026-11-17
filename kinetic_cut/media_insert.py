@@ -27,8 +27,12 @@ def plan(project,assets,track,start,layout=None):
         video=media.kind in {"video","image"}
         destination=(track if track in stage.video_tracks else stage.video_tracks[-1]) if video else (track if track in stage.audio_tracks else stage.audio_tracks[0])
         if stage.track_states.get(destination,{}).get("locked"):raise ValueError("Unlock the destination track before adding media.")
-        in_point=max(0,stage.mark_in)
-        duration=(stage.mark_out-in_point) if stage.mark_out>in_point else max(.1,media.duration-in_point) if media.kind!="image" else 5.
+        # Pool and Power Bin drops always place the whole source. The project's
+        # mark_in/mark_out are timeline playhead times with no visible marker;
+        # treating them as source in/out made every later drop start mid-file
+        # (or collapse to .1 s when the mark was past a short sound's end).
+        in_point=0.
+        duration=max(.1,float(media.duration or 0.)) if media.kind!="image" else 5.
         group=uid(); role=("content" if not any(i.role=="content" for i in stage.timeline) else "normal") if video else ("music" if media.duration>=20 else "sfx")
         if layout and media.kind=="video":
             from .auto_layout import place

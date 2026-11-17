@@ -76,7 +76,9 @@ def refresh(surface,palette):
             node.setVisible(True);node.setZ(z);setattr(surface,name,node)
         node.setX(x);node.setY(y);node.setWidth(width);node.setHeight(height)
         serial=getattr(surface,'_chrome_serial',0)+1;surface._chrome_serial=serial
-        surface.images.put(name,image);node.setProperty('source',f'image://prepared/{name}?v={serial}')
+        # Queued: a synchronous source write holds the GIL inside Qt Quick's
+        # image locks and has deadlocked the whole editor (see Surface.publish).
+        surface.images.put(name,image);surface.publish(node,'source',f'image://prepared/{name}?v={serial}')
         return node
     width=surface.view.width();height=t.RULER_HEIGHT+1
     signature=(width,t.pixels_per_second,t.horizontalScrollBar().value(),repr(palette),ratio)

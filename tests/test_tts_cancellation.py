@@ -40,6 +40,15 @@ class TestTTSCancellation(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def setUp(self):
+        # Lifecycle fixtures replace the free-service check, not the speech job
+        # under test. No unit test should depend on an external voice service.
+        from kinetic_cut.tts_availability import VoiceAvailability, Availability
+        def ready(controller):
+            controller.started=True
+            controller.received(Availability(True),controller.token)
+        probe=patch.object(VoiceAvailability,'start',ready);probe.start();self.addCleanup(probe.stop)
+
     def tearDown(self):
         cancel_dialog_threads()
         self.assertTrue(wait_dialog_threads())

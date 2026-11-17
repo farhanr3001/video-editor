@@ -199,7 +199,7 @@ def ask(window, assets):
         if cancel.is_set() or getattr(window,'_closing',False):return
         from .ui import Worker
         from .widgets import extract_frame
-        worker=Worker(extract_frame,videos[0].path,max(0.,window.project.mark_in),window.settings.get('ffmpeg','ffmpeg'),cancel_check=cancel.is_set)
+        worker=Worker(extract_frame,videos[0].path,0.,window.settings.get('ffmpeg','ffmpeg'),cancel_check=cancel.is_set)
         worker.cancel_callback=cancel.set;worker.signals.result.connect(dialog.set_source_image);window.start_worker(worker)
     if videos[0].kind=='video':timer.timeout.connect(decode);timer.start(0)
     try:

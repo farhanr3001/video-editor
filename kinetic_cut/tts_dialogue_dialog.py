@@ -194,8 +194,11 @@ class TTSDialogueDialog(QDialog):
         idx = next((i for i, (_, vid) in enumerate(VOICES) if vid == DEFAULT_VOICE), 0)
         self.voice_combo.setCurrentIndex(idx)
         chevron_path = resource_path("assets", "icons", "dropdown-chevron.svg").as_posix()
-        set_ui_style(self.voice_combo, 'QComboBox::down-arrow {image:url("@arrow_combo");width:14px;height:14px;} QComboBox::drop-down {width:26px;border-left:1px solid @border_subtle;}')
+        set_ui_style(self.voice_combo, 'QComboBox { combobox-popup: 0; } QComboBox::down-arrow {image:url("@arrow_combo");width:14px;height:14px;} QComboBox::drop-down {width:26px;border-left:1px solid @border_subtle;}')
         form.addRow("Voice", self.voice_combo)
+        from .tts_availability import VoiceAvailability
+        self.voice_availability=VoiceAvailability(self,form)
+        self._preview_player.playbackStateChanged.connect(self.voice_availability.refresh)
 
         # Speed slider row
         speed_widget = QWidget()
@@ -315,6 +318,7 @@ class TTSDialogueDialog(QDialog):
         self.preview_btn.setIcon(lucide_icon("play", "#ffffff", 14))
         if not self._is_generating:
             self.preview_btn.setEnabled(True)
+        self.voice_availability.refresh()
 
     def _toggle_preview(self):
         if self._closed or self._is_generating:
@@ -323,6 +327,8 @@ class TTSDialogueDialog(QDialog):
         if self._preview_player.playbackState() == QMediaPlayer.PlayingState:
             self._cancel_preview()
             return
+
+        if not self.voice_availability.allowed():return
 
         voice = self.voice_combo.currentData()
         text = self.script_edit.toPlainText().strip()
@@ -370,6 +376,7 @@ class TTSDialogueDialog(QDialog):
             from .media_source import set_media_source
             set_media_source(self._preview_player,QUrl.fromLocalFile(path))
             self._preview_player.play()
+        self.voice_availability.refresh()
 
     @Slot(str, object)
     def _on_preview_error(self, err: str, token=None):
@@ -382,6 +389,8 @@ class TTSDialogueDialog(QDialog):
 
         self._preview_thread = None
         self._preview_worker = None
+        self.voice_availability.failure(err)
+        self.voice_availability.refresh()
 
         if not self._is_generating:
             QMessageBox.warning(self, "Preview Failed", f"Could not generate voice preview:\n{err}")
@@ -389,6 +398,7 @@ class TTSDialogueDialog(QDialog):
     def _on_generate_clicked(self):
         if self._closed or self._is_generating:
             return
+        if not self.voice_availability.allowed():return
         text = self.script_edit.toPlainText().strip()
         if not text:
             QMessageBox.information(self, "Script Required", "Please paste or type your video script before generating dialogue.")
@@ -474,15 +484,18 @@ class TTSDialogueDialog(QDialog):
         self._generate_thread = None
         self._generate_worker = None
         self._set_inputs_enabled(True)
-
+        self.voice_availability.failure(err)
+        self.voice_availability.refresh()
         QMessageBox.critical(self, "Generation Error", f"Failed to generate dialogue audio:\n{err}")
 
     def _set_inputs_enabled(self, enabled):
         self.script_edit.setReadOnly(not enabled)
         for widget in (self.voice_combo, self.speed_slider, self.pitch_slider):
             widget.setEnabled(enabled)
+        self.voice_availability.refresh()
 
     def done(self, result):
+        self.voice_availability.close()
         # Cancel, Escape, X and owner destruction all invalidate delivery. No
         # bounded wait can safely transfer ownership away from a live thread.
         self._closed = True

@@ -300,6 +300,17 @@ class TimelineWidget(BaseTimeline):
         self._navigation_pending=True
         super().set_zoom(value,anchor_x)
 
+    def zoom_about_playhead(self,value:float):
+        """Zoom with the playhead as the fixed focus, centred in the visible timeline.
+
+        Shared by Alt+wheel, the zoom slider and the zoom +/- buttons so every manual
+        zoom keeps the scrubber where the editor is looking."""
+        self.set_zoom(value)
+        if self.project is None:return
+        center=(self.LABEL_WIDTH+self.viewport().width())/2
+        self._navigation_end=max(getattr(self,'_navigation_end',20),self.project.playhead+(self.viewport().width()-center)/self.pixels_per_second+2); self._range()
+        self.horizontalScrollBar().setValue(round(self.project.playhead*self.pixels_per_second+self.LABEL_WIDTH-center))
+
     def set_waveform(self,media_id:str,values:list[float]):
         self._paint_generation+=1
         self._view_rasters.clear()
@@ -1873,11 +1884,7 @@ class TimelineWidget(BaseTimeline):
         if self.drag_mode=='marquee':self.marquee_controller.wheel(event); return
         delta=event.angleDelta().y() or event.pixelDelta().y() or event.angleDelta().x()
         if event.modifiers()&Qt.AltModifier:
-            if delta:
-                self.set_zoom(self.pixels_per_second*(1.15 if delta>0 else 1/1.15))
-                center=(self.LABEL_WIDTH+self.viewport().width())/2
-                self._navigation_end=max(getattr(self,'_navigation_end',20),self.project.playhead+(self.viewport().width()-center)/self.pixels_per_second+2); self._range()
-                self.horizontalScrollBar().setValue(round(self.project.playhead*self.pixels_per_second+self.LABEL_WIDTH-center))
+            if delta:self.zoom_about_playhead(self.pixels_per_second*(1.15 if delta>0 else 1/1.15))
             event.accept(); return
         if event.modifiers()&Qt.ControlModifier:
             self.manual_playback_navigation=True

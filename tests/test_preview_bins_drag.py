@@ -119,4 +119,37 @@ class PreviewBinsDragTests(unittest.TestCase):
         w.timeline_zoom.setValue(1000); self.assertAlmostEqual(w.timeline.pixels_per_second,240)
         w.timeline.set_zoom(1); event=QWheelEvent(QPointF(500,180),QPointF(500,180),QPoint(),QPoint(0,-120),Qt.NoButton,Qt.AltModifier,Qt.NoScrollPhase,False)
         QApplication.sendEvent(w.timeline.viewport(),event); self.assertLess(w.timeline.pixels_per_second,1); w.timeline.viewport().grab()
+    def test_slider_and_buttons_zoom_about_the_playhead_like_alt_wheel(self):
+        from PySide6.QtWidgets import QToolButton
+        w=self.w; t=w.timeline; w.show(); QApplication.processEvents()
+        w.project.playhead=0.; t.set_zoom(40); t.horizontalScrollBar().setValue(0)
+        def playhead_x():return t.x_for_time(w.project.playhead)
+        def centre():return (t.LABEL_WIDTH+t.viewport().width())/2
+        def wheel_to(zoom_ratio):
+            event=QWheelEvent(QPointF(500,180),QPointF(500,180),QPoint(),QPoint(0,120 if zoom_ratio>1 else -120),Qt.NoButton,Qt.AltModifier,Qt.NoScrollPhase,False)
+            QApplication.sendEvent(t.viewport(),event)
+        # Alt+wheel is the reference behaviour: the playhead lands on the visible centre.
+        # (A playhead close to the start cannot be centred: the scrollbar cannot go below zero.)
+        from kinetic_cut.widgets import slider_to_zoom
+        for playhead in (60.,90.):
+            w.project.playhead=playhead; t.set_zoom(40); t.horizontalScrollBar().setValue(0); wheel_to(2)
+            reference=playhead_x(); self.assertAlmostEqual(reference,centre(),delta=1.5)
+            # Slider drag from another position, in both directions, ends with the playhead on the same spot.
+            for start,end in ((720,800),(850,760),(700,900)):
+                w.timeline_zoom.blockSignals(True); w.timeline_zoom.setValue(start); w.timeline_zoom.blockSignals(False)
+                t.set_zoom(slider_to_zoom(start)); t.horizontalScrollBar().setValue(0); before=t.pixels_per_second
+                w.timeline_zoom.setValue(end); self.assertNotAlmostEqual(t.pixels_per_second,before)
+                self.assertAlmostEqual(playhead_x(),centre(),delta=1.5,msg=f'slider {start}->{end} playhead {playhead}')
+            # Control: a plain set_zoom (the old slider behaviour) does not keep the playhead centred.
+            t.set_zoom(slider_to_zoom(720)); t.horizontalScrollBar().setValue(0); t.set_zoom(slider_to_zoom(900))
+            self.assertGreater(abs(playhead_x()-centre()),20)
+        # The +/- toolbar buttons drive the same slider.
+        w.project.playhead=60.; t.set_zoom(slider_to_zoom(720)); t.horizontalScrollBar().setValue(0)
+        buttons=[b for b in w.findChildren(QToolButton) if b.toolTip() in ('Timeline zoom in','Timeline zoom out')]; self.assertEqual(len(buttons),2)
+        for button in buttons:
+            before=t.pixels_per_second; button.click(); QApplication.processEvents()
+            self.assertNotAlmostEqual(t.pixels_per_second,before); self.assertAlmostEqual(playhead_x(),centre(),delta=1.5)
+        # A timeline without a project must not fail when zoomed.
+        from kinetic_cut.timeline import TimelineWidget
+        empty=TimelineWidget(); empty.zoom_about_playhead(80); self.assertAlmostEqual(empty.pixels_per_second,80); empty.deleteLater()
     def test_colours_tab_has_visible_palette_icon(self):self.assertFalse(self.w.inspector.tabs.tabIcon(3).isNull())

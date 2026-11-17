@@ -73,7 +73,7 @@ class MotionPreview(QWidget):
         finally:painter.end()
         self.gpu_serial+=1; surface.images.put('overlay',overlay)
         target=surface.item('overlay')
-        if target is not None:target.setProperty('source',f'image://prepared/overlay?v={self.gpu_serial}')
+        if target is not None:surface.publish(target,'source',f'image://prepared/overlay?v={self.gpu_serial}')
     def canvas_rect(self):
         w,h=self.editor.owner.project.settings.width,self.editor.owner.project.settings.height; factor=min(self.width()/w,self.height()/h)
         factor*=self.view_scale

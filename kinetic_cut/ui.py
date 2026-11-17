@@ -1329,7 +1329,7 @@ class MainWindow(QMainWindow):
                     layer.group_id=existing.group_id; layer.link_id=existing.link_id; layer.speed=existing.speed
                     self.project.timeline.append(layer)
             self.timeline.select_ids({i.id for i in self.project.linked_items(existing)},existing.id)
-        else:self.project.timeline.extend(make_vertical_group(media,self.project.duration,self.project.mark_in,(self.project.mark_out-self.project.mark_in) if self.project.mark_out>self.project.mark_in else None,self.project.video_tracks[:3],self.project.audio_tracks[0]))
+        else:self.project.timeline.extend(make_vertical_group(media,self.project.duration,0.,None,self.project.video_tracks[:3],self.project.audio_tracks[0]))
         self.model_changed(); self.statusBar().showMessage("Vertical stack built — draw the source regions, then drag layers in the viewer",5000)
 
     def active_main(self):

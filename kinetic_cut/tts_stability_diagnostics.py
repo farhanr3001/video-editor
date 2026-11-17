@@ -25,6 +25,10 @@ def run(output_dir):
     from .tts_dialogue_dialog import TTSDialogueDialog
     import psutil
 
+    from .tts_availability import VoiceAvailability,Availability
+    def ready(controller):
+        controller.started=True;controller.received(Availability(True),controller.token)
+    availability_fixture=patch.object(VoiceAvailability,'start',ready);availability_fixture.start()
     app = QApplication.instance() or QApplication([])
     app.setQuitOnLastWindowClosed(False)
     owner = QWidget()
@@ -149,6 +153,7 @@ def run(output_dir):
                            for parent in gc.get_referrers(ref())]}
             for ref in workers if ref() is not None]
     finally:
+        availability_fixture.stop()
         cancel_dialog_threads()
         report["threads_drained"] = wait_dialog_threads()
         owner.close()

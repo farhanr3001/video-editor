@@ -104,6 +104,34 @@ class Surface(QObject):
         for name,value in values.items():
             if name not in cached or cached[name]!=value:
                 obj.setProperty(name,value);cached[name]=value
+    def publish(self,obj,name,value):
+        """Change a QML property that starts an image load, without the GIL.
+
+        QObject.setProperty keeps Python's GIL for the whole C++ call. A new
+        ``image://`` source makes Qt Quick take its pixmap/scene locks there,
+        while a Qt reader or render thread can hold those same locks and be
+        waiting for the GIL to enter the Python image provider: the GUI then
+        hangs forever (crash-trace: main thread in gpu_timeline_chrome
+        ``texture`` with idle ``<no Python frame>`` Qt threads). A queued
+        meta-call is delivered by Qt's own event loop, which runs with the GIL
+        released, so the load can never deadlock against Python. Events for a
+        deleted target are dropped by Qt.
+        """
+        if self.closed:return
+        from PySide6.QtCore import QMetaObject,Q_ARG
+        if getattr(obj,'_publish_unsupported',False) or not QMetaObject.invokeMethod(obj,'publishProperty',Qt.QueuedConnection,Q_ARG('QVariant',name),Q_ARG('QVariant',value)):
+            obj._publish_unsupported=True;obj.setProperty(name,value);return
+        pending=self.__dict__.setdefault('_published',{})
+        pending[id(obj)]=obj
+        while len(pending)>96:pending.pop(next(iter(pending)))
+    def flush_published(self):
+        """Deliver queued publications now; only for an immediate window grab."""
+        import shiboken6
+        from PySide6.QtCore import QCoreApplication
+        pending=self.__dict__.get('_published') or {}
+        for obj in list(pending.values()):
+            if shiboken6.isValid(obj):QCoreApplication.sendPostedEvents(obj,QEvent.MetaCall)
+        pending.clear()
     def create(self,name,parent=None):
         from .icons import resource_path
         component=self.components.get(name)

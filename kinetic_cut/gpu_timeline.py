@@ -236,7 +236,7 @@ class GpuTimeline(Surface):
             for track in t.tracks():
                 if t.track_rect(track).intersects(t.section_rect(track)):t.paint_track_header(painter,track)
         finally:painter.end()
-        self.images.put('headers',image);self.root.setProperty('headerSource',f'image://prepared/headers?v={self.updates}:{time.monotonic_ns()}')
+        self.images.put('headers',image);self.publish(self.root,'headerSource',f'image://prepared/headers?v={self.updates}:{time.monotonic_ns()}')
     def _meters(self,area):
         t=self.timeline;signature=(self._header_signature,repr(t._audio_levels))
         if signature==getattr(self,'_meter_signature',None):return
@@ -249,7 +249,7 @@ class GpuTimeline(Surface):
         if node is None:
             node=self.create('GpuImage.qml');node.setVisible(True);node.setZ(1.5);self.meter_texture=node
         node.setWidth(image.width());node.setHeight(image.height());self.images.put('meters',image)
-        node.setProperty('source',f'image://prepared/meters?v={time.monotonic_ns()}')
+        self.publish(node,'source',f'image://prepared/meters?v={time.monotonic_ns()}')
     def diagnostics(self):
         return dict(super().diagnostics(),surface='retained GPU timeline',visible_nodes=self.visible_count,
                     retained_nodes=len(self.nodes),gui_publish_ms=self.refresh_ms,delegate_updates=self.updates,
