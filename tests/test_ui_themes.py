@@ -28,7 +28,7 @@ class UIThemesTests(unittest.TestCase):
             "bg_main", "bg_topbar", "bg_panel", "border",
             "accent", "accent_hover", "text_main", "text_sub",
             "timeline_bg", "timeline_track_bg", "timeline_ruler_bg", "viewer_bg", "icon_color",
-            "nav_edit_color", "nav_deliver_color", "nav_phone_color", "nav_inactive_color"
+            "nav_edit_color", "nav_deliver_color", "nav_inactive_color"
         }
         for theme_id, info in PALETTES.items():
             self.assertTrue(required_keys.issubset(info.keys()), f"Missing keys in theme {theme_id}")
@@ -38,7 +38,6 @@ class UIThemesTests(unittest.TestCase):
         self.assertEqual(p["accent"], "#ff764d")
         self.assertEqual(p["nav_edit_color"], "#ff764d")
         self.assertEqual(p["nav_deliver_color"], "#ff764d")
-        self.assertEqual(p["nav_phone_color"], "#ff764d")
         self.assertEqual(p["nav_inactive_color"], "#1c1c1c")
 
     def test_stylesheet_generation(self):
@@ -65,18 +64,15 @@ class UIThemesTests(unittest.TestCase):
     def test_nav_icons_update(self):
         b0 = QToolButton(); b0.setProperty("navIcon", "sliders-horizontal")
         b1 = QToolButton(); b1.setProperty("navIcon", "download")
-        b2 = QToolButton(); b2.setProperty("navIcon", "smartphone")
         group = QButtonGroup()
         group.addButton(b0, 0)
         group.addButton(b1, 1)
-        group.addButton(b2, 2)
-        w = SimpleNamespace(page_group=group, settings={}, findChildren=lambda types: [b0, b1, b2])
+        w = SimpleNamespace(page_group=group, settings={}, findChildren=lambda types: [b0, b1])
 
         palette = get_active_theme_palette("ableton_gray")
         refresh_workspace_theme(w, palette)
         self.assertFalse(b0.icon().isNull())
         self.assertFalse(b1.icon().isNull())
-        self.assertFalse(b2.icon().isNull())
 
     def test_theme_dialog_apply(self):
         win = DummyWindow()
