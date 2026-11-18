@@ -76,7 +76,7 @@ class TitleDeliveryTests(unittest.TestCase):
         for row,enabled in ((0,False),(1,True)):
             d.queue_context(d.list.visualItemRect(d.list.item(row)).center()); self.assertEqual(d._queue_menu.actions()[0].isEnabled(),enabled); d._queue_menu.close()
         with patch('kinetic_cut.workspace.QDesktopServices.openUrl',return_value=True) as opened:
-            d.open_job_location(d.jobs[0]); opened.assert_not_called(); d.open_job_location(d.jobs[1]); self.assertEqual(Path(opened.call_args.args[0].toLocalFile()),self.root)
+            d.open_job_location(d.jobs[0]); opened.assert_not_called(); d.open_job_location(d.jobs[1]); self.assertEqual(Path(opened.call_args.args[0].toLocalFile()).resolve(),self.root.resolve())
     def test_deliver_settings_stay_fixed_and_fields_fit_small_window(self):
         from kinetic_cut.workspace import set_page
         set_page(self.w,1)

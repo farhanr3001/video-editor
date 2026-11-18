@@ -37,7 +37,7 @@ class InteractionPerformanceTests(unittest.TestCase):
         delta=np.abs(a-b)
         if int(delta.max())>2:
             from pathlib import Path
-            out=Path('build/timeline-performance-20261017/pixel-failure');out.mkdir(exist_ok=True)
+            out=Path('build/timeline-performance-20261017/pixel-failure');out.mkdir(parents=True,exist_ok=True)
             actual.save(str(out/'actual.png')); expected.save(str(out/'expected.png'))
             pixels=delta.reshape(actual.height(),actual.width(),4)
             ys,xs=np.where(pixels.max(axis=2)>1)
@@ -49,7 +49,7 @@ class InteractionPerformanceTests(unittest.TestCase):
             pixels[:,-1]=0
         if int(delta.max())>2:
             from pathlib import Path
-            out=Path('build/timeline-performance-20261017/pixel-failure');out.mkdir(exist_ok=True)
+            out=Path('build/timeline-performance-20261017/pixel-failure');out.mkdir(parents=True,exist_ok=True)
             actual.save(str(out/'actual.png')); expected.save(str(out/'expected.png'))
         # An intermediate premultiplied-alpha blend may round by two levels.
         self.assertLessEqual(int(delta.max()),2)

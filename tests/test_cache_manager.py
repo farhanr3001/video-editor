@@ -11,6 +11,16 @@ from kinetic_cut.cache_manager import scan, clear, CacheManagerDialog
 
 
 class CacheManagerTests(unittest.TestCase):
+    def close_window(self,window):
+        # Retire each owned window before another test changes the global theme.
+        import time
+        from PySide6.QtCore import QEvent,QEventLoop,QTimer
+        window.close();deadline=time.monotonic()+10
+        while (window.isVisible() or window._workers) and time.monotonic()<deadline:
+            loop=QEventLoop();QTimer.singleShot(10,loop.quit);loop.exec()
+        self.assertFalse(window._workers);self.assertFalse(window.isVisible())
+        window.deleteLater();QApplication.sendPostedEvents(None,QEvent.DeferredDelete);QApplication.processEvents()
+
     def test_confirmed_cache_clear_invalidates_owned_preview_renderer(self):
         from kinetic_cut.ui import MainWindow
         from PySide6.QtWidgets import QMessageBox
@@ -21,7 +31,7 @@ class CacheManagerTests(unittest.TestCase):
             with patch.object(window.preview,'gpu',gpu),patch('kinetic_cut.cache_manager.clear',return_value=(1,10)),patch.object(QMessageBox,'question',return_value=QMessageBox.Yes),patch.object(QMessageBox,'information'):
                 dialog.clear_selected();gpu.invalidate_caches.assert_called_once_with()
             dialog.close()
-        finally:window.close()
+        finally:self.close_window(window)
 
     def test_ai_download_is_visible_and_removable_even_when_incomplete(self):
         from kinetic_cut.ui import MainWindow
@@ -36,7 +46,7 @@ class CacheManagerTests(unittest.TestCase):
                     dialog=CacheManagerDialog(window)
                     self.assertIn('enhance',dialog.component_rows);self.assertEqual(dialog.component_rows['enhance'][0].text(),'AI Enhance')
                     feature_packs.remove('enhance');self.assertFalse(root.exists());dialog.refresh();self.assertTrue(dialog.component_rows['enhance'][0].isHidden());dialog.close()
-            finally:window.close()
+            finally:self.close_window(window)
     def test_file_menu_placement_and_three_theme_palette(self):
         from kinetic_cut.ui import MainWindow
         window=MainWindow(); window.autosave_timer.stop()
@@ -51,9 +61,11 @@ class CacheManagerTests(unittest.TestCase):
                                  QApplication.instance().palette().color(QPalette.Window))
                 self.assertEqual(set(dialog.rows),{'ai-enhance','transcripts','edit-reviews','motion-renders','thumbs','proxies','waveforms','compounds','vision-renders','projects','audio-preview','update-downloads'})
                 self.assertFalse(dialog.recovery_check.isChecked())
-                dialog.close()
+                dialog.close();dialog.deleteLater()
+                from PySide6.QtCore import QEvent
+                QApplication.sendPostedEvents(None,QEvent.DeferredDelete);QApplication.processEvents()
         finally:
-            window.close()
+            self.close_window(window)
     def test_only_regenerable_allowlisted_files_are_removed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -105,4 +117,4 @@ class CacheManagerTests(unittest.TestCase):
                     self.assertEqual(make.call_args.kwargs['timeout'],20)
                     self.assertTrue(callable(make.call_args.kwargs['cancel_check']))
             finally:
-                window.close()
+                self.close_window(window)

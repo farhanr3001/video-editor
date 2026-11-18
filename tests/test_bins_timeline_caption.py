@@ -49,7 +49,7 @@ class BinTimelineCaptionTests(unittest.TestCase):
         w=self.window(); media=self.image_media(); w.project.media=[media]; w.refresh_media(); item=w.media_panel.grid.item(0)
         with patch("kinetic_cut.workspace.QInputDialog.getText",return_value=("xQc LOGO",True)):w.media_panel.rename_media(item)
         self.assertEqual(media.name,"xQc LOGO"); self.assertTrue(Path(media.path).exists())
-        with patch("kinetic_cut.workspace.QDesktopServices.openUrl",return_value=True) as open_url:w.media_panel.open_file_location(w.media_panel.grid.item(0)); self.assertEqual(Path(open_url.call_args.args[0].toLocalFile()),self.directory)
+        with patch("kinetic_cut.workspace.QDesktopServices.openUrl",return_value=True) as open_url:w.media_panel.open_file_location(w.media_panel.grid.item(0)); self.assertEqual(Path(open_url.call_args.args[0].toLocalFile()).resolve(),self.directory.resolve())
         panel=w.media_panel; panel.power=PowerBins(self.directory/"bins.json"); panel.power.add(media,"Master"); panel.folder="Master"; panel.refresh()
         with patch("kinetic_cut.workspace.QInputDialog.getText",return_value=("Saved logo",True)):panel.rename_media(panel.grid.item(0))
         self.assertEqual(PowerBins(self.directory/"bins.json").data["media"][0]["media"]["name"],"Saved logo"); self.assertEqual(media.name,"xQc LOGO")

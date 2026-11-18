@@ -137,6 +137,9 @@ class CaptionStyleTests(unittest.TestCase):
         picker=CaptionFontCombo(); self.assertLess(picker.count(),25); self.assertGreaterEqual(picker.findText('Nirmala UI'),0)
         self.assertIn('Anton',QFontDatabase.families()); picker.setCurrentText('Legacy project font'); self.assertEqual(picker.currentText(),'Legacy project font')
     def test_user_geometos_font_registered_and_exported_as_matching_shapes(self):
+        from kinetic_cut.icons import resource_path
+        if not resource_path('assets','fonts','Geometos.ttf').is_file():
+            self.skipTest('Optional owner-provided Geometos font is not distributed')
         from kinetic_cut.caption_fonts import CaptionFontCombo
         from kinetic_cut.subtitle_render import write
         from PySide6.QtGui import QFont,QFontInfo
@@ -146,6 +149,37 @@ class CaptionStyleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             target=Path(folder)/'geometos.ass'; write(project,target)
             self.assertIn('\\p1',target.read_text(encoding='utf-8-sig'))
+
+    def test_custom_font_registration_and_vector_export_use_public_fixture(self):
+        from unittest.mock import patch
+        from fontTools.ttLib import TTFont
+        from kinetic_cut import caption_fonts as fonts
+        from kinetic_cut.icons import resource_path
+        from kinetic_cut.subtitle_render import write
+        from PySide6.QtGui import QFont,QFontInfo
+        family='Kinetic Public Font Fixture';registered=[]
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            with TTFont(str(resource_path('assets','fonts','Poppins-Regular.ttf'))) as font:
+                for record in font['name'].names:
+                    value={1:family,2:'Regular',4:family,6:'KineticPublicFontFixture',16:family,17:'Regular'}.get(record.nameID)
+                    if value is not None:record.string=value.encode(record.getEncoding())
+                font.save(root/'fixture.ttf')
+            add=QFontDatabase.addApplicationFont
+            def register(path):
+                value=add(path);registered.append(value);return value
+            try:
+                with patch.object(fonts,'resource_path',return_value=root),patch.object(fonts,'_loaded',False),patch.object(QFontDatabase,'addApplicationFont',side_effect=register):
+                    picker=fonts.CaptionFontCombo();picker.setCurrentText(family)
+                    self.assertEqual(picker.currentText(),family)
+                    self.assertIn(family,QFontDatabase.families());self.assertEqual(QFontInfo(QFont(family)).family(),family)
+                    project=Project(captions=[Caption('fixture',0,2,'CUSTOM FONT CHECK')])
+                    project.subtitle_style.font=family;project.subtitle_style.animation='none';project.subtitle_style.glow_enabled=True
+                    target=root/'custom.ass';write(project,target);self.assertIn('\\p1',target.read_text(encoding='utf-8-sig'))
+                    picker.deleteLater()
+            finally:
+                for value in registered:
+                    if value>=0:QFontDatabase.removeApplicationFont(value)
     def test_dialog_dependencies_hover_and_glow(self):
         from kinetic_cut.caption_style_dialog import CaptionStyleDialog
         dialog=CaptionStyleDialog(CaptionStyle(),{})

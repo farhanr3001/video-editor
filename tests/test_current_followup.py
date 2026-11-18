@@ -64,7 +64,7 @@ class CurrentModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             file=Path(root)/'project.kcut'; p=Project(name='My Edit'); p.save(file)
             settings=dict(project_folder=root,recent_projects=[str(file)])
-            self.assertEqual(project_paths(settings),[file]); target=recoverable_delete(file)
+            self.assertEqual(project_paths(settings),[file.resolve()]); target=recoverable_delete(file)
             self.assertFalse(file.exists()); self.assertEqual(Project.load(target).name,'My Edit'); self.assertFalse(project_paths(settings))
 
 
@@ -163,7 +163,7 @@ class CurrentUITests(unittest.TestCase):
             if d.items.count()==2:break
             self.wait()
         self.assertEqual(d.items.count(),2); self.assertEqual(d.items.item(0).text(),'New Project')
-        d.set_list(True); d.set_list(False); d.activate(d.items.item(1)); self.assertEqual(d.choice,str(path))
+        d.set_list(True); d.set_list(False); d.activate(d.items.item(1)); self.assertEqual(d.choice,str(path.resolve()))
     def test_vocal_replacement_preserves_video_and_timing_and_undo(self):
         from kinetic_cut.vocal_ui import begin
         from kinetic_cut import vocal_component

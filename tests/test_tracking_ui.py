@@ -245,7 +245,7 @@ class TrackingDialogTests(unittest.TestCase):
         project.save(saved)
         loaded=Project.load(saved)
         restored=loaded.timeline[0].effects[0]
-        self.assertEqual(Path(restored['markers'][2]['image']),stamp)
+        self.assertEqual(Path(restored['markers'][2]['image']).resolve(),stamp.resolve())
         self.assertEqual(export_error(restored,loaded.media[0],loaded.timeline[0]),'')
 
     def test_scrubbing_or_drawing_pauses_playback_before_correction(self):

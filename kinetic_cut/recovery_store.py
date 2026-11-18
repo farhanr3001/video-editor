@@ -11,6 +11,15 @@ def regular(path):
     try:return path.is_file() and not path.is_symlink() and not getattr(path.lstat(),'st_file_attributes',0)&0x400
     except OSError:return False
 
+
+def managed_regular(path):
+    """Accept Windows spelling aliases, but never a redirected directory/file."""
+    path=Path(path)
+    if not path.is_absolute() or '..' in path.parts or not regular(path):return False
+    try:
+        return all(not parent.is_symlink() and not getattr(parent.lstat(),'st_file_attributes',0)&0x400 for parent in path.parents)
+    except OSError:return False
+
 def atomic(path,body):
     if path.is_symlink() or any(p.is_symlink() for p in path.parents):raise ValueError('Unsafe recovery storage')
     path.parent.mkdir(parents=True,exist_ok=True)
@@ -76,7 +85,7 @@ def entries(include_legacy=True):
         paths += [AUTOSAVE_PATH,DATA_DIR/'recovery_backup_user_work.kcut',*(CACHE_DIR/'recovered').glob('*.kcut')]
     result=[];sessions={};availability={}
     for path in paths:
-        if not regular(path) or path.resolve()!=path.absolute():continue
+        if not managed_regular(path):continue
         try:
             body=json.loads(path.read_text(encoding='utf-8'));meta=body.get('_recovery',{})
             if not isinstance(body.get('timeline',[]),list):continue
@@ -144,10 +153,12 @@ def finish_legacy():
 
 def remove(path):
     path=Path(path)
-    allowed={row['path']:row for row in entries()}
-    if path not in allowed or allowed[path]['active']:raise ValueError('This recovery copy is in use or is not managed by Kinetic Cut')
-    if not regular(path):raise ValueError('Unsafe recovery file')
-    path.unlink()
+    if not managed_regular(path):raise ValueError('Unsafe recovery file')
+    allowed={row['path'].resolve():row for row in entries()}
+    row=allowed.get(path.resolve())
+    if row is None or row['active']:raise ValueError('This recovery copy is in use or is not managed by Kinetic Cut')
+    if not managed_regular(row['path']):raise ValueError('Unsafe recovery file')
+    row['path'].unlink()
 
 def clear_inactive():
     count=size=0

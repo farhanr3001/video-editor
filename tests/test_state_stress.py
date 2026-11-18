@@ -365,6 +365,12 @@ class NativeHistoryStressTests(unittest.TestCase):
         from kinetic_cut.workspace import set_page
         w = MainWindow()
         w.autosave_timer.stop()
+        def history_input(action):
+            action()
+            # Real input dispatch returns to Qt between key presses. Keep all
+            # 594 history operations, but retire deferred widgets as the app does.
+            QApplication.sendPostedEvents(None,QEvent.DeferredDelete)
+            QApplication.processEvents()
         try:
             with patch.object(w.compounds, 'request_caches'), patch.object(w.preview_quality, 'request'):
                 from kinetic_cut import missing_media as mm
@@ -379,10 +385,10 @@ class NativeHistoryStressTests(unittest.TestCase):
                 immutable = [copy.deepcopy(p.to_dict()) for p in w._history]
                 for _ in range(3):
                     for _ in range(99):
-                        w.undo()
+                        history_input(w.undo)
                     self.assertEqual(w.project.timeline[0].transform.rotation, 35.)
                     for _ in range(99):
-                        w.redo()
+                        history_input(w.redo)
                     self.assertEqual(w.project.timeline[0].transform.rotation, 134.)
                     self.assertEqual([p.to_dict() for p in w._history], immutable)
                 w.undo()

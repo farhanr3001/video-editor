@@ -105,7 +105,7 @@ class MotionRenderTests(unittest.TestCase):
             p=Project(timeline=[item],portable_media=True); path=directory/'portable.kcut'; p.save(path)
             raw=json.loads(path.read_text()); self.assertEqual(raw['timeline'][0]['graphic_data']['scene']['nodes'][-1]['source'],'asset.png')
             moved=directory/'moved'; moved.mkdir(); source.rename(moved/source.name); path.rename(moved/path.name); loaded=Project.load(moved/path.name)
-            self.assertEqual(loaded.timeline[0].graphic_data['scene']['nodes'][-1]['source'],str(moved/source.name))
+            self.assertEqual(loaded.timeline[0].graphic_data['scene']['nodes'][-1]['source'],str((moved/source.name).resolve()))
             (moved/source.name).unlink()
             with patch('kinetic_cut.config.CACHE_DIR',directory/'cache'),self.assertRaisesRegex(ValueError,'image is missing'):prepare(loaded,None,None)
     def test_export_native_alpha_pixels_and_title_keys(self):
