@@ -54,15 +54,20 @@ def records(values):
         except (KeyError,ValueError,TypeError,OverflowError):continue
         row={k:value[k] for k in ('id','output','name')};row.update(numeric)
         row.update(state='Complete',preset=copy.deepcopy(preset),hardware=str(value.get('hardware','Auto'))[:64],burn=bool(value.get('burn',False)),audio=bool(value.get('audio',True)))
+        for key in ('timeline_id','timeline_name'):
+            if isinstance(value.get(key),str):row[key]=value[key][:512]
         result.append(row);seen.add(row['id'])
     return result
 
 
 def completed_record(job):
     project=job['project'];settings=project.settings
-    return dict(id=job.setdefault('history_id',uuid.uuid4().hex),state='Complete',output=job['output'],name=project.name,
+    result=dict(id=job.setdefault('history_id',uuid.uuid4().hex),state='Complete',output=job['output'],name=project.name,
         width=settings.width,height=settings.height,fps=settings.fps,elapsed=job.get('elapsed',0),completed_at=time.time(),
         preset=asdict(job['preset']),hardware=job.get('hardware','Auto'),burn=job.get('burn',False),audio=job.get('audio',True))
+    for key in ('timeline_id','timeline_name'):
+        if key in job:result[key]=job[key]
+    return result
 
 
 def restore(values):
@@ -75,7 +80,7 @@ def restore(values):
         except (TypeError,ValueError):continue
         project=Project(name=row['name'],settings=ProjectSettings(width=int(row['width']),height=int(row['height']),fps=row['fps']))
         result.append(dict(project=project,output=row['output'],preset=preset,hardware=row['hardware'],burn=row['burn'],audio=row['audio'],
-            state='Complete',elapsed=row['elapsed'],history_id=row['id'],history_only=True))
+            state='Complete',elapsed=row['elapsed'],history_id=row['id'],history_only=True,**{k:row[k] for k in ('timeline_id','timeline_name') if k in row}))
     return result
 
 

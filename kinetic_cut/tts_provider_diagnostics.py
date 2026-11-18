@@ -54,6 +54,7 @@ def run(output_dir):
         # voices, nondefault delivery and explicit multi-batch concatenation.
         availability=health.probe_service();assert availability.available,availability.message
         for i,(name,voice) in enumerate(tts.VOICES):
+            if voice.startswith('offline:'):continue  # Separate optional-runtime diagnostic; no implicit model download.
             begin=time.monotonic()
             path=tts.synthesize_speech('Hello. This is a voice connection test.',voice=voice,
                 rate_percent=15 if i==2 else 0,pitch_hz=-3 if i==2 else 0,

@@ -13,7 +13,8 @@ from PySide6.QtWidgets import (
     QSlider, QPushButton, QFormLayout, QProgressBar,
     QMessageBox, QWidget, QScrollArea, QDialogButtonBox
 )
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimedia import QMediaPlayer
+from .audio_output import QAudioOutput
 
 from .controls import SafeComboBox
 from .dialog_jobs import RetainedThread
@@ -194,7 +195,7 @@ class TTSDialogueDialog(QDialog):
         idx = next((i for i, (_, vid) in enumerate(VOICES) if vid == DEFAULT_VOICE), 0)
         self.voice_combo.setCurrentIndex(idx)
         chevron_path = resource_path("assets", "icons", "dropdown-chevron.svg").as_posix()
-        set_ui_style(self.voice_combo, 'QComboBox { combobox-popup: 0; } QComboBox::down-arrow {image:url("@arrow_combo");width:14px;height:14px;} QComboBox::drop-down {width:26px;border-left:1px solid @border_subtle;}')
+        set_ui_style(self.voice_combo, 'QComboBox { combobox-popup: 0; }')
         form.addRow("Voice", self.voice_combo)
         from .tts_availability import VoiceAvailability
         self.voice_availability=VoiceAvailability(self,form)

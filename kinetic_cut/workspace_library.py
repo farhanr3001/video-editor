@@ -40,7 +40,8 @@ class LibraryPanel(QWidget):
             button.setMinimumWidth(max(62, button.fontMetrics().horizontalAdvance(name)+28))
             button.setToolTip('Browse '+name.lower()); row.addWidget(button)
             self.group.addButton(button); self.buttons[name] = button
-            button.toggled.connect(lambda checked, n=name: self.select(n) if checked else None)
+            button.toggled.connect(lambda checked, n=name: self.select(n) if checked and not getattr(getattr(window,'timeline_workspace',None),'active',False) else None)
+            button.clicked.connect(lambda checked=False,n=name:self.activate(n))
         row.addSpacing(6)
         for action in actions: row.addWidget(action)
         row.addStretch(1); layout.addWidget(bar)
@@ -55,6 +56,10 @@ class LibraryPanel(QWidget):
         from .config import save_settings
         try: save_settings(self.window.settings)
         except OSError: logging.warning('Could not save library navigation', exc_info=True)
+
+    def activate(self,name):
+        workspace=getattr(self.window,'timeline_workspace',None)
+        if workspace and workspace.active:workspace.toggle_library(name)
 
     def select(self, name, restore=False):
         self.active = name

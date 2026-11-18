@@ -4,7 +4,8 @@ from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QElapsedTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog,
     QDialogButtonBox, QFontComboBox, QFormLayout, QGridLayout, QPushButton,
-    QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
+    QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QButtonGroup, QRadioButton, QHBoxLayout)
 from .model import Caption, CaptionStyle, Project
 from .visuals import draw_caption
 from .icons import resource_path
@@ -251,7 +252,7 @@ PRESET_NAMES = [
 
 
 class CaptionStyleDialog(QDialog):
-    def __init__(self, style, settings, parent=None):
+    def __init__(self, style, settings, parent=None, *, selection_available=True):
         super().__init__(parent)
         self.setWindowTitle("Auto Caption Style")
         self.base = copy.deepcopy(style)
@@ -263,6 +264,40 @@ class CaptionStyleDialog(QDialog):
         outer.setSpacing(10)
         self.resize(500, min(800, self.screen().availableGeometry().height() - 60))
         self.setMinimumWidth(480)
+
+        # A normal timeline selection must never silently narrow recognition.
+        # Start each dialog on the whole timeline; selected speech is explicit.
+        self.scope = QButtonGroup(self)
+        scope_choices=QHBoxLayout()
+        for index,label in enumerate(('Whole timeline','Selected clips')):
+            choice=QRadioButton(label);choice.setObjectName('captionSpeechScope'+str(index))
+            set_ui_style(choice,'''
+                QRadioButton {spacing:7px;}
+                QRadioButton::indicator {width:14px;height:14px;border:2px solid @text_sub;border-radius:9px;background:@bg_input;}
+                QRadioButton::indicator:hover {border-color:@accent;}
+                QRadioButton::indicator:checked {background:@accent;border:2px solid @text_main;}
+                QRadioButton::indicator:disabled {background:@bg_panel;border-color:@text_disabled;}
+                QRadioButton::indicator:checked:disabled {background:@text_disabled;border-color:@text_sub;}
+            ''')
+            self.scope.addButton(choice,index)
+            if index==1:
+                # Disabled controls do not receive normal hover help. Keep an
+                # enabled hit area around the choice so its explanation shows.
+                self.selection_scope_hint=QWidget()
+                hint_layout=QHBoxLayout(self.selection_scope_hint);hint_layout.setContentsMargins(0,0,0,0);hint_layout.addWidget(choice)
+                self.selection_scope_hint.setAttribute(Qt.WA_AlwaysShowToolTips,True)
+                scope_choices.addWidget(self.selection_scope_hint)
+            else:scope_choices.addWidget(choice)
+        self.scope.button(0).setChecked(True)
+        self.scope.button(1).setEnabled(bool(selection_available))
+        self.scope.button(0).setToolTip('Caption all unmuted speech on this timeline.')
+        self.scope.button(1).setAttribute(Qt.WA_AlwaysShowToolTips,True)
+        self.scope.button(1).setToolTip('Caption only the selected speech clips and their linked audio.' if selection_available
+                                      else 'Select one or more speech clips in the timeline first, then choose Selected clips.')
+        self.selection_scope_hint.setToolTip(self.scope.button(1).toolTip())
+        scope_form = QFormLayout()
+        scope_form.addRow('Speech to caption', scope_choices)
+        outer.addLayout(scope_form)
 
         # Top preview & Play button
         self.preview = CaptionPreview(self)
@@ -323,12 +358,10 @@ class CaptionStyleDialog(QDialog):
         self.font.setObjectName("captionFontPicker")
         self.font.setEditable(False)
         self.font.setCurrentFont(QFont(style.font))
-        set_ui_style(self.font, 'QComboBox::down-arrow {image:url("@arrow_combo");width:14px;height:14px;} QComboBox::drop-down {width:26px;border-left:1px solid @border_subtle;}')
 
         # Keep self.preset attribute for backwards compatibility with tests, but omit from visible layout
         self.preset = QComboBox()
         self.preset.setObjectName("captionStylePreset")
-        set_ui_style(self.preset, 'QComboBox::down-arrow {image:url("@arrow_combo");width:14px;height:14px;} QComboBox::drop-down {width:26px;border-left:1px solid @border_subtle;}')
         for label, key in PRESET_NAMES:
             self.preset.addItem(label, key)
         initial_preset_idx = 0

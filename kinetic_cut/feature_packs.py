@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 from .updates import trusted_download
 
-ROOTS = {"vision": "vision-v1", "vocals": "vocal-only-v1", "enhance": "ai-enhance-v1"}
+ROOTS = {"vision": "vision-v1", "vocals": "vocal-only-v1", "enhance": "ai-enhance-v1",'offline-speech':'offline-speech-v1'}
 SPEECH = "speech"  # caption model download: stored under models/, not components/
 
 
@@ -45,7 +45,10 @@ def remove(key):
 def manifest():
     from .icons import resource_path
     path = resource_path("assets", "components.json")
-    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    result=json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    from .offline_speech import DOWNLOAD_BYTES,INSTALLED_BYTES
+    result['offline-speech']=dict(name='Offline English voice',download_bytes=DOWNLOAD_BYTES,installed_bytes=INSTALLED_BYTES)
+    return result
 
 
 def component_root(key):
@@ -54,6 +57,9 @@ def component_root(key):
 
 
 def installed(key):
+    if key=='offline-speech':
+        from .offline_speech import ready
+        return ready()
     if key == SPEECH:
         from .caption_runtime import app_copy_ready
         return app_copy_ready()
@@ -89,6 +95,9 @@ def extract(archive, destination, cancel):
 
 
 def install(key, progress, cancel, local_source=None):
+    if key=='offline-speech':
+        from .offline_speech import install as install_offline
+        return install_offline(progress,cancel)
     if key == SPEECH:
         from .caption_runtime import install_model
         return install_model(progress, cancel)

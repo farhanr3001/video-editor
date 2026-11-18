@@ -30,6 +30,7 @@ VOICES = [
     ("Jenny (Natural Female · TikTok Story)", "en-US-JennyNeural"),
     ("Aria (Expressive Female · Vibrant)", "en-US-AriaNeural"),
     ("Andrew (Warm Male · Professional)", "en-US-AndrewNeural"),
+    ('Offline English · Female (optional download)','offline:en-US-ljspeech-medium'),
 ]
 
 DEFAULT_VOICE = "adam-narrator"
@@ -304,7 +305,11 @@ def _synthesize_to_target(cleaned_text, voice, rate_percent, pitch_hz, target,
                           api_key, ffmpeg_bin, cancel_check):
         rate_str = f"{rate_percent:+d}%"
         pitch_str = f"{pitch_hz:+d}Hz"
-        if voice in ("adam-narrator", "adam-shorts") or voice.startswith("adam"):
+        if voice.startswith('offline:'):
+            from .offline_speech import VOICE,synthesize
+            if voice!=VOICE:raise ValueError('Unknown offline voice')
+            synthesize(cleaned_text,target,rate_percent,pitch_hz,ffmpeg_bin,cancel_check)
+        elif voice in ("adam-narrator", "adam-shorts") or voice.startswith("adam"):
             _synthesize_adam(cleaned_text, rate_percent=rate_percent, pitch_hz=pitch_hz, target_path=target, ffmpeg_bin=ffmpeg_bin, cancel_check=cancel_check)
         elif voice.startswith("elevenlabs:"):
             if api_key.strip():

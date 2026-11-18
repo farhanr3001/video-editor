@@ -6,7 +6,8 @@ from pathlib import Path
 from PySide6.QtCore import Qt,QUrl,QTimer
 from PySide6.QtGui import QPainter,QPen
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QListWidget,QListWidgetItem,QPushButton,QLabel,QComboBox,QFileDialog,QCheckBox,QMenu,QDialog
-from PySide6.QtMultimedia import QMediaPlayer,QAudioOutput
+from PySide6.QtMultimedia import QMediaPlayer
+from .audio_output import QAudioOutput
 from .controls import SafeDoubleSpinBox
 from .media_source import set_media_source
 from .motion_audio import at,validate

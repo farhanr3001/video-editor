@@ -59,17 +59,28 @@ def request_settings(settings):
 
 
 def _save_recovery(value):
-    document,path=value
-    document.save(path)
+    document,path,token=value
+    if token:
+        from .recovery_store import save
+        save(document,token)
+    else:document.save(path)
 
 
 def recovery(window,path):
     document=window.compounds.root()
     if not (document.media or document.timeline):return
     snapshot=copy.deepcopy(document)
+    from .config import AUTOSAVE_PATH
+    token=None
+    if Path(path)==AUTOSAVE_PATH:
+        from .recovery_store import session,finish
+        token=getattr(window,'_recovery_session',None)
+        if token is None:
+            token=window._recovery_session=session(register=False)
+            if hasattr(window,'shutdownFinished'):window.shutdownFinished.connect(lambda:finish(token))
     lane=getattr(window,'_recovery_save_lane',None)
     if lane is None:lane=window._recovery_save_lane=WriteLane(window,_save_recovery,'Save recovery snapshot')
-    lane.submit((snapshot,Path(path)))
+    lane.submit((snapshot,Path(path),token))
 
 
 class WriteLane(QObject):

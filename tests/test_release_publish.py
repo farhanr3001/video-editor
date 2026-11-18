@@ -12,9 +12,9 @@ class PublishTests(unittest.TestCase):
     def fixture(self, root):
         release=root/'release';release.mkdir()
         for name in ('KineticCut-Setup-9.0.0.exe','KineticCut-FullSetup-9.0.0.exe',
-                     'KineticCut-Update-9.0.0.json','KineticCut-Baseline-1.1.0.json','components.json'):
-            (release/name).write_bytes(b'full payload' if 'FullSetup' in name else b'old')
-        (release/'build-report.json').write_text('{}')
+                     'KineticCut-Update-9.0.0.json','KineticCut-Inventory-9.0.0.json','KineticCut-Baseline-1.1.0.json','components.json'):
+            (release/name).write_bytes(b'full payload' if 'Setup' in name else b'old')
+        (release/'build-report.json').write_text(json.dumps(dict(update_channel='full-installer',migration_bytes=len(b'full payload'))))
         spec=importlib.util.spec_from_file_location('release_publisher',Path(__file__).resolve().parents[1]/'scripts/publish_release.py')
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         module.ROOT=root;module.VERSION='9.0.0';return module
@@ -31,7 +31,7 @@ class PublishTests(unittest.TestCase):
                     name=request.full_url.split('?name=')[1];uploaded.append(name)
                     content=request.data.read();value=dict(name=name,size=len(content),digest='sha256:'+hashlib.sha256(content).hexdigest())
                 return io.BytesIO(json.dumps(value).encode())
-            with patch.object(module,'credentials',return_value='test'),patch.object(module.sys,'argv',['publish','--installer-update']),patch.object(module.urllib.request,'urlopen',side_effect=opener):
+            with patch.object(module,'credentials',return_value='test'),patch.object(module.sys,'argv',['publish','--installer-update','--gate',str(root/'gate.json')]),patch('scripts.release_gate.validate',return_value={}),patch.object(module.urllib.request,'urlopen',side_effect=opener):
                 module.main()
             self.assertNotIn('KineticCut-Update-9.0.0.json',uploaded)
             self.assertIn('KineticCut-Inventory-9.0.0.json',uploaded)
@@ -45,8 +45,15 @@ class PublishTests(unittest.TestCase):
             def opener(request, **kwargs):
                 value=[release] if request.full_url.endswith('/releases') else [dict(name='KineticCut-Update-9.0.0.json')]
                 return io.BytesIO(json.dumps(value).encode())
-            with patch.object(module,'credentials',return_value='test'),patch.object(module.sys,'argv',['publish','--installer-update']),patch.object(module.urllib.request,'urlopen',side_effect=opener):
+            with patch.object(module,'credentials',return_value='test'),patch.object(module.sys,'argv',['publish','--installer-update','--gate',str(Path(tmp)/'gate.json')]),patch('scripts.release_gate.validate',return_value={}),patch.object(module.urllib.request,'urlopen',side_effect=opener):
                 with self.assertRaisesRegex(RuntimeError,'incremental-channel'):module.main()
+
+    def test_missing_gate_stops_before_credentials_or_network(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            module=self.fixture(Path(tmp))
+            with patch.object(module,'credentials') as credentials,patch.object(module.sys,'argv',['publish','--publish']),patch.object(module.urllib.request,'urlopen') as network:
+                with self.assertRaisesRegex(RuntimeError,'--gate'):module.main()
+                credentials.assert_not_called();network.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

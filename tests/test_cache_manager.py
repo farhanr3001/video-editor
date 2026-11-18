@@ -49,7 +49,8 @@ class CacheManagerTests(unittest.TestCase):
                 dialog=CacheManagerDialog(window)
                 self.assertEqual(dialog.palette().color(QPalette.Window),
                                  QApplication.instance().palette().color(QPalette.Window))
-                self.assertEqual(set(dialog.rows),{'ai-enhance','transcripts','edit-reviews','motion-renders','thumbs','proxies','waveforms','compounds','vision-renders','projects','audio-preview'})
+                self.assertEqual(set(dialog.rows),{'ai-enhance','transcripts','edit-reviews','motion-renders','thumbs','proxies','waveforms','compounds','vision-renders','projects','audio-preview','update-downloads'})
+                self.assertFalse(dialog.recovery_check.isChecked())
                 dialog.close()
         finally:
             window.close()

@@ -113,6 +113,7 @@ class RemotePreview(Surface):
         signature=(id(p),p.__dict__.get('_edit_revision',0),tuple(i.id for i in items),tuple(t.id for t in transitions),tuple(cap.id for cap in captions))
         if signature!=self._signature:
             template=copy.copy(p);template.timeline=items;template.transitions=list(transitions);template.captions=list(captions)
+            template.other_timelines=[]
             template.media=[p.media_by_id(identifier) for identifier in {i.media_id for i in items} if p.media_by_id(identifier)]
             self._document=template.to_dict();self._document['path']='';self._signature=signature
             self.bounds={};c.text_rects={};self.cpu_ready={};self.sources={}

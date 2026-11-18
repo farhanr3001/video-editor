@@ -77,6 +77,9 @@ class VoiceAvailability(QObject):
         self.retry.clicked.connect(self.start);self.retry.hide()
         row.addWidget(self.label,1);row.addWidget(self.retry)
         form.addRow(self.panel)
+        self.offline=QPushButton('Download offline voice…');self.offline.clicked.connect(self.download_offline);form.addRow(self.offline)
+        from .component_ui import events
+        events().changed.connect(self.refresh)
         dialog.voice_combo.currentIndexChanged.connect(self.refresh)
         dialog.installEventFilter(self)
     def eventFilter(self,obj,event):
@@ -96,16 +99,23 @@ class VoiceAvailability(QObject):
     def busy(self):
         return self.dialog._is_generating or self.dialog._preview_worker is not None
     def allowed(self):
+        if self.closed:return False
+        from .offline_speech import VOICE,ready
+        if self.dialog.voice_combo.currentData()==VOICE:return ready()
         if not self.started:return True  # Unshown programmatic fixture; show always starts a check.
         if self.closed or self.checking or not self.result or not self.result.available:return False
         return self.result.voices is None or backend_voice(self.dialog.voice_combo.currentData() or '') in self.result.voices
     def refresh(self,*_):
         if self.closed:return
         combo=self.dialog.voice_combo
+        from .offline_speech import VOICE,ready
+        offline_ready=ready();selected_offline=combo.currentData()==VOICE
         missing=False
         for i in range(combo.count()):
             voice=combo.itemData(i);name=self.names.get(voice,combo.itemText(i).split(' — ')[0])
             available=self.result is None or (self.result.available and (self.result.voices is None or backend_voice(voice) in self.result.voices))
+            if voice==VOICE:
+                combo.setItemText(i,'Offline English · Female'+('' if offline_ready else ' (download)'));combo.model().item(i).setEnabled(True);continue
             combo.setItemText(i,name+(' — Temporarily unavailable' if not available else ''))
             combo.model().item(i).setEnabled(available)
             missing|=not available
@@ -117,9 +127,15 @@ class VoiceAvailability(QObject):
             self.label.setText(message)
         self.retry.setVisible(bool(self.result and (missing or not self.result.available)))
         self.retry.setEnabled(not self.checking and not self.busy())
+        self.offline.setVisible(not offline_ready)
+        self.offline.setEnabled(not self.busy())
+        if selected_offline:self.label.setText('Offline voice ready. Your text stays on this computer.' if offline_ready else 'Download the optional English voice to use narration without an internet connection.')
         self.dialog.generate_btn.setEnabled(self.allowed() and not self.dialog._is_generating)
         playing=self.dialog._preview_player.playbackState()==QMediaPlayer.PlayingState
         self.dialog.preview_btn.setEnabled((self.allowed() or playing) and not self.busy())
+    def download_offline(self):
+        from .component_ui import offer
+        offer(self.dialog,'offline-speech');self.refresh()
     def failure(self,message):
         if 'voice service' in message or 'voice component is out of date' in message:
             self.started=True;self.result=Availability(False,message);self.refresh()

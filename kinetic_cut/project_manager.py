@@ -91,43 +91,8 @@ class ProjectManagerDialog(QDialog):
         self.set_list(bool(window.settings.get('project_manager_list',False))); self.list_toggle.setChecked(bool(window.settings.get('project_manager_list',False))); self.refresh()
 
     def open_recovery(self):
-        from .config import DATA_DIR, AUTOSAVE_PATH, CACHE_DIR
-        import time
-        from PySide6.QtGui import QCursor
-        candidates = []
-        for p in [DATA_DIR / "recovery_backup_user_work.kcut", AUTOSAVE_PATH]:
-            if p.is_file() and p.stat().st_size > 50 and p not in candidates:
-                candidates.append(p)
-        rec_dir = CACHE_DIR / "recovered"
-        if rec_dir.is_dir():
-            for p in sorted(rec_dir.glob("*.kcut"), key=lambda x: x.stat().st_mtime, reverse=True):
-                if p not in candidates:
-                    candidates.append(p)
-        root_dir = folder(self.window.settings)
-        if root_dir.is_dir():
-            for p in root_dir.glob("Recovered*.kcut"):
-                if p not in candidates:
-                    candidates.append(p)
-
-        if not candidates:
-            path, _ = QFileDialog.getOpenFileName(self, "Open Recovery File", str(DATA_DIR), "Kinetic Cut (*.kcut);;All Files (*)")
-            if path:
-                self.choice = path
-                self.accept()
-            return
-
-        menu = QMenu(self)
-        for c in candidates:
-            try:
-                data = json.loads(c.read_text(encoding="utf-8"))
-                mtime = time.strftime("%b %d %I:%M %p", time.localtime(c.stat().st_mtime))
-                label = f"{c.stem} — {data.get('name', 'Project')} ({len(data.get('timeline', []))} clips · {mtime})"
-            except Exception:
-                label = f"{c.name} ({c.stat().st_size} bytes)"
-            menu.addAction(label, lambda p=str(c.resolve()): self._activate_path(p))
-        menu.addSeparator()
-        menu.addAction("Browse all recovery files in Data folder…", lambda: self._browse_recovery())
-        menu.exec(QCursor.pos())
+        from .recovery_ui import show
+        show(self.window)
 
     def _activate_path(self, path: str):
         self.choice = path

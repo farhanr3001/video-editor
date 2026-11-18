@@ -121,9 +121,7 @@ QPushButton[trackingPrimary="true"] { font-weight:600; border-color:@text_disabl
 QToolButton[trackingSectionToggle="true"] { border:none; background:transparent; padding:0px; min-height:20px; text-align:left; font-size:13px; font-weight:600; }
 QComboBox,QDoubleSpinBox,QLineEdit { background:@bg_input; color:@text_main; border:1px solid @border_subtle; border-radius:6px; min-height:28px; padding:0px 7px; font-size:13px; }
 QComboBox:focus,QDoubleSpinBox:focus,QLineEdit:focus { border-color:@text_disabled; }
-QComboBox::drop-down { background:transparent; border:none; width:24px; }
-QComboBox { combobox-popup:0; }
-QComboBox::down-arrow { image:url("@arrow_combo"); width:12px; height:12px; border:none; margin:0; }
+QComboBox { combobox-popup:0; padding-right:28px; }
 QTableWidget { background:@bg_input; alternate-background-color:@bg_panel; border:1px solid @border_subtle; border-radius:6px; gridline-color:@border_subtle; }
 QHeaderView::section { background:@bg_surface; color:@text_sub; border:none; border-bottom:1px solid @border_subtle; padding:7px 4px; }
 QTableWidget::item { padding:3px 5px; border:none; }

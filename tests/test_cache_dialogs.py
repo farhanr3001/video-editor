@@ -77,7 +77,7 @@ class ComponentsDialogTests(unittest.TestCase):
         from kinetic_cut.component_ui import ComponentsDialog
         with patch('kinetic_cut.feature_packs.installed', side_effect=lambda key: key == 'vocals'):
             dialog = ComponentsDialog(self.w)
-            self.assertEqual(set(dialog.rows), {'vision', 'vocals', 'enhance', 'speech'})
+            self.assertEqual(set(dialog.rows), {'vision', 'vocals', 'enhance', 'speech','offline-speech'})
             for key, (download, uninstall) in dialog.rows.items():
                 self.assertEqual(uninstall.isEnabled(), key == 'vocals')
                 self.assertEqual(download.isEnabled(), key != 'vocals')
@@ -153,7 +153,7 @@ class ComponentsDialogTests(unittest.TestCase):
                 __import__('time').sleep(.02)
             self.assertIn('1.1 GB on disk', dialog.states['vocals'].text())
             self.assertEqual(dialog.states['speech'].text(), 'About 1.5 GB')
-            self.assertIn('1 of 4 installed', dialog.total.text())
+            self.assertIn('1 of 5 installed', dialog.total.text())
             dialog.close()
 
 

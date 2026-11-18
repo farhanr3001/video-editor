@@ -40,10 +40,11 @@ class Release:
     manifest: dict | None = None
     selection: dict | None = None
     incremental: bool = False
+    preview: bool = False
 
 
-def parse_release(data, current=VERSION):
-    if data.get("draft") or data.get("prerelease"):
+def parse_release(data, current=VERSION, *, allow_preview=False):
+    if data.get("draft") or data.get("prerelease") and not allow_preview:
         return None
     remote = str(data.get("tag_name", ""))
     if version_tuple(remote) <= version_tuple(current):
@@ -66,22 +67,33 @@ def parse_release(data, current=VERSION):
     if size <= 0 or size > 4 * 1024**3:
         raise ValueError("Invalid installer size")
     return Release(remote.lstrip("v"), url, digest.split(":", 1)[1].lower(), size,
-                   str(data.get("body", ""))[:12000], incremental=incremental)
+                   str(data.get("body", ""))[:12000], incremental=incremental,preview=bool(data.get('prerelease')))
 
 
-def check(current=VERSION, opener=urllib.request.urlopen):
-    request = urllib.request.Request(API, headers={"User-Agent": f"KineticCut/{VERSION}",
+def check(current=VERSION, opener=urllib.request.urlopen, *, channel='stable'):
+    if channel not in ('stable','preview'):raise ValueError('Unknown update channel')
+    request = urllib.request.Request(API if channel=='stable' else API.rsplit('/',1)[0]+'?per_page=5', headers={"User-Agent": f"KineticCut/{VERSION}",
                                                     "Accept": "application/vnd.github+json"})
     try:
         with opener(request, timeout=12) as response:
-            raw = response.read(MAX_METADATA + 1)
+            raw = response.read(MAX_METADATA*(8 if channel=='preview' else 1) + 1)
     except urllib.error.HTTPError as error:
         if error.code == 404:
             return None
         raise RuntimeError(f"Update server returned HTTP {error.code}. Please try again later.") from error
-    if len(raw) > MAX_METADATA:
+    if len(raw) > MAX_METADATA*(8 if channel=='preview' else 1):
         raise ValueError("Update information is too large")
-    release = parse_release(json.loads(raw), current)
+    data=json.loads(raw)
+    if channel=='preview':
+        if not isinstance(data,list):raise ValueError('Invalid release list')
+        releases=[]
+        for item in data:
+            try:
+                candidate=parse_release(item,current,allow_preview=True)
+                if candidate:releases.append(candidate)
+            except ValueError:continue
+        release=max(releases,key=lambda r:version_tuple(r.version),default=None)
+    else:release = parse_release(data, current)
     if release and release.incremental:
         from dataclasses import replace
         from .update_files import MAX_MANIFEST, validate_manifest
@@ -94,6 +106,36 @@ def check(current=VERSION, opener=urllib.request.urlopen):
     return release
 
 
+def repair_release(current=VERSION,opener=urllib.request.urlopen):
+    """Read the official inventory for this exact version, independently of local files."""
+    version_tuple(current)
+    request=urllib.request.Request(API.rsplit('/',1)[0]+'/tags/v'+current,headers={'User-Agent':'KineticCut-Repair'})
+    with opener(request,timeout=12) as response:raw=response.read(MAX_METADATA+1)
+    if len(raw)>MAX_METADATA:raise ValueError('Repair information exceeds its size limit')
+    data=json.loads(raw)
+    if data.get('draft') or data.get('tag_name')!='v'+current:raise ValueError('No official repair for this version')
+    assets=data.get('assets',[])
+    asset=next((a for name in (f'KineticCut-Update-{current}.json',f'KineticCut-Inventory-{current}.json') for a in assets if a.get('name')==name),None)
+    if not asset:raise RuntimeError('Repair files are not available for this version. Check for an application update.')
+    from .update_files import MAX_MANIFEST,validate_manifest
+    sha=str(asset.get('digest','')).removeprefix('sha256:');size=asset.get('size',0);url=asset.get('browser_download_url','')
+    if not trusted_download(url) or not re.fullmatch('[a-f0-9]{64}',sha) or not 0<size<=MAX_MANIFEST:raise ValueError('Invalid repair inventory')
+    with opener(urllib.request.Request(url,headers={'User-Agent':'KineticCut-Repair'}),timeout=12) as response:body=response.read(size+1)
+    if len(body)!=size or hashlib.sha256(body).hexdigest()!=sha:raise ValueError('Repair verification failed')
+    return Release(current,url,sha,size,manifest=validate_manifest(json.loads(body),current),incremental=True)
+
+def repair_installer(current=VERSION,opener=urllib.request.urlopen):
+    version_tuple(current)
+    request=urllib.request.Request(API.rsplit('/',1)[0]+'/tags/v'+current,headers={'User-Agent':'KineticCut-Repair'})
+    with opener(request,timeout=12) as response:raw=response.read(MAX_METADATA+1)
+    if len(raw)>MAX_METADATA:raise ValueError('Repair information exceeds its size limit')
+    data=json.loads(raw)
+    if data.get('tag_name')!='v'+current or data.get('draft'):raise ValueError('No official repair for this version')
+    asset=next((a for a in data.get('assets',[]) if a.get('name')==f'KineticCut-FullSetup-{current}.exe'),None)
+    if not asset:raise RuntimeError('The complete repair package is not available')
+    return parse_release(dict(data,assets=[dict(asset,name=f'KineticCut-Setup-{current}.exe')]),current='0.0.0',allow_preview=True)
+
+
 def download(release, directory, cancel, progress=lambda *_: None,
              opener=urllib.request.urlopen):
     version_tuple(release.version)
@@ -102,27 +144,5 @@ def download(release, directory, cancel, progress=lambda *_: None,
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / f"KineticCut-Setup-{release.version}.exe"
-    pending = target.with_suffix(".partial")
-    digest = hashlib.sha256(); done = 0
-    try:
-        request = urllib.request.Request(release.url, headers={"User-Agent": f"KineticCut/{VERSION}"})
-        with opener(request, timeout=30) as response, pending.open("wb") as stream:
-            while True:
-                if cancel.is_set():
-                    raise InterruptedError("Update download cancelled.")
-                chunk = response.read(256 * 1024)
-                if not chunk:
-                    break
-                done += len(chunk)
-                if done > release.size:
-                    raise ValueError("Installer exceeds its published size")
-                stream.write(chunk); digest.update(chunk)
-                progress(done, release.size)
-        if cancel.is_set():
-            raise InterruptedError("Update download cancelled.")
-        if done != release.size or digest.hexdigest() != release.sha256:
-            raise ValueError("Installer verification failed; no update was launched.")
-        pending.replace(target)
-        return target
-    finally:
-        pending.unlink(missing_ok=True)
+    from .verified_download import fetch
+    return fetch(release.url,release.sha256,release.size,target,cancel,progress,opener)

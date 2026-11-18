@@ -5,7 +5,8 @@ from PySide6.QtCore import Qt,QSize,QRect,QUrl,QTimer,QObject,Slot,QEvent,QPersi
 from PySide6.QtGui import QImage,QPixmap,QPainter,QColor,QIcon,QStandardItemModel
 from PySide6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
     QSlider,QStyledItemDelegate,QStyle,QHeaderView,QListWidget)
-from PySide6.QtMultimedia import QMediaPlayer,QAudioOutput
+from PySide6.QtMultimedia import QMediaPlayer
+from .audio_output import QAudioOutput
 from .media_source import set_media_source
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from .controls import SafeSlider as QSlider

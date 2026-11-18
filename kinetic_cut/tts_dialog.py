@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (
     QSlider, QPushButton, QCheckBox, QGroupBox, QFormLayout,
     QProgressBar, QMessageBox, QWidget, QFrame, QDialogButtonBox, QScrollArea
 )
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimedia import QMediaPlayer
+from .audio_output import QAudioOutput
 
 from .config import CACHE_DIR
 from .controls import SafeComboBox

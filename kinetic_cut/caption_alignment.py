@@ -147,6 +147,38 @@ def refine_speech_edges(audio,words,speech):
 def usable_words(words,start,end,require_exact=False):
     """Preserve collapsed recognized tokens, but never call interpolation exact."""
     from .captions import CaptionBackendError
+    if not require_exact:
+        import math
+        for word in words:
+            if not math.isfinite(word['start']) or not math.isfinite(word['end']):
+                raise CaptionBackendError('The recognizer returned invalid word timestamps.')
+            bounded_start=max(start,min(end,word['start']))
+            bounded_end=max(start,min(end,word['end']))
+            if (bounded_start,bounded_end)!=(word['start'],word['end']):
+                word['start']=bounded_start;word['end']=bounded_end;word['confidence']=0.
+        # Repair a collapsed run together. Repairing one token at a time used
+        # up the tiny borrowed tail after a few words and failed the whole job.
+        # These remain reviewable estimates, never exact audio-edit boundaries.
+        index=0
+        while index<len(words):
+            if words[index]['end']>words[index]['start']:
+                index+=1;continue
+            stop=index+1
+            while stop<len(words) and words[stop]['end']<=words[stop]['start']:stop+=1
+            count=stop-index
+            previous=words[index-1] if index else None
+            left=previous['end'] if previous else start
+            right=min(end,words[stop]['start']) if stop<len(words) else end
+            left=max(left,min(words[index]['start'],right-.04*count))
+            if left>=right and previous:
+                left=max(previous['start']+.001,right-.04*count)
+                if left<right:previous['end']=left;previous['confidence']=0.
+            if left<right:
+                right=min(right,left+.06*count)
+                step=(right-left)/count
+                for n,word in enumerate(words[index:stop]):
+                    word['start']=left+n*step;word['end']=right if n==count-1 else left+(n+1)*step;word['confidence']=0.
+            index=stop
     # Resolve only boundary overlaps. Never delete a token because DTW collapsed it.
     for index,word in enumerate(words):
         if word['end']<=word['start']:
@@ -168,6 +200,16 @@ def usable_words(words,start,end,require_exact=False):
             elif require_exact:raise CaptionBackendError('Conflicting word timestamps. Audio was not changed.')
             else:
                 if previous['end']>=end:
-                    raise CaptionBackendError('The recognizer returned conflicting timestamps beyond the audio range.')
-                word['start']=previous['end'];word['end']=min(end,max(word['end'],word['start']+.02));word['confidence']=0.
+                    # A refined/recognized tail can be out of order at the
+                    # window edge. Estimate only its overlapping neighborhood;
+                    # keep every token and mark all affected timing uncertain.
+                    first=index-1;left=max(start,min(previous['start'],word['start']))
+                    while first and words[first-1]['end']>left:
+                        first-=1;left=max(start,min(left,words[first]['start']))
+                    if left>=end:raise CaptionBackendError('The recognizer returned conflicting timestamps beyond the audio range.')
+                    count=index-first+1;step=(end-left)/count
+                    for n,target in enumerate(words[first:index+1]):
+                        target['start']=left+n*step;target['end']=end if n==count-1 else left+(n+1)*step;target['confidence']=0.
+                else:
+                    word['start']=previous['end'];word['end']=min(end,max(word['end'],word['start']+.02));word['confidence']=0.
     return words

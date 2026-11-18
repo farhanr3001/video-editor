@@ -1,4 +1,24 @@
 """Phase-one native freeze investigation: ordinary mixed editing at three cadences."""
+
+def saved_session_recovery(window):
+    """Inspect this window's current document, excluding legacy/other sessions."""
+    import json,re
+    from . import recovery_store as store
+    from .model import Project
+    from .close_guard import document_key
+    token=getattr(window,'_recovery_session','')
+    if not re.fullmatch('[a-f0-9]{32}',token):raise AssertionError('No recovery session was registered')
+    document=window.compounds.root();matches=[]
+    for path in (store.root()/token).glob('*/latest.kcut'):
+        body=json.loads(path.read_text(encoding='utf-8'));meta=body.get('_recovery',{})
+        if meta.get('session')==token and meta.get('source','')==document.path and body.get('created_at')==document.created_at:
+            matches.append(path)
+    if len(matches)!=1:raise AssertionError('Expected one latest recovery copy for the current session/document')
+    path=matches[0]
+    if document_key(Project.load(path))!=document_key(document):raise AssertionError('Recovery copy does not contain the latest edit')
+    if (store.root()/'sessions'/(token+'.json')).exists():raise AssertionError('Normal close did not retire the recovery session')
+    return path
+
 def run(output):
     import os,sys,time,json,copy,wave,math,struct,hashlib,traceback,subprocess
     from pathlib import Path
@@ -148,8 +168,9 @@ def run(output):
         window.autosave();window.close();deadline=time.monotonic()+20
         while window.isVisible() and time.monotonic()<deadline:wait(30)
         check('normal close drains writes and workers',not window.isVisible() and not window._workers)
-        from .config import AUTOSAVE_PATH,SETTINGS_PATH
-        check('recovery file contains latest edit',Project.load(AUTOSAVE_PATH).name==window.project.name)
+        from .config import SETTINGS_PATH
+        report['recovery_copy']=str(saved_session_recovery(window).relative_to(out))
+        check('current-session recovery contains latest edit and retires on normal close',True)
         check('preferences remain valid JSON',isinstance(json.loads(SETTINGS_PATH.read_text()),dict))
         check('test source media unchanged',all(digest(Path(p))==value for p,value in protected.items()))
         report['passed']=True

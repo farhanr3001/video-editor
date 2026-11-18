@@ -203,9 +203,11 @@ def get_icon_color(theme_key: str = "default") -> str:
 
 
 def get_theme_stylesheet(theme_key: str = "default") -> str:
+    from .icons import resource_path
     p = PALETTES.get(theme_key) or PALETTES["default"]
     is_light = bool(p.get("is_light", False))
     tab_border = p["accent"]
+    combo_arrow = resource_path('assets', 'icons', 'dropdown-chevron' + ('-dark' if is_light else '') + '.svg').as_posix()
 
     return f"""
 /* --- Core Base --- */
@@ -358,7 +360,7 @@ QComboBox {{
     border: 1px solid {p["border"]};
     border-radius: 4px;
     padding: 4px 8px;
-    padding-right: 24px;
+    padding-right: 28px;
     min-height: 20px;
     selection-background-color: {p["bg_selected"]};
     selection-color: {p["text_selected"]};
@@ -378,22 +380,20 @@ QComboBox:disabled {{
 QComboBox::drop-down {{
     subcontrol-origin: padding;
     subcontrol-position: top right;
-    width: 20px;
-    border-left: 1px solid {p["border_subtle"]};
-    background: {p["bg_panel"]};
-    border-top-right-radius: 4px;
-    border-bottom-right-radius: 4px;
+    width: 26px;
+    border: none;
+    background: transparent;
 }}
 QComboBox::drop-down:hover {{
-    background: {p["bg_hover"]};
+    background: transparent;
 }}
 QComboBox::down-arrow {{
-    width: 0;
-    height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid {p["text_main"]};
-    margin: auto;
+    image: url("{combo_arrow}");
+    width: 14px;
+    height: 14px;
+    border: none;
+    background: transparent;
+    margin: 0;
 }}
 QComboBox QAbstractItemView {{
     background-color: {p["bg_surface"]};

@@ -48,6 +48,43 @@ class WordBoundaryTests(unittest.TestCase):
         preserve_fillers(words,[(.05,1)])
         self.assertAlmostEqual(words[0]['end'],.7)
 
+    def test_collapsed_tail_run_preserves_every_token_and_stays_inside_audio(self):
+        for count in (1,4,12):
+            words=[dict(text='say',start=0.,end=1.)]+[dict(text=str(n),start=1.,end=1.) for n in range(count)]
+            usable_words(words,0,1)
+            self.assertEqual(len(words),count+1)
+            self.assertTrue(all(0<=w['start']<w['end']<=1 for w in words))
+            self.assertTrue(all(a['end']<=b['start'] for a,b in zip(words,words[1:])))
+            self.assertTrue(all(w['confidence']==0 for w in words[1:]))
+        with self.assertRaises(CaptionBackendError):
+            usable_words([dict(text='tail',start=1.,end=1.) for _ in range(4)],0,1,True)
+
+    def test_collapsed_group_at_window_start_retains_next_measured_word(self):
+        words=[dict(text=str(n),start=0.,end=0.) for n in range(5)]+[dict(text='next',start=.2,end=.5)]
+        usable_words(words,0,.5)
+        self.assertEqual((words[-1]['start'],words[-1]['end']),(.2,.5))
+        self.assertTrue(all(a['end']<=b['start'] and a['start']<a['end'] for a,b in zip(words,words[1:])))
+
+    def test_recognized_tail_beyond_window_keeps_tokens_as_reviewable_estimates(self):
+        words=[dict(text='say',start=.8,end=1.2),dict(text='it',start=1.,end=1.1)]
+        usable_words(words,0,1)
+        self.assertEqual([w['text'] for w in words],['say','it'])
+        self.assertTrue(all(0<=w['start']<w['end']<=1 for w in words))
+        self.assertTrue(all(w['confidence']==0 for w in words));self.assertEqual(words[0]['end'],words[1]['start'])
+
+    def test_conflicting_window_tail_repairs_local_cluster_and_exact_edit_still_refuses(self):
+        words=[dict(text='before',start=0.,end=.5),dict(text='say',start=.9,end=1.),dict(text='it',start=.7,end=.8)]
+        import copy
+        with self.assertRaises(CaptionBackendError):usable_words(copy.deepcopy(words),0,1,True)
+        usable_words(words,0,1)
+        self.assertEqual((words[0]['start'],words[0]['end']),(0.,.5))
+        self.assertTrue(all(a['end']<=b['start'] for a,b in zip(words,words[1:])))
+        self.assertTrue(all(w['start']<w['end']<=1 for w in words));self.assertTrue(all(w['confidence']==0 for w in words[1:]))
+
+    def test_invalid_nonfinite_word_timing_is_not_disguised_as_an_estimate(self):
+        for value in (float('nan'),float('inf'),float('-inf')):
+            with self.assertRaises(CaptionBackendError):usable_words([dict(text='bad',start=value,end=1.)],0,1)
+
     def test_card_size_changes_neither_onsets_nor_spoken_tails(self):
         words=[dict(text='Best',start=1.15,end=1.46),dict(text='music',start=1.70,end=1.96),dict(text='um',start=2.1,end=3.2),dict(text='yes',start=3.6,end=4)]
         for size in (1,2,3,4,8,12):

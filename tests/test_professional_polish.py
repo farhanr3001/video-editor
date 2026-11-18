@@ -37,7 +37,17 @@ class PolishTests(unittest.TestCase):
         self.window.timeline.select_ids({"v"},"v"); self.app.processEvents()
 
     def tearDown(self):
-        self.window.close(); self.app.processEvents()
+        import time
+        from PySide6.QtCore import QEvent, QEventLoop, QTimer
+        self.window.close()
+        deadline = time.monotonic() + 10
+        while (self.window.isVisible() or self.window._workers) and time.monotonic() < deadline:
+            loop = QEventLoop(); QTimer.singleShot(10, loop.quit); loop.exec()
+        self.assertFalse(self.window._workers)
+        self.assertFalse(self.window.isVisible())
+        self.window.deleteLater()
+        self.app.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.app.processEvents()
 
     def project_key(self):
         return self.window._history_key(self.window.project)

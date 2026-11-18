@@ -5,7 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from PySide6.QtCore import Qt, QTimer, QUrl, QEvent, Slot
 from PySide6.QtGui import QImage
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoFrame
+from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame
+from .audio_output import QAudioOutput
 from PySide6.QtWidgets import QPushButton, QScrollArea, QSplitter, QLineEdit, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QMenu
 from .tracking_dialog import LegacyTrackingDialog
 

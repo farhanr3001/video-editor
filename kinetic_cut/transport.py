@@ -6,7 +6,8 @@ from .activity_log import record as record_action
 from .process import run as run_process
 from .audio_levels import channel_peaks
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot, Qt, QMetaObject, QThreadPool
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink, QAudioBufferOutput
+from PySide6.QtMultimedia import QMediaPlayer, QVideoSink, QAudioBufferOutput
+from .audio_output import QAudioOutput
 
 
 class TimelineTransport(QObject):

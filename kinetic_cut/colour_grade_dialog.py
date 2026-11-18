@@ -5,7 +5,8 @@ from pathlib import Path
 from PySide6.QtCore import QDeadlineTimer, QEvent, QPointF, QRectF, QSize, QSignalBlocker, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import (QColor, QConicalGradient, QKeySequence,
                            QPainter, QPen, QRadialGradient, QShortcut, QVector2D, QVector4D)
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QMediaPlayer
+from .audio_output import QAudioOutput
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
                                QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QSizePolicy, QSlider,
                                QStyle, QStyleOptionSlider, QTabWidget, QVBoxLayout, QWidget)

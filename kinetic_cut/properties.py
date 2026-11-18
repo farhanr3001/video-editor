@@ -7,7 +7,8 @@ from threading import Event
 from dataclasses import asdict
 from PySide6.QtCore import Qt, Signal, QUrl, Slot
 from PySide6.QtGui import QColor, QFontDatabase,QTextCursor
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimedia import QMediaPlayer
+from .audio_output import QAudioOutput
 from .media_source import set_media_source
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QGridLayout,QLabel,QSlider,
     QToolButton,QTabWidget,QStackedWidget,QScrollArea,QCheckBox,QPlainTextEdit,
@@ -51,6 +52,7 @@ class ValueRow(QWidget):
             self.spin.setValue(max_val)
     def scrub_history(self,active):
         window=self.window()
+        window=getattr(window,'editor_window',window)
         if hasattr(window,"commit_history"):
             window._property_scrubbing=active
             if not active:window.commit_history(); window.inspector.select(window.inspector.item_id)

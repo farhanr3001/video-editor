@@ -7,6 +7,7 @@ DIAGNOSTIC_CLEANUP = False
 def document_key(project):
     data = project.to_dict()
     def clean(body):
+        for timeline in body.get('other_timelines',[]):clean(timeline['data'])
         for field in ('modified_at', 'playhead', 'path', 'render_history'):
             body.pop(field, None)
         for media in body.get('media', []):
@@ -27,7 +28,7 @@ def has_unsaved(window):
     """True when closing now would lose work: a saved project that changed, or an unsaved one with content."""
     window.flush_text_edit()
     document = window.compounds.root()
-    if not document.path and not (document.timeline or document.captions):
+    if not document.path and not (document.timeline or document.captions or document.other_timelines):
         return False
     if document.path and getattr(window, '_saved_close_key', None) == document_key(document):
         return False

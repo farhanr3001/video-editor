@@ -181,26 +181,34 @@ def native_prepare(root, manifest_path, baseline_path):
 
 def run(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['apply', 'recover', 'quiesce', 'native-prepare', 'native-commit', 'native-rollback'])
+    parser.add_argument('command', choices=['apply', 'repair', 'recover', 'quiesce', 'native-prepare', 'native-commit', 'native-rollback'])
     parser.add_argument('path', type=Path)
     parser.add_argument('--wait-pid', type=int, default=0)
     parser.add_argument('--manifest', type=Path); parser.add_argument('--baseline', type=Path)
     parser.add_argument('--no-restart', action='store_true')
     parser.add_argument('--quiet', action='store_true')
     args = parser.parse_args(argv)
-    log_dir = args.path.parent if args.command == 'apply' else args.path / '.kinetic-update'
+    log_dir = args.path.parent if args.command in ('apply','repair') else args.path / '.kinetic-update'
     if args.command=='quiesce':
         import tempfile
         log_dir=Path(tempfile.gettempdir())/'KineticCut-update-check'
     root = args.path
-    if args.command == 'apply':root = Path(json.loads(args.path.read_text(encoding='utf-8'))['root'])
+    if args.command in ('apply','repair'):root = Path(json.loads(args.path.read_text(encoding='utf-8'))['root'])
     try:
         wait_process(args.wait_pid)
         if args.command=='quiesce':wait_installation(root)
-        elif args.command == 'apply':
+        elif args.command in ('apply','repair'):
+            from .version import VERSION
             files.apply_job(args.path, lambda: probe(root, args.path.parent / 'verification'),
-                            replace=replace_with_retry,before_apply=prepare_installation)
+                            replace=replace_with_retry,before_apply=prepare_installation,repair_version=VERSION if args.command=='repair' else None)
             shutil.rmtree(args.path.parent / 'files', ignore_errors=True)
+            try:
+                job=json.loads(args.path.read_text(encoding='utf-8'))
+                for key in job['manifest']['bundles']:
+                    for suffix in ('.zip','.zip.partial','.zip.partial.json'):(args.path.parent/(key+suffix)).unlink(missing_ok=True)
+            except (OSError,ValueError):
+                import logging
+                logging.warning('Update completed; download cache cleanup was deferred')
         elif args.command in ('recover', 'native-rollback'):
             wait_installation(root);files.rollback(root)
         elif args.command == 'native-prepare':
@@ -208,13 +216,13 @@ def run(argv=None):
         elif args.command == 'native-commit':
             manifest = files.validate_manifest(json.loads((root / files.MANIFEST).read_text(encoding='utf-8')))
             files.commit(root, lambda: (files.verify_install(root, manifest), probe(root, Path(sys.executable).parent / 'verification')))
-        if args.command in ('apply', 'recover') and not args.no_restart:
+        if args.command in ('apply', 'repair', 'recover') and not args.no_restart:
             subprocess.Popen([str(root / 'KineticCut.exe')], cwd=root)
         return 0
     except Exception as error:
         log_dir.mkdir(parents=True, exist_ok=True)
         message = traceback.format_exc(); (log_dir / 'update-error.log').write_text(message, encoding='utf-8')
-        if args.command in ('apply', 'recover'):
+        if args.command in ('apply', 'repair', 'recover'):
             if isinstance(error,ApplicationBusy):detail=str(error)
             elif isinstance(error,PermissionError):detail='Windows is still blocking an application file. Close all Kinetic Cut windows and AI connections, then retry the normal update. The previous application was restored where possible.'
             else:detail='The update could not finish. The previous application was restored where possible.\n\n'+message.splitlines()[-1]

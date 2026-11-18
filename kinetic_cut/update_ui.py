@@ -25,7 +25,7 @@ class UpdateDialog(QDialog):
         set_ui_icon(icon, 'download' if release else 'check' if state == 'current' else 'refresh-cw', size=24)
         header.addWidget(icon, 0, Qt.AlignTop)
         headings = dict(current="You're up to date", checking="Checking for updates", error="Unable to check for updates")
-        self.heading = QLabel("Update available" if release else headings.get(state, "Check for updates"))
+        self.heading = QLabel(("Preview update available" if release.preview else "Update available") if release else headings.get(state, "Check for updates"))
         self.heading.setTextFormat(Qt.PlainText); self.heading.setWordWrap(True)
         set_ui_style(self.heading, 'font-size:16px; font-weight:600; color:@text_main;')
         header.addWidget(self.heading, 1); layout.addLayout(header)
@@ -91,7 +91,7 @@ class UpdateController(QObject):
             self.dialog = UpdateDialog(self.window, message="Contacting GitHub for the latest release…", state="checking")
             self.dialog.rejected.connect(cancelled.set)
             self.dialog.show()
-        worker = Worker(updates.check)
+        worker = Worker(lambda:updates.check(channel=self.window.settings.get('update_channel','stable')))
         worker.signals.result.connect(lambda release: self.checked(release,startup,cancelled))
         worker.signals.error.connect(lambda error: self.failed(error,startup,cancelled))
         self._start_worker(worker)
@@ -159,14 +159,13 @@ class UpdateController(QObject):
         progress.canceled.connect(cancel.set); progress.show()
         if release.incremental:
             from .update_files import stage_update
-            import uuid, shutil
-            # One pending update only; finished downloads/backups never accumulate per version.
+            import uuid
+            # Shared verified bundle cache resumes across restarts; each editor
+            # owns a separate extraction/job directory until it has installed.
             update_cache = CACHE_DIR / 'updates'; update_cache.mkdir(parents=True, exist_ok=True)
-            for previous in update_cache.glob('pending-*'):
-                if previous.is_dir():shutil.rmtree(previous)
-            directory = CACHE_DIR / 'updates' / ('pending-' + uuid.uuid4().hex)
+            directory = update_cache / ('pending-' + uuid.uuid4().hex)
             worker = Worker(lambda: stage_update(Path(sys.executable).parent, release.manifest, release.selection,
-                                                directory, cancel, lambda value, text: worker.signals.progress.emit(value)))
+                                                directory, cancel, lambda value, text: worker.signals.progress.emit(value),download_cache=update_cache/'payloads'))
         else:
             worker = Worker(lambda: updates.download(release, CACHE_DIR / "updates", cancel,
                                                     lambda done, total: worker.signals.progress.emit(round(done/total*100))))
@@ -182,25 +181,29 @@ class UpdateController(QObject):
         progress.close(); self.busy=False
         if not was_cancelled:self.failed(error)
 
-    def ready(self, path, progress, incremental=False, cancelled=None):
+    def ready(self, path, progress, incremental=False, cancelled=None, repair=False):
         from PySide6.QtWidgets import QMessageBox
         from .process import popen
+        from .update_files import discard_staged
+        def discard():
+            if incremental:discard_staged(path)
         was_cancelled=cancelled and cancelled.is_set()
         progress.close(); self.busy = False
-        if was_cancelled:return
+        if was_cancelled:discard();return
         if self.window.transport.closed:
+            discard()
             return
-        answer = QMessageBox.question(self.window, "Update ready",
-                                      "The update is verified. Save your work before closing the editor.\n\n"
-                                      "Close Kinetic Cut and install the update now?")
+        answer = QMessageBox.question(self.window, "Repair ready" if repair else "Update ready",
+                                      ("Repair files are verified. Save your work before closing the editor.\n\nClose Kinetic Cut and complete the repair now?" if repair else
+                                      "The update is verified. Save your work before closing the editor.\n\nClose Kinetic Cut and install the update now?"))
         if answer == QMessageBox.Yes:
             if incremental:
                 import os, shutil
                 helper = Path(sys.executable).parent / 'KineticCutUpdater.exe'
                 copied = Path(path).parent / helper.name
                 try:shutil.copy2(helper, copied)
-                except OSError as error:self.failed(str(error)); return
-                command=[str(copied), 'apply', str(path), '--wait-pid', str(os.getpid())]
+                except OSError as error:self.failed(str(error));discard();return
+                command=[str(copied), 'repair' if repair else 'apply', str(path), '--wait-pid', str(os.getpid())]
             else:command=[str(path)]
             # Shutdown may be deferred while cancellable editing jobs settle.
             # A rejected Save/Cancel prompt must never launch the updater later.
@@ -214,4 +217,5 @@ class UpdateController(QObject):
                 popen(command)
             signal.connect(launch)
             if self.window.close():launch()
-            elif not getattr(self.window,'_closing',False):signal.disconnect(launch)
+            elif not getattr(self.window,'_closing',False):signal.disconnect(launch);discard()
+        else:discard()

@@ -165,6 +165,7 @@ class CompositionCache:
             # Only one composition runs at a time; renderer inputs are read-only.
             if self.template_signature!=signature:
                 snapshot=copy.copy(p)
+                snapshot.other_timelines=[]
                 snapshot.settings=copy.deepcopy(p.settings); snapshot.subtitle_style=copy.deepcopy(p.subtitle_style)
                 snapshot.timeline=copy.deepcopy(items); snapshot.transitions=copy.deepcopy(transitions)
                 snapshot.captions=[]

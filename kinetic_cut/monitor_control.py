@@ -20,7 +20,8 @@ class MonitorControl(QWidget):
             self.update_layout()
         return super().eventFilter(watched,event)
     def update_layout(self):
-        compact=self.window.width()<1200
+        workspace=getattr(self.window,'timeline_workspace',None)
+        compact=self.window.width()<1200 or bool(workspace and workspace.active and self.window.timeline_panel.width()<1000)
         if compact==self.compact:return
         self.compact=compact
         if self._menu:self._menu.close()

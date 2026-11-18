@@ -54,7 +54,9 @@ class UpdateMenuUITests(unittest.TestCase):
             window = MainWindow(); window.show(); self.app.processEvents()
             try:
                 menus = {a.text():a.menu() for a in window.menuBar().actions()}
-                self.assertEqual(set(menus), {'File', 'Edit', 'Workflow'})
+                self.assertEqual(set(menus), {'File', 'Edit', 'Workflow','Help'})
+                self.assertIn('Repair application…',[a.text() for a in menus['Help'].actions()])
+                self.assertIn('About Kinetic Cut…',[a.text() for a in menus['Help'].actions()])
                 self.assertEqual([a.text() for a in menus['Workflow'].actions()], ['Settings…'])
                 names = [a.text() for a in menus['File'].actions()]
                 self.assertNotIn('Collect project and media…', names)

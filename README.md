@@ -36,6 +36,15 @@ colours and local undo/redo; Apply creates one editor undo step.
 The Media/Effects workspace gives the timeline the full window width. The Effects
 library includes search, favourites, recent items and effect-specific previews.
 
+Projects can contain multiple named timelines with a shared media pool and
+clipboard, independent editing history and separate render-queue snapshots.
+Fullscreen Timeline Mode expands the layers beside a resizable preview, with
+floating Media, Effects and Inspector panels and bottom editing controls.
+Help includes application repair, version details and support reports. Interrupted
+sessions offer recoverable project copies; recovery storage is included in the
+cache manager. An optional downloadable offline English voice is available.
+Audio playback follows output changes made in Windows Volume Mixer.
+
 ## Effects and performance
 
 GPU preview composition keeps timeline navigation responsive during playback.
@@ -111,3 +120,43 @@ configuration. Browser-only Claude cannot connect directly to this local bridge.
 
 Setup follows the [MCP local-server guide](https://modelcontextprotocol.io/docs/develop/connect-local-servers)
 and [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
+
+## Reliability and release checks (development)
+
+Run `python scripts/check_project.py build/checkpoint` for the complete isolated
+source suite. Each module gets a fresh profile, a deadline, fault traces and its
+own log. Passing reports include the source fingerprint; zero-test modules fail.
+Add actual test filenames after the output directory for an affected-scope run.
+GitHub Actions runs source checks on pushes and pull requests, preserving reports.
+Hosted source checks do not replace native Windows/GPU and installation checks.
+Once the candidate has been built and safely installed, `python scripts/check_release.py build/release-check-<unique-name>`
+runs all four milestones and seals the release evidence in one command. It never
+replaces an open editor or publishes anything. Pass `--offline-fixture <verified-runtime-folder>`
+to include real offline narration in the packaged checks.
+
+`python scripts/reproduce.py --help` lists reusable native reproductions. They run
+on a private desktop with disposable profiles. The speech-service case contacts
+the free online service using fixed diagnostic text; offline narration is an
+explicit optional download, never an implicit test dependency.
+
+Use `python scripts/verify_package.py <exe> <output> --kind staged` and again with
+`--kind installed` after safe local installation. These check packaged source,
+managed files, startup, Help and recovery UI in all themes. Use
+`python scripts/verify_installer.py build/installer-check-<unique-name>` after
+generating installer sizes: it compiles a separate-identity/no-shortcuts test
+installer, checks install/upgrade/owned-helper closure/startup/uninstall and keeps
+the second-phase uninstall log. No installed ownership log is copied elsewhere.
+
+Before release, build the current payloads and installers. For a one-time full
+installer update, run `python scripts/release_gate.py prepare-installer-channel`
+before sealing the evidence. Then run:
+
+```
+python scripts/release_gate.py seal build/release-gate.json --source <checkpoint/report.json> --staged <staged/report.json> --installed <installed/report.json> --installer <installer/report.json>
+```
+
+Release uploads require `scripts/publish_release.py --gate build/release-gate.json`.
+The gate rejects stale source, incomplete milestones and changed release files.
+`--preview` publishes an opt-in GitHub prerelease; Stable users stay on the normal
+stable channel. Public publication still requires the owner's explicit instruction.
+Never label an unexecuted hosted run, native workflow or installation as passed.

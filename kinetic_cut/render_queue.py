@@ -5,7 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt,QSize,QEvent
 from PySide6.QtWidgets import QWidget,QHBoxLayout,QVBoxLayout,QLabel,QToolButton,QSizePolicy,QComboBox,QScrollArea,QLayout
 from .controls import SafeComboBox
-from .icons import lucide_icon,resource_path
+from .icons import lucide_icon
 
 class FixedFormScroll(QScrollArea):
     """Only scroll vertically; recompute wrapping instead of hiding wide rows."""
@@ -24,8 +24,6 @@ class RecentLocations(SafeComboBox):
     def __init__(self,settings):
         super().__init__(); self.setEditable(True); self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert); self.setMaxVisibleItems(5); self.setMinimumWidth(0)
         self.setCompleter(None)
-        arrow=resource_path('assets','icons','dropdown-chevron.svg').as_posix()
-        set_ui_style(self, 'QComboBox::down-arrow { image: url("@arrow_combo"); width: 12px; height: 12px; } QComboBox::drop-down { width: 22px; }')
         self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon); self.setMinimumContentsLength(8)
         self.addItems(settings.get('export_recent_locations',[])[:5]); self.setEditText(self.itemText(0) or str(Path.home()/'Videos'))
     def text(self):return self.currentText()

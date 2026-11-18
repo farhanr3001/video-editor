@@ -168,7 +168,17 @@ class AutoLayoutUiTests(unittest.TestCase):
             self.w.project.add_track('video')
 
     def tearDown(self):
-        self.w.close(); self.w.deleteLater(); self.app.processEvents()
+        import time
+        from PySide6.QtCore import QEvent, QEventLoop, QTimer
+        self.w.close()
+        deadline = time.monotonic() + 10
+        while (self.w.isVisible() or self.w._workers) and time.monotonic() < deadline:
+            loop = QEventLoop(); QTimer.singleShot(10, loop.quit); loop.exec()
+        self.assertFalse(self.w._workers)
+        self.assertFalse(self.w.isVisible())
+        self.w.deleteLater()
+        self.app.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.app.processEvents()
 
     def run_deferred(self):
         for _ in range(5):

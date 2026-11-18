@@ -72,7 +72,7 @@ class InstallComponentDialog(QDialog):
         super().__init__(parent); self.key = key; self.cancel = threading.Event(); self.running = False; self._closed=False; self._job=None
         item = feature_packs.manifest().get(key, {})
         name = item.get('name', {
-                                 'vision':'Face / background tools','vocals':'Vocal separation','enhance':'AI Enhance','speech':'Caption model (large-v3-turbo)'}[key])
+                                 'vision':'Face / background tools','vocals':'Vocal separation','enhance':'AI Enhance','speech':'Caption model (large-v3-turbo)','offline-speech':'Offline English voice'}[key])
         self.setWindowTitle('Download ' + name); self.resize(510,260)
         layout = QVBoxLayout(self)
         self.status = QLabel(name + ' is an optional download.'); self.status.setWordWrap(True); layout.addWidget(self.status)
@@ -81,6 +81,7 @@ class InstallComponentDialog(QDialog):
         else:info = 'Installed size: about ' + size_label(estimated_bytes(key))
         if key=='speech':info='Download and installed size: about '+size_label(estimated_bytes('speech'))+'\n\n'+SPEECH_INFO
         if key=='enhance':info='Download: approximately 350-450 MB\n'+info+'\nLocal GPU restoration with motion-aware stabilization; playback uses cached frames.'
+        if key=='offline-speech':info+='\n\nA natural English female voice that works without an internet connection after download. Your text stays on this computer. This is a separate voice, not an offline copy of the online narrators.\n\nPiper / eSpeak NG; LJ Speech dataset (public domain). Notices are included with the download.'
         details = QLabel(info + '\nYour projects, sources and Power Bin are preserved.'); details.setWordWrap(True); layout.addWidget(details)
         self.cuda=None
         if key=='enhance':
@@ -268,6 +269,7 @@ def estimated_bytes(key):
 
 
 CATALOG = (
+    ('offline-speech','Offline English voice','audio-lines','Optional narration that works without an internet connection after download.'),
     ('speech', 'Caption model (large-v3-turbo)', 'captions',
      'More accurate speech recognition for generated captions.'),
     ('vision', 'Face / background tools', 'smile',

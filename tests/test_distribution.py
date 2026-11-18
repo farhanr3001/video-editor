@@ -44,14 +44,16 @@ class DistributionTests(unittest.TestCase):
             updates.check(opener=lambda *a, **k: (_ for _ in ()).throw(urllib.error.HTTPError('url',403,'limited',{},None)))
         self.assertIsNone(updates.check(opener=lambda *a, **k: (_ for _ in ()).throw(urllib.error.HTTPError('url',404,'none',{},None))))
 
-    def test_verified_download_and_cancel_leave_no_partial(self):
+    def test_verified_download_reuses_cache_rejects_corruption_and_cancel(self):
         release = updates.parse_release(self.data())
         with tempfile.TemporaryDirectory() as temp:
             path = updates.download(release, temp, threading.Event(), opener=lambda *a, **k: Response(b'installer'))
             self.assertEqual(path.read_bytes(), b'installer')
+            updates.download(release,temp,threading.Event(),opener=lambda *a,**k:self.fail('Verified installer should be reused'))
+            path.write_bytes(b'previous installer')
             with self.assertRaises(ValueError):
                 updates.download(release, temp, threading.Event(), opener=lambda *a, **k: Response(b'corrupted'))
-            self.assertEqual(path.read_bytes(), b'installer')
+            self.assertEqual(path.read_bytes(), b'previous installer')
             cancel = threading.Event(); cancel.set()
             with self.assertRaises(InterruptedError):
                 updates.download(release, temp, cancel, opener=lambda *a, **k: Response(b'installer'))

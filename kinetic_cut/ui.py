@@ -20,7 +20,8 @@ configure_playback(_playback_settings())
 
 from PySide6.QtCore import QObject, QRunnable, QSize, QThreadPool, QTimer, QUrl, Qt, Signal, Slot, QEventLoop
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QCursor, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
+from PySide6.QtMultimedia import QMediaPlayer, QVideoSink
+from .audio_output import QAudioOutput
 from .media_source import set_media_source
 from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox, QDialog,
                                QDialogButtonBox, QDockWidget, QDoubleSpinBox, QFileDialog,
@@ -256,6 +257,8 @@ class MainWindow(QMainWindow):
         self.transport.levelsChanged.connect(self.inspector.set_audio_levels)
         from .compound_ui import CompoundController
         self.compounds=CompoundController(self)
+        from .timeline_sessions import TimelineSessions
+        self.timeline_sessions=TimelineSessions(self)
         self.transport.stateChanged.connect(lambda playing:self.play_button.setIcon(lucide_icon("pause" if playing else "play")))
         self.transport.stateChanged.connect(lambda playing:self.preview.set_transform_controls_visible(not playing and self.current_page==0 and self.transform_box_tool.isChecked()))
         self.transport.stateChanged.connect(self.preview.set_playback_active)
@@ -274,11 +277,10 @@ class MainWindow(QMainWindow):
         self.header_actions_layout.insertWidget(0,self.assistant_button)
         self.assistant_connection.changed.connect(self.assistant_connection.refresh_button)
         self.assistant_connection.refresh_button()
-        crashed_previous=SESSION_LOCK_PATH.exists() and AUTOSAVE_PATH.exists() and AUTOSAVE_PATH.stat().st_size>50
-        try:
-            import time
-            SESSION_LOCK_PATH.write_text(f"pid={os.getpid()}\ntime={time.time()}\n",encoding="utf-8")
-        except Exception:logging.exception("Could not write active session lock")
+        from .recovery_store import has_crashed
+        crashed_previous=has_crashed()
+        # Recovery sessions own independent markers. Do not overwrite a legacy
+        # crash marker before offering it, or another editor's active marker.
 
         if crashed_previous:self.when_app_loaded(self.check_crash_recovery)
         active_theme = self.settings.get("ui_theme", "default")
@@ -293,6 +295,8 @@ class MainWindow(QMainWindow):
     def build_actions(self):
         self.editing_actions=[]
         file_menu=self.menuBar().addMenu("File"); edit_menu=self.menuBar().addMenu("Edit"); workflow=self.menuBar().addMenu("Workflow")
+        from .help_ui import install_menu
+        install_menu(self)
 
         # File menu
         act_new = QAction("New project", self); act_new.triggered.connect(self.new_project); act_new.setShortcut(QKeySequence("Ctrl+N")); file_menu.addAction(act_new)
@@ -357,14 +361,20 @@ class MainWindow(QMainWindow):
     def set_project(self,project:Project):
         record_action('project.switch',name=project.name,path=project.path,items=len(project.timeline),captions=len(project.captions))
         self.flush_text_edit()
+        if project is not self.project:
+            # Inference belongs to the document that started it. Stop that
+            # caption job promptly instead of occupying the engine after Open/New.
+            caption_cancel=getattr(self,'_caption_cancel',None)
+            if caption_cancel is not None:caption_cancel.set()
         self._waveform_wanted=set()
-        if getattr(self,"current_page",0):
+        if getattr(self,"current_page",0) and not getattr(self,'_switching_timeline',False):
             from .workspace import set_page
             set_page(self,0)
         if hasattr(self,"transport"):self.transport.pause()
         # Older builds imported Power Bin preset wrappers into Master. Remove
         # only unused wrappers, never referenced media or any source file.
-        used_media={i.media_id for i in project.timeline}
+        from .project_timelines import inactive_media_ids
+        used_media={i.media_id for i in project.timeline}|inactive_media_ids(project)
         project.media=[m for m in project.media if not m.timeline_preset or m.id in used_media]
         project.ensure_track_model(); self.project=project; self.preview.set_project(project); self.timeline.set_project(project); self.project_label.setText(Path(project.path).stem if project.path else project.name); self.caption_panel.refresh(); self.refresh_media(); self.seek(project.playhead)
         self.timeline.set_audio_levels({}); self.inspector.set_audio_levels({})
@@ -377,7 +387,9 @@ class MainWindow(QMainWindow):
         observe_enhancement_cache(self)
         self.request_timeline_previews()
         if hasattr(self,'compounds'):self.compounds.switched()
-        if hasattr(self,'delivery') and not (hasattr(self,'compounds') and self.compounds.navigating):self.delivery.activate_project(project)
+        if hasattr(self,'delivery') and not getattr(self,'_switching_timeline',False) and not (hasattr(self,'compounds') and self.compounds.navigating):self.delivery.activate_project(project)
+        if hasattr(self,'timeline_sessions'):
+            self.timeline_sessions.bound(reset=not getattr(self,'_switching_timeline',False) and not self.compounds.navigating)
         self.preview_quality.apply(); self.preview_quality.request()
 
     def request_timeline_previews(self):
@@ -492,14 +504,18 @@ class MainWindow(QMainWindow):
         self._history_index=index; self._restoring=True
         try:
             position=self.project.playhead
+            timeline_name=self.project.timeline_name
             old_media=self.project.media if self.project else []
             render_history=self.project.render_history
-            self.project=copy.deepcopy(self._history[index]); self.project.playhead=position; self.project.render_history=copy.deepcopy(render_history)
+            self.project=self.timeline_sessions.restore(self._history[index],self.project) if self.project.other_timelines else copy.deepcopy(self._history[index])
+            self.project.playhead=position; self.project.render_history=copy.deepcopy(render_history)
             self.project.ensure_track_model(); self.preview.set_project(self.project); self.timeline.set_project(self.project); self.project_label.setText(Path(self.project.path).stem if self.project.path else self.project.name); self.caption_panel.refresh()
             if self.project.media!=old_media:
                 self.refresh_media()
             self.seek(position); self.refresh_inspector()
             self.refresh_project_settings()
+            self.timeline_sessions.sync()
+            if timeline_name!=self.project.timeline_name and not self.delivery.name.isModified():self.delivery.timeline_changed()
         finally:self._restoring=False
         self._schedule_history_settled()
     def _schedule_history_settled(self):
@@ -575,109 +591,13 @@ class MainWindow(QMainWindow):
         timer.timeout.connect(poll); timer.start()
 
     def check_crash_recovery(self):
-        if os.environ.get("QT_QPA_PLATFORM") == "offscreen" or (QApplication.instance() and QApplication.platformName() == "offscreen"):
-            return
-        if not AUTOSAVE_PATH.exists() or AUTOSAVE_PATH.stat().st_size < 50:
-            return
-        try:
-            import time
-            info = json.loads(AUTOSAVE_PATH.read_text(encoding="utf-8"))
-            proj_name = info.get("name", "Untitled Short")
-            clip_count = len(info.get("timeline", []))
-            media_count = len(info.get("media", []))
-            mtime = AUTOSAVE_PATH.stat().st_mtime
-            time_str = time.strftime("%b %d, %Y at %I:%M %p", time.localtime(mtime))
-        except Exception:
-            proj_name = "Autosaved Project"
-            clip_count = "?"
-            media_count = "?"
-            time_str = "recent"
-
-        box = QMessageBox(self)
-        box.setWindowTitle("Crash Recovery Detected")
-        box.setIcon(QMessageBox.Question)
-        box.setText(
-            "<h3>Recover Unsaved Work?</h3>"
-            "<p>Kinetic Cut detected an unexpected shutdown during your last session.</p>"
-            f"<p><b>Project:</b> {proj_name}<br>"
-            f"<b>Saved:</b> {time_str}<br>"
-            f"<b>Timeline:</b> {clip_count} clip(s), {media_count} media file(s)</p>"
-            "<p>Would you like to recover this project now?</p>"
-        )
-        recover_btn = box.addButton("Recover Project", QMessageBox.AcceptRole)
-        discard_btn = box.addButton("Discard Work", QMessageBox.DestructiveRole)
-        box.setDefaultButton(recover_btn)
-        box.exec()
-
-        if box.clickedButton() == recover_btn:
-            try:
-                backup_dir = CACHE_DIR / "recovered"
-                backup_dir.mkdir(parents=True, exist_ok=True)
-                backup_path = backup_dir / f"recovered_{int(time.time())}.kcut"
-                shutil.copy2(AUTOSAVE_PATH, backup_path)
-
-                loaded = Project.load(AUTOSAVE_PATH)
-                self.set_project(loaded)
-                self.project.path = ""
-                self._saved_project_key = None
-                self.commit_history()
-                self.statusBar().showMessage(f"Recovered '{proj_name}' from crash · Remember to save your project", 8000)
-            except Exception as error:
-                logging.exception("Failed to recover autosaved project")
-                QMessageBox.critical(self, "Recovery Failed", f"Could not recover autosaved project:\n{error}")
-        elif box.clickedButton() == discard_btn:
-            confirm = QMessageBox.question(
-                self,
-                "Discard Autosave?",
-                "Are you sure you want to permanently discard this autosaved work?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-            if confirm == QMessageBox.Yes:
-                try:
-                    AUTOSAVE_PATH.unlink(missing_ok=True)
-                    self.statusBar().showMessage("Autosave discarded", 3000)
-                except Exception:
-                    pass
+        if QApplication.platformName() == 'offscreen':return
+        from .recovery_ui import show
+        show(self,crash_only=True)
 
     def offer_manual_recovery(self):
-        from .project_manager import folder
-        from PySide6.QtGui import QCursor
-        from .config import DATA_DIR
-        import time
-        candidates = []
-        for p in [DATA_DIR / "recovery_backup_user_work.kcut", AUTOSAVE_PATH]:
-            if p.is_file() and p.stat().st_size > 50 and p not in candidates:
-                candidates.append(p)
-        rec_dir = CACHE_DIR / "recovered"
-        if rec_dir.is_dir():
-            for p in sorted(rec_dir.glob("*.kcut"), key=lambda x: x.stat().st_mtime, reverse=True):
-                if p not in candidates:
-                    candidates.append(p)
-        root_dir = folder(self.settings)
-        if root_dir.is_dir():
-            for p in root_dir.glob("Recovered*.kcut"):
-                if p not in candidates:
-                    candidates.append(p)
-
-        if not candidates:
-            path, _ = QFileDialog.getOpenFileName(self, "Open Recovery File", str(DATA_DIR), "Kinetic Cut (*.kcut);;All Files (*)")
-            if path:
-                self.load_project_path(path)
-            return
-
-        menu = QMenu(self)
-        for c in candidates:
-            try:
-                data = json.loads(c.read_text(encoding="utf-8"))
-                mtime = time.strftime("%b %d %I:%M %p", time.localtime(c.stat().st_mtime))
-                label = f"{c.stem} — {data.get('name', 'Project')} ({len(data.get('timeline', []))} clips · {mtime})"
-            except Exception:
-                label = f"{c.name} ({c.stat().st_size} bytes)"
-            menu.addAction(label, lambda p=str(c.resolve()): self.load_project_path(p))
-        menu.addSeparator()
-        menu.addAction("Browse all recovery files in Data folder…", self._browse_manual_recovery)
-        menu.exec(QCursor.pos())
+        from .recovery_ui import show
+        show(self)
 
     def _browse_manual_recovery(self):
         from .config import DATA_DIR
@@ -2139,16 +2059,20 @@ class MainWindow(QMainWindow):
 
         if not headless:
             from .caption_style_dialog import CaptionStyleDialog
-            dialog=CaptionStyleDialog(self.project.subtitle_style,self.settings,self)
+            dialog=CaptionStyleDialog(self.project.subtitle_style,self.settings,self,selection_available=bool(self.timeline.selected_ids))
+            if selection_only:dialog.scope.button(1).setChecked(True)
             if not dialog.exec():
+                dialog.deleteLater()
                 return None
             style=dialog.selected_style()
+            selection_only=dialog.scope.checkedId()==1
             caption_word_count=dialog.words.value()
             censor_captions=dialog.censor.isChecked()
             strip_periods=dialog.remove_periods.isChecked()
             self.settings["caption_remove_periods"]=strip_periods
             self.settings["caption_words_per_card"]=caption_word_count
             self.settings["caption_censor"]=censor_captions
+            dialog.deleteLater()
             save_settings(self.settings)
             self.project.subtitle_style=style
             self.model_changed()
@@ -2166,30 +2090,60 @@ class MainWindow(QMainWindow):
 
         destination_project=self.project
         snapshot=copy.deepcopy(self.project)
-        selected=self.timeline.selected_ids if (selection_only or not headless) else set()
+        def caption_key(project):
+            payload=json.loads(self._history_key(project))
+            # Drawing the subtitle lane lazily materializes its default state.
+            # This is equivalent to an absent entry, not an edit to the speech
+            # or existing captions. Keep genuine locks/visibility/other changes.
+            states=payload.get('track_states',{})
+            state=states.get('subtitle_1',{})
+            defaults=dict(visible=True,locked=False,muted=False)
+            if not (set(state)-set(defaults)) and all(state.get(k,v)==v for k,v in defaults.items()):states.pop('subtitle_1',None)
+            return json.dumps(payload,sort_keys=True,default=str)
+        snapshot_key=caption_key(snapshot)
+        selected=self.timeline.selected_ids if selection_only else set()
         def is_speech(i):
             media=snapshot.media_by_id(i.media_id)
             return i.role in {"source_audio","dialogue"} or bool(media and media.kind=='video')    # a video file's own audio is speech, whatever its role
         audio_items=[i for i in snapshot.timeline if i.track in snapshot.audio_tracks]
         speech_items=[i for i in audio_items if is_speech(i)]
+        embedded_speech=not speech_items
+        if embedded_speech:
+            # Older/imported projects can retain audio on video-only lanes.
+            # Cover every cut, while repeated layout layers share one source.
+            embedded=[i for i in snapshot.timeline if i.track in snapshot.video_tracks
+                      and (media:=snapshot.media_by_id(i.media_id)) and media.kind=='video' and media.has_audio]
+            speech_items=embedded
         targets=[i for i in speech_items if not i.muted and not snapshot.track_states.get(i.track,{}).get('muted')]
-        if selected:
+        if selection_only:
             related=set(selected)
             for item in snapshot.timeline:
                 if item.id in selected:
                     related.update(i.id for i in snapshot.linked_items(item))
             chosen=[i for i in targets if i.id in related]
-            if chosen:
-                targets=chosen
+            if not chosen:
+                self._caption_report=dict(state='refused',reason='Select an unmuted speech clip, or choose Whole timeline.')
+                self.statusBar().showMessage(self._caption_report['reason'],5000)
+                return None
+            targets=chosen
+        if embedded_speech:
+            unique={}
+            for item in targets:
+                media=snapshot.media_by_id(item.media_id)
+                key=(os.path.normcase(os.path.abspath(media.path)),item.start,item.in_point,item.duration,item.speed)
+                unique.setdefault(key,item)
+            targets=list(unique.values())
         if not targets:
             if speech_items:
                 self.statusBar().showMessage('Unmute speech audio before generating captions.',4000)
                 self._caption_report=dict(state='refused',reason='All speech audio is muted.')
                 return None
-            targets=[copy.deepcopy(main)]
+            self._caption_report=dict(state='refused',reason='No unmuted speech audio was found on the timeline.')
+            self.statusBar().showMessage(self._caption_report['reason'],5000)
+            return None
         chosen_ids={i.id for i in targets}
         skipped=[dict(item_id=i.id,track=i.track,start=round(i.start,3),end=round(i.start+i.duration,3),
-                      reason='muted' if (i.muted or snapshot.track_states.get(i.track,{}).get('muted')) else 'not speech (music or sound effect)')
+                      reason='muted' if (i.muted or snapshot.track_states.get(i.track,{}).get('muted')) else 'outside selected clips' if is_speech(i) else 'not speech (music or sound effect)')
                  for i in audio_items if i.id not in chosen_ids][:20]
         sources=[dict(item_id=i.id,track=i.track,start=round(i.start,3),end=round(i.start+i.duration,3)) for i in targets][:40]
         self._caption_report=dict(state='running')
@@ -2251,7 +2205,7 @@ class MainWindow(QMainWindow):
             if progress_dialog:
                 progress_dialog.setValue(100)
                 progress_dialog.close()
-            if (self.project is not destination_project or self._history_key(self.project)!=self._history_key(snapshot)
+            if (self.project is not destination_project or caption_key(self.project)!=snapshot_key
                     or self.project.track_states.get('subtitle_1',{}).get('locked')):
                 self.statusBar().showMessage("Caption result discarded because the project changed",5000)
                 return
@@ -2275,7 +2229,7 @@ class MainWindow(QMainWindow):
                 warnings.append(f'Captioned speech covers {span[0]:.1f}-{span[1]:.1f}s of a {self.project.duration:.1f}s timeline.')
             if captions and max(c.end for c in captions)<span[1]-3:warnings.append('No speech was found in the last '+f'{span[1]-max(c.end for c in captions):.1f}s of the captioned range.')
             if skipped:warnings.append(f'{len(skipped)} audio clip(s) were not captioned; see skipped.')
-            self._caption_report=dict(state='complete',captions=len(captions),backend=backend,
+            self._caption_report=dict(state='complete',captions=len(captions),backend=backend,scope='selection' if selection_only else 'timeline',
                 first_start=round(min((c.start for c in captions),default=0),3),last_end=round(max((c.end for c in captions),default=0),3),
                 audio_range=span,sources=sources,skipped=skipped,warnings=warnings,timing_concerns=concerns)
             if not headless and style.animation in ('fade every word','word highlight','word reveal') and any(not c.word_timings for c in captions):
@@ -2292,7 +2246,7 @@ class MainWindow(QMainWindow):
             if progress_dialog:progress_dialog.close(); progress_dialog.deleteLater()
             if getattr(self,'_caption_cancel',None) is cancel:self._caption_cancel=None
             if getattr(self,'_caption_report',{}).get('state')=='running':self._caption_report=dict(state='cancelled' if cancel.is_set() else 'discarded',reason='The project changed or the run was cancelled.')
-            if cancel.is_set() and not getattr(self,'_closing',False):self.statusBar().showMessage('Caption generation cancelled',4000)
+            if cancel.is_set() and self.project is destination_project and not getattr(self,'_closing',False):self.statusBar().showMessage('Caption generation cancelled',4000)
         worker.signals.error.connect(failed)
         worker.signals.finished.connect(finished)
         self.start_worker(worker)
@@ -2418,7 +2372,9 @@ class MainWindow(QMainWindow):
             from .enhance_storage import finish_work as finish_enhancement_work
             if finish_enhancement_work(self):event.ignore();return
             self._shutdown_wait_timer.stop()
-            try:SESSION_LOCK_PATH.unlink(missing_ok=True)
+            try:
+                from .recovery_store import finish_legacy
+                finish_legacy()
             except OSError:logging.exception('Could not remove active session marker')
             self.shutdownFinished.emit()
             event.accept(); return
@@ -2472,7 +2428,9 @@ class MainWindow(QMainWindow):
             from .enhance_storage import finish_work as finish_enhancement_work
             if finish_enhancement_work(self):
                 self._shutdown_wait_timer.start();event.ignore();return
-            try:SESSION_LOCK_PATH.unlink(missing_ok=True)
+            try:
+                from .recovery_store import finish_legacy
+                finish_legacy()
             except OSError:logging.exception('Could not remove active session marker')
             self.shutdownFinished.emit(); event.accept()
 

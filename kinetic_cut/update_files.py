@@ -59,6 +59,7 @@ def target_path(root, name):
 
 
 def validate_manifest(data, version=None):
+    if not isinstance(data,dict):raise ValueError('Invalid update manifest')
     if data.get('schema') != 1 or data.get('application') != 'KineticCut':raise ValueError('Unsupported update manifest')
     version_tuple(data.get('version'))
     if version and data['version'] != version:raise ValueError('Update version mismatch')
@@ -67,6 +68,7 @@ def validate_manifest(data, version=None):
     names = set(); total = 0
     for name, item in files.items():
         valid_name(name)
+        if not isinstance(item,dict):raise ValueError('Invalid update file entry')
         if name.lower() in names:raise ValueError('Duplicate Windows application path')
         names.add(name.lower())
         if name in (MANIFEST, INVENTORY):raise ValueError('Recursive update metadata')
@@ -75,6 +77,7 @@ def validate_manifest(data, version=None):
         if item.get('bundle') not in bundles:raise ValueError('Missing file payload')
     if total > 8 * 1024**3:raise ValueError('Update exceeds application size limit')
     for key, item in bundles.items():
+        if not isinstance(key,str) or not isinstance(item,dict):raise ValueError('Invalid update payload entry')
         if not re.fullmatch('[a-f0-9]{64}', key) or item.get('sha256') != key or not trusted_download(item.get('url', '')) or not isinstance(item.get('size'), int) or not 0 < item['size'] <= 2 * 1024**3:raise ValueError('Invalid update payload')
     if 'KineticCut.exe' not in files:raise ValueError('Update has no application executable')
     return data
@@ -82,25 +85,11 @@ def validate_manifest(data, version=None):
 
 def fetch_file(url, sha256, size, destination, cancel, progress=lambda *_: None, opener=urllib.request.urlopen):
     if not trusted_download(url) or not re.fullmatch('[a-f0-9]{64}', sha256) or not 0 < size <= 2 * 1024**3:raise ValueError('Invalid verified download')
-    destination = Path(destination); destination.parent.mkdir(parents=True, exist_ok=True)
-    pending = destination.with_suffix('.partial'); done = 0; checksum = hashlib.sha256()
-    try:
-        cancelled(cancel)
-        request = urllib.request.Request(url, headers={'User-Agent': 'KineticCut-Updater'})
-        with opener(request, timeout=30) as response, pending.open('wb') as stream:
-            while True:
-                cancelled(cancel); chunk = response.read(256 * 1024)
-                if not chunk:break
-                done += len(chunk)
-                if done > size:raise ValueError('Download exceeds published size')
-                stream.write(chunk); checksum.update(chunk); progress(done, size)
-        cancelled(cancel)
-        if done != size or checksum.hexdigest() != sha256:raise ValueError('Update download verification failed')
-        pending.replace(destination); return destination
-    finally:pending.unlink(missing_ok=True)
+    from .verified_download import fetch
+    return fetch(url,sha256,size,destination,cancel,progress,opener)
 
 
-def plan(root, manifest, cancel=None, progress=lambda *_: None):
+def plan(root, manifest, cancel=None, progress=lambda *_: None, *, repair=False):
     cancel = cancel or threading.Event(); validate_manifest(manifest)
     changed = {}; expected = {}; files = manifest['files']
     for index, (name, item) in enumerate(files.items()):
@@ -112,16 +101,19 @@ def plan(root, manifest, cancel=None, progress=lambda *_: None):
     old_path = Path(root) / MANIFEST
     removed = {}
     if old_path.is_file():
-        old = validate_manifest(json.loads(old_path.read_text(encoding='utf-8')))
-        if version_tuple(old['version']) >= version_tuple(manifest['version']):raise ValueError('Update is not newer than the installed inventory')
-        for name, item in old['files'].items():
+        try:old = validate_manifest(json.loads(old_path.read_text(encoding='utf-8')))
+        except (ValueError,KeyError,TypeError):
+            if not repair:raise
+            old=None
+        if old and (version_tuple(old['version'])>version_tuple(manifest['version']) or not repair and version_tuple(old['version'])==version_tuple(manifest['version'])):raise ValueError('Update is not newer than the installed inventory')
+        for name, item in (old or {}).get('files',{}).items():
             if name not in files:
                 path = target_path(root, name)
                 if path.is_file():
                     if digest(path, cancel) != item['sha256']:raise ValueError('An obsolete application file was modified; use the full installer to repair it')
                     removed[name] = item['sha256']
     keys = {item['bundle'] for item in changed.values()}
-    return dict(changed=changed, expected=expected, removed=removed, bundles=sorted(keys),
+    return dict(changed=changed, expected=expected, removed=removed, bundles=sorted(keys),repair=repair,
                 download_bytes=sum(manifest['bundles'][key]['size'] for key in keys))
 
 
@@ -132,8 +124,21 @@ def write_json(path, value):
         json.dump(value, stream, separators=(',', ':')); stream.flush(); os.fsync(stream.fileno())
     pending.replace(path)
 
+def discard_staged(job_path):
+    """Discard only this editor's abandoned staging job; keep resumable bundles."""
+    from .config import CACHE_DIR
+    path=Path(job_path);folder=path.parent;base=(CACHE_DIR/'updates').resolve()
+    if path.name!='job.json' or folder.resolve().parent!=base or not re.fullmatch(r'(pending|repair)-[a-f0-9]{32}',folder.name):return False
+    stage=folder/'files'
+    try:
+        data=json.loads(path.read_text(encoding='utf-8'))
+        if Path(data['stage']).resolve()!=stage.resolve() or stage.is_symlink() or stage.resolve().parent!=folder.resolve():return False
+        if stage.exists():shutil.rmtree(stage)
+        return True
+    except (OSError,ValueError,KeyError):return False
 
-def stage_update(root, manifest, selection, directory, cancel, progress=lambda *_: None, local_payloads=None):
+
+def stage_update(root, manifest, selection, directory, cancel, progress=lambda *_: None, local_payloads=None,download_cache=None):
     """Download selected payloads; verify every member and extract changed files only."""
     validate_manifest(manifest); directory = Path(directory); directory.mkdir(parents=True, exist_ok=True)
     stage = directory / 'files'; stage.mkdir(exist_ok=True); total = selection['download_bytes']; done = 0
@@ -143,7 +148,7 @@ def stage_update(root, manifest, selection, directory, cancel, progress=lambda *
     if shutil.disk_usage(directory).free < required:raise RuntimeError('Not enough free space to download and safely apply this update')
     try:
         for key in selection['bundles']:
-            cancelled(cancel); metadata = manifest['bundles'][key]; archive = directory / (key + '.zip')
+            cancelled(cancel); metadata = manifest['bundles'][key]; archive = (Path(download_cache) if download_cache else directory) / (key + '.zip')
             source = Path(local_payloads) / ('KineticCut-Part-' + key + '.zip') if local_payloads else None
             if source and source.is_file():
                 if source.stat().st_size != metadata['size'] or digest(source, cancel) != key:raise ValueError('Local update payload verification failed')
@@ -170,7 +175,6 @@ def stage_update(root, manifest, selection, directory, cancel, progress=lambda *
                         if output:output.close()
                     if checksum.hexdigest() != item['sha256']:raise ValueError('Update file verification failed')
             done += metadata['size']; progress(round(done / max(total, 1) * 100), 'Verified changed application files')
-            if archive.parent == directory:archive.unlink(missing_ok=True)
         cancelled(cancel)
         (stage / MANIFEST).write_text(json.dumps(manifest, separators=(',', ':')), encoding='utf-8')
         (stage / INVENTORY).write_text('\n'.join([*sorted(manifest['files']), MANIFEST, INVENTORY]) + '\n', encoding='utf-8')
@@ -178,12 +182,11 @@ def stage_update(root, manifest, selection, directory, cancel, progress=lambda *
             path = stage / name; needed[name] = dict(sha256=digest(path), size=path.stat().st_size)
             current = target_path(root, name); selection['expected'][name] = digest(current) if current.is_file() else None
         job = dict(schema=1, root=str(Path(root).resolve()), stage=str(stage.resolve()), manifest=manifest,
-                   changed=needed, expected=selection['expected'], removed=selection['removed'])
+                   changed=needed, expected=selection['expected'], removed=selection['removed'],repair=bool(selection.get('repair')))
         write_json(directory / 'job.json', job); return directory / 'job.json'
     except BaseException:
         shutil.rmtree(stage, ignore_errors=True)
-        for path in directory.glob('*.partial'):path.unlink(missing_ok=True)
-        for path in directory.glob('*.zip'):path.unlink(missing_ok=True)
+        # Keep verified bundles and bound partials so the next attempt resumes.
         raise
 
 
@@ -256,13 +259,18 @@ def commit(root, verify=lambda: None):
     shutil.rmtree(journal.parent)
 
 
-def apply_job(job_path, verify=lambda: None, replace=os.replace, before_apply=lambda root,names:None):
+def apply_job(job_path, verify=lambda: None, replace=os.replace, before_apply=lambda root,names:None, *, repair_version=None):
     job = json.loads(Path(job_path).read_text(encoding='utf-8')); validate_manifest(job['manifest'])
     root = Path(job['root']).resolve(); stage = Path(job['stage']).resolve()
     if job.get('schema') != 1 or root == stage or stage.is_relative_to(root):raise ValueError('Invalid update job location')
     if set(job['expected']) != set(job['changed']):raise ValueError('Invalid update preconditions')
-    old = validate_manifest(json.loads((root / MANIFEST).read_text(encoding='utf-8'))) if (root / MANIFEST).is_file() else None
-    if old and version_tuple(old['version']) >= version_tuple(job['manifest']['version']):raise ValueError('Update would downgrade the application')
+    repair=job.get('repair') is True and repair_version==job['manifest']['version']
+    if job.get('repair') and not repair:raise ValueError('Repair requires explicit same-version authorization')
+    try:old = validate_manifest(json.loads((root / MANIFEST).read_text(encoding='utf-8'))) if (root / MANIFEST).is_file() else None
+    except (ValueError,KeyError,TypeError):
+        if not repair:raise
+        old=None
+    if old and (version_tuple(old['version'])>version_tuple(job['manifest']['version']) or not repair and version_tuple(old['version'])==version_tuple(job['manifest']['version'])):raise ValueError('Update would downgrade the application')
     for name, checksum in job['removed'].items():
         if name in job['manifest']['files'] or not old or old['files'].get(name, {}).get('sha256') != checksum:
             raise ValueError('Update cannot remove an unowned application file')

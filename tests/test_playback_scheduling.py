@@ -45,6 +45,19 @@ class PlaybackSchedulingTests(unittest.TestCase):
                     self.assertEqual(cache[self.item.id][0],sync.effect_cache[self.item.id][0])
                     self.assertEqual(cache[self.item.id][1],expected)
                 self.assertEqual(self.item,before)
+    def test_composition_snapshot_excludes_inactive_timelines_without_mutating_project(self):
+        from kinetic_cut.preview_compositor import CompositionCache
+        self.p.create_timeline('Other moment');self.p.timeline=[TimelineItem('inactive','m','video_1',0,10)]
+        self.p.switch_timeline('timeline_1');self.canvas.set_project(self.p)
+        self.canvas.active_frames={'v':'decoder'};self.canvas.frames={'decoder':self.image}
+        before=self.p.to_dict();cache=CompositionCache(self.canvas)
+        try:
+            with patch('kinetic_cut.preview_compositor.render',return_value=(self.image,{},'')):
+                cache.request(self.rect)
+                self.assertEqual(cache.template.other_timelines,[])
+                if cache.future:cache.future.result(5)
+            self.assertEqual(self.p.to_dict(),before)
+        finally:cache.close()
     def test_prepared_frame_hits_cache_and_changes_invalidate(self):
         self.item.effects=[dict(name='Gaussian Blur',horizontal=12,vertical=12)]
         self.canvas.active_frames[self.item.id]='decoder'

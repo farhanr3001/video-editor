@@ -69,11 +69,14 @@ class GpuProcessTests(unittest.TestCase):
         project=Project(media=[MediaItem('source','C:/fixture.mp4','video','Source',3000,1920,1080)])
         track=project.video_tracks[0]
         project.timeline=[TimelineItem(str(n),'source',track,n*3,2) for n in range(1000)]
+        project.create_timeline('Other moment');project.timeline=[TimelineItem('inactive','source',track,0,20)]
+        project.switch_timeline('timeline_1')
         before=project.to_dict();window,canvas,front=self.frontend(project,at=1)
         try:
             front.refresh();payload=front.peer.submit.call_args.args[0]
             decoded=pickle.loads(pickle.dumps(payload))
             self.assertEqual([i['id'] for i in decoded['document']['timeline']],['0'])
+            self.assertEqual(decoded['document']['other_timelines'],[])
             self.assertEqual(decoded['duration'],2999);self.assertNotIn('frames',decoded)
             self.assertEqual(project.to_dict(),before)
             project.timeline[0].transform.x=.7;project.touch();front.refresh()

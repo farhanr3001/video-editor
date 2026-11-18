@@ -130,3 +130,14 @@ class BackgroundPersistenceTests(unittest.TestCase):
 
     def test_non_editor_save_stays_synchronous(self):
         config.save_settings({'test':'direct'});self.assertEqual(json.loads(self.path.read_text()),{'test':'direct'})
+    def test_first_recovery_session_registration_stays_off_the_gui_thread(self):
+        from kinetic_cut import recovery_store as store
+        owner=self.owners[0];entered=threading.Event();release=threading.Event();atomic=store.atomic;threads=[]
+        def slow(path,body):
+            threads.append(threading.get_ident());entered.set();release.wait(2);atomic(path,body)
+        with patch.object(config,'DATA_DIR',Path(self.temp.name)/'data'),patch.object(store,'atomic',slow):
+            try:
+                started=time.monotonic();recovery(owner,config.AUTOSAVE_PATH)
+                self.assertLess(time.monotonic()-started,.15);self.assertTrue(entered.wait(2));self.assertNotIn(threading.get_ident(),threads)
+            finally:release.set()
+            self.drain()

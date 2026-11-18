@@ -247,9 +247,29 @@ class Project(IndexedProject):
     playhead: float = 0.0
     created_at: float = field(default_factory=time.time)
     modified_at: float = field(default_factory=time.time)
+    active_timeline_id: str = 'timeline_1'
+    timeline_name: str = 'Timeline 1'
+    timeline_number: int = 1
+    other_timelines: list[dict] = field(default_factory=list)
 
     def __post_init__(self):
         self.ensure_track_model()
+
+    def timeline_choices(self):
+        from .project_timelines import choices
+        return choices(self)
+
+    def create_timeline(self,name=''):
+        from .project_timelines import create
+        return create(self,name)
+
+    def switch_timeline(self,identifier):
+        from .project_timelines import switch
+        return switch(self,identifier)
+
+    def active_snapshot(self):
+        from .project_timelines import active_snapshot
+        return active_snapshot(self)
 
     @property
     def duration(self) -> float:
@@ -643,6 +663,7 @@ class Project(IndexedProject):
         if self.portable_media:
             import os
             def relative_sources(body):
+                for timeline in body.get('other_timelines',[]):relative_sources(timeline['data'])
                 for item in body.get('timeline',body.get('items',[])):
                     from .motion_audio import rebase
                     rebase(item.get('graphic_data',{}).get('scene',{}),target.parent,True)
@@ -685,6 +706,7 @@ class Project(IndexedProject):
         if raw.get("portable_media"):
             base = Path(path).resolve().parent
             def absolute_sources(body):
+                for timeline in body.get('other_timelines',[]):absolute_sources(timeline['data'])
                 for item in body.get('timeline',body.get('items',[])):
                     from .motion_audio import rebase
                     rebase(item.get('graphic_data',{}).get('scene',{}),base)
@@ -713,6 +735,11 @@ class Project(IndexedProject):
     @classmethod
     def from_dict(cls, raw: dict) -> "Project":
         raw = copy.deepcopy(raw)
+        if 'active_timeline_id' in raw:raw['active_timeline_id']=str(raw['active_timeline_id'] or 'timeline_1')
+        if 'timeline_name' in raw:raw['timeline_name']=str(raw['timeline_name'] or 'Timeline 1').strip()[:120]
+        if 'timeline_number' in raw:
+            try:raw['timeline_number']=max(1,int(raw['timeline_number']))
+            except (TypeError,ValueError):raise ValueError('Invalid saved timeline order.')
         from .render_history import records
         raw['render_history']=records(raw.get('render_history',[]))
         raw["settings"] = ProjectSettings(**_known(ProjectSettings, raw.get("settings", {})))
@@ -739,6 +766,9 @@ class Project(IndexedProject):
             except Exception:
                 pass
         raw["transitions"] = transitions
+        if 'other_timelines' in raw:
+            from .project_timelines import decode_states
+            raw['other_timelines']=decode_states(raw)
         project = cls(**_known(cls, raw))
         project.ensure_track_model()
         return project

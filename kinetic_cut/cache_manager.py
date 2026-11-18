@@ -8,18 +8,22 @@ from __future__ import annotations
 import os
 import logging
 import json
+import re
+import threading
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal, Slot
 from PySide6.QtWidgets import (QCheckBox, QDialog, QGroupBox, QHBoxLayout, QLabel,
-                               QMessageBox, QProgressBar, QPushButton, QVBoxLayout)
+                               QMessageBox, QProgressBar, QPushButton, QVBoxLayout,QWidget,QScrollArea,QFrame)
 
 from .config import CACHE_DIR
 from .theme_widgets import set_ui_style
 
 
 CATEGORIES = (
+    ('update-downloads','Paused or completed update downloads','updates',{'.zip','.exe','.partial','.json'}),
     ('ai-enhance', 'AI enhanced video frames', 'ai-enhance', {'.png','.json','.mkv','.log'}),
     ('transcripts', 'Source transcript indexes', 'transcripts', {'.json'}),
     ('edit-reviews', 'Edit review frames and reports', 'edit-reviews', {'.png', '.json'}),
@@ -41,6 +45,13 @@ def _files(root: Path, category: str):
     if definition is None:
         raise ValueError('Unknown cache category')
     _, _, folder, suffixes = definition
+    if category=='update-downloads':
+        base=root/'updates'
+        for location,pattern in ((base,r'KineticCut-Setup-\d+\.\d+\.\d+\.exe(?:\.partial(?:\.json)?)?'),(base/'payloads',r'[a-f0-9]{64}\.zip(?:\.partial(?:\.json)?)?')):
+            if not location.is_dir() or location.is_symlink() or not location.resolve().is_relative_to(root.resolve()):continue
+            for path in location.iterdir():
+                if re.fullmatch(pattern,path.name) and path.is_file() and not path.is_symlink():yield path
+        return
     if folder is None:
         if not root.is_dir() or root.is_symlink():
             return
@@ -92,8 +103,9 @@ def tree_size(root) -> int:
 def removal_blocked(window) -> bool:
     """True while playback, rendering, transfers or background writers could be using cache or tools."""
     from .component_ui import active_downloads
+    from .dialog_jobs import active_dialog_threads
     writing = any(not getattr(job, 'preview_decoder', False) for job in window._workers)
-    return bool(writing or getattr(window.delivery, 'running', False) or window.transport.playing or active_downloads
+    return bool(writing or getattr(window.delivery, 'running', False) or window.transport.playing or active_downloads or active_dialog_threads()
                 or getattr(window, '_vision_busy', False) or getattr(window, '_vocal_busy', False))
 
 
@@ -113,6 +125,9 @@ class _ScanJob(QRunnable):
             for category, *_ in CATEGORIES:
                 result = scan(self.root, (category,))[category]
                 self.signals.step.emit(self.generation, ('cache', category, result))
+            from .recovery_store import entries
+            copies=[row for row in entries() if not row['active']]
+            self.signals.step.emit(self.generation,('recovery','recovery',(len(copies),sum(row['size'] for row in copies))))
             for key, path in self.tools.items():
                 self.signals.step.emit(self.generation, ('tool', key, tree_size(path)))
         except Exception:
@@ -135,8 +150,14 @@ def clear(categories, root: Path = CACHE_DIR, *, keep=()) -> tuple[int, int]:
             if path.is_symlink() or not path.resolve().is_relative_to(root):
                 continue
             try:
-                length = path.stat().st_size
-                path.unlink()
+                lock=nullcontext()
+                if category=='update-downloads':
+                    from .verified_download import file_lock
+                    name=re.sub(r'\.partial(?:\.json)?$','',path.name)
+                    lock=file_lock(path.with_name(name+'.lock'),threading.Event(),timeout=0)
+                with lock:
+                    length = path.stat().st_size
+                    path.unlink()
                 count += 1
                 size += length
             except (FileNotFoundError, PermissionError, OSError):
@@ -277,15 +298,17 @@ class CacheManagerDialog(QDialog):
         self.setWindowTitle('Cache Manager')
         self.setMinimumWidth(520)
         self.setModal(True)
-        layout = QVBoxLayout(self)
+        outer=QVBoxLayout(self);body=QWidget();layout=QVBoxLayout(body)
+        self.scroll_area=QScrollArea();self.scroll_area.setWidgetResizable(True);self.scroll_area.setFrameShape(QFrame.NoFrame);self.scroll_area.setWidget(body);outer.addWidget(self.scroll_area,1)
+        self.resize(650,min(800,self.screen().availableGeometry().height()-70))
         title = QLabel('Cache Manager')
         set_ui_style(title, 'font-size:18px; font-weight:600;')
         layout.addWidget(title)
-        note = QLabel('Free space used by previews that Kinetic Cut can rebuild. Automatic cleanup keeps Power Bin waveforms and proxies. Unused project playback copies expire after a day. Projects, original media, recovery copies, generated speech, and face analysis are protected.')
+        note = QLabel('Free space used by previews that Kinetic Cut can rebuild. Automatic cleanup keeps Power Bin waveforms and proxies. Projects, original media, generated speech and face analysis are protected. Recovery copies are kept unless you explicitly select them below.')
         note.setWordWrap(True)
         set_ui_style(note, 'color:@text_sub;')
         layout.addWidget(note)
-        self.clear_on_exit = QCheckBox('Clear project waveforms and playback caches when Kinetic Cut closes')
+        self.clear_on_exit = QCheckBox('Clear project playback caches on exit')
         self.clear_on_exit.setObjectName('clearPlaybackOnExit')
         self.clear_on_exit.setToolTip('Clear project waveforms, proxies and processed audio previews on exit. Power Bin waveforms and proxies are kept unless you clear them here.')
         self.clear_on_exit.setChecked(bool(getattr(window, 'settings', {}).get(CLEAR_PLAYBACK_ON_EXIT, True)))
@@ -314,6 +337,12 @@ class CacheManagerDialog(QDialog):
         footer.addWidget(self.total, 1); footer.addWidget(self.scan_progress, 1)
         clear_layout.addLayout(footer)
         layout.addWidget(self.clear_group)
+        self.recovery_group=QGroupBox('Recovery copies');recovery_row=QHBoxLayout(self.recovery_group)
+        self.recovery_check=QCheckBox('Delete inactive recovery copies');self.recovery_check.setChecked(False)
+        self.recovery_amount=QLabel('Calculating…');self._recovery_size=(0,0)
+        recovery_row.addWidget(self.recovery_check,1);recovery_row.addWidget(self.recovery_amount)
+        manage=QPushButton('Manage…');manage.clicked.connect(lambda:__import__('kinetic_cut.recovery_ui',fromlist=['show']).show(window));recovery_row.addWidget(manage)
+        layout.addWidget(self.recovery_group)
         self.component_group = QGroupBox('Installed optional downloads')
         self.component_layout = QVBoxLayout(self.component_group); self.component_rows = {}
         layout.addWidget(self.component_group)
@@ -326,7 +355,7 @@ class CacheManagerDialog(QDialog):
         done = QPushButton('Done')
         done.clicked.connect(self.accept)
         actions.addWidget(done)
-        layout.addLayout(actions)
+        outer.addLayout(actions)
         self.refresh()
 
     def set_clear_on_exit(self, checked):
@@ -348,7 +377,7 @@ class CacheManagerDialog(QDialog):
             ready = root.is_dir() and not root.is_symlink() and any(root.iterdir())
             if ready and key not in self.component_rows:
                 row = QHBoxLayout(); check = QCheckBox(metadata.get(key, {}).get('name',
-                    {'vision': 'Face / background tools', 'vocals': 'Vocal separation', 'enhance': 'AI Enhance'}[key]))
+                    {'vision': 'Face / background tools', 'vocals': 'Vocal separation', 'enhance': 'AI Enhance','offline-speech':'Offline English voice'}[key]))
                 amount = QLabel(); row.addWidget(check, 1); row.addWidget(amount); self.component_layout.addLayout(row)
                 self.component_rows[key] = (check, amount, row)
             if key in self.component_rows:
@@ -364,7 +393,7 @@ class CacheManagerDialog(QDialog):
     def _start_scan(self, tools):
         self._generation += 1
         self._scanning = True; self._sizes = {}
-        self._scan_total = len(CATEGORIES) + len(tools); self._scan_done = 0
+        self._scan_total = len(CATEGORIES) + len(tools)+1; self._scan_done = 0
         self.scan_progress.setRange(0, self._scan_total); self.scan_progress.setValue(0); self.scan_progress.show()
         self.total.setText('Calculating sizes…'); self.clear_button.setEnabled(False)
         for check, amount in self.rows.values():
@@ -388,6 +417,9 @@ class CacheManagerDialog(QDialog):
             check.setEnabled(count > 0)
             if count == 0:
                 check.setChecked(False)
+        elif kind=='recovery':
+            self._recovery_size=value;self.recovery_amount.setText(f'{size_text(value[1])} · {value[0]} copies');self.recovery_check.setEnabled(value[0]>0)
+            if not value[0]:self.recovery_check.setChecked(False)
         elif key in self.component_rows:
             self.component_rows[key][1].setText(size_text(value))
 
@@ -419,7 +451,8 @@ class CacheManagerDialog(QDialog):
     def clear_selected(self):
         selected = [category for category, (check, _) in self.rows.items() if check.isChecked()]
         components = [key for key,(check,_,_) in self.component_rows.items() if check.isChecked()]
-        if not selected and not components:
+        recovery_clear=self.recovery_check.isChecked()
+        if not selected and not components and not recovery_clear:
             return
         window = self.window_
         if removal_blocked(window):
@@ -427,17 +460,24 @@ class CacheManagerDialog(QDialog):
             return
         summary = self._sizes if self._sizes and not self._scanning else scan(CACHE_DIR, selected)
         total = sum(summary.get(key, (0, 0))[1] for key in selected)
+        if recovery_clear:total+=self._recovery_size[1]
         extra = '\nSelected optional tools will be removed and can be downloaded again.' if components else ''
-        if QMessageBox.question(self, 'Clear selected caches?', f'Remove {size_text(total)} of regenerable previews? They will be rebuilt as needed. Your projects and source media will not be deleted.'+extra) != QMessageBox.Yes:
+        if recovery_clear:extra+='\nThe selected recovery copies will be permanently deleted. They cannot be rebuilt. Saved projects and source media stay in place.'
+        if QMessageBox.question(self, 'Clear selected items?', f'Remove {size_text(total)} of selected items? Your saved projects and source media will not be deleted.'+extra) != QMessageBox.Yes:
             return
         self.clear_button.setEnabled(False)
         try:
+            recovery_count=recovery_bytes=0
+            if recovery_clear:
+                from .recovery_store import clear_inactive
+                recovery_count,recovery_bytes=clear_inactive();self.recovery_check.setChecked(False)
             from .feature_packs import remove
             for key in components:remove(key)
             if components:
                 from .component_ui import events
                 events().changed.emit()
             count, released = clear(selected) if selected else (0, 0)
+            count+=recovery_count;released+=recovery_bytes
             gpu=getattr(getattr(window,'preview',None),'gpu',None) if selected else None
             if selected and gpu:gpu.invalidate_caches()
             if 'ai-enhance' in selected:

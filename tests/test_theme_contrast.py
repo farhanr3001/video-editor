@@ -1,7 +1,7 @@
 import unittest
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QColor, QIcon, QPalette
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QComboBox
 from kinetic_cut.theme import PALETTES, get_active_theme_palette
 from kinetic_cut.theme_widgets import apply_application_theme, set_ui_style, set_ui_icon
 from kinetic_cut.icons import lucide_icon
@@ -83,6 +83,27 @@ class ThemeContrastTests(unittest.TestCase):
         apply_application_theme('default')
         self.assertIn('spin-up.svg',widget.styleSheet())
         widget.close()
+
+    def test_dropdown_chevron_has_no_inherited_bar_or_button_background(self):
+        from PySide6.QtCore import QEvent
+        from kinetic_cut.controls import SafeComboBox
+        for theme in PALETTES:
+            apply_application_theme(theme)
+            for constructor in (QComboBox, SafeComboBox):
+                for width,height in ((120,26),(320,38)):
+                    combo=constructor();combo.addItems([' ', 'Second choice']);combo.resize(width,height)
+                    # Local typography/popup rules must inherit the same arrow.
+                    set_ui_style(combo,'QComboBox {combobox-popup:0;}')
+                    combo.show();app.processEvents()
+                    image=combo.grab().toImage();background=image.pixelColor(width-23,5)
+                    self.assertEqual(background,image.pixelColor(6,5),(theme,width))
+                    ink=[(x,y) for x in range(width-24,width-4) for y in range(4,height-4)
+                         if max(abs(a-b) for a,b in zip(image.pixelColor(x,y).getRgb()[:3],background.getRgb()[:3]))>40]
+                    self.assertTrue(8<=len(ink)<=55,(theme,width,len(ink)))
+                    self.assertLessEqual(max(x for x,y in ink)-min(x for x,y in ink),9)
+                    self.assertLessEqual(max(y for x,y in ink)-min(y for x,y in ink),6)
+                    self.assertAlmostEqual((min(y for x,y in ink)+max(y for x,y in ink))/2,height/2,delta=3)
+                    combo.close();combo.deleteLater();app.sendPostedEvents(None,QEvent.DeferredDelete)
 
     def test_selected_inspector_tab_keeps_dark_ink_on_light_surface(self):
         apply_application_theme('ableton_gray')

@@ -914,6 +914,9 @@ class DeliveryPage:
         self.name=QLineEdit("Untitled Short"); self.location=RecentLocations(window.settings); browse=QPushButton("Browse"); browse.clicked.connect(self.browse)
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        from .timeline_sessions import TimelineCombo
+        self.timeline_selector=TimelineCombo(window)
+        form.addRow('Timeline:',self.timeline_selector)
         form.addRow("File Name",self.name); form.addRow("Location",self.location); form.addRow("",browse)
         self.codec=SafeComboBox(); self.codec.addItems(["H.264","H.265"]); self.resolution=SafeComboBox(); self.resolution.addItems(["1080 × 1920","720 × 1280"]); self.fps=SafeComboBox(); self.fps.addItems(["60","30"]); self.hardware=SafeComboBox(); self.hardware.addItems(["Auto","NVIDIA","Intel","AMD","CPU"])
         form.addRow("Format",QLabel("MP4")); form.addRow("Codec",self.codec); form.addRow("Encoder",self.hardware); form.addRow("Resolution",self.resolution); form.addRow("Frame Rate",self.fps)
@@ -951,7 +954,7 @@ class DeliveryPage:
         self.jobs=restore(project.render_history)+active
         # The form belongs to the newly opened document, even when two projects
         # have the same dimensions. A typed output name is never a global default.
-        self.name.setText(project.name);self.name.setModified(False)
+        self.name.setText(project.timeline_name if project.other_timelines or project.timeline_name!='Timeline 1' else project.name);self.name.setModified(False)
         from PySide6.QtCore import QSignalBlocker
         controls=[self.codec,self.hardware,self.quality,self.bitrate,self.audio,self.burn]
         blockers=[QSignalBlocker(control) for control in controls]
@@ -964,6 +967,16 @@ class DeliveryPage:
         if not active:
             self.progress.setRange(0,100);self.progress.setValue(0);self.cancel_render.setEnabled(False)
         self.refresh()
+    def timeline_changed(self,view=None):
+        view=view or {}
+        if view.get('file_modified'):
+            self.name.setText(view['file_name']);self.name.setModified(True)
+        else:
+            import re
+            project=self.window.project
+            name=project.timeline_name if project.other_timelines or project.timeline_name!='Timeline 1' else project.name
+            self.name.setText(re.sub(r'[<>:"/\\|?*]','_',name));self.name.setModified(False)
+        self._project_format=None;self.sync_project_settings();self.refresh_estimate()
     def bind_job(self,job):
         job.setdefault('owner_context',getattr(self,'context_id',''))
         job.setdefault('owner_project',self.window.compounds.root())
@@ -1005,7 +1018,8 @@ class DeliveryPage:
         self.resolution.blockSignals(False); self.fps.blockSignals(False); self.refresh_estimate()
 
     def output_project(self):
-        project=copy.deepcopy(self.window.project); size=self.resolution.currentData()
+        project=self.window.project.active_snapshot(); size=self.resolution.currentData()
+        if self.window.project.other_timelines or self.window.project.timeline_name!='Timeline 1':project.name=self.window.project.timeline_name
         if size:
             factor=size[0]/project.settings.width
             if factor!=1:
@@ -1038,7 +1052,7 @@ class DeliveryPage:
         if output.exists() and QMessageBox.question(self.window,"Replace output?",f"Replace {output} when this job renders?")!=QMessageBox.Yes:return
         if any(j["output"]==str(output) and j["state"]!="Complete" for j in self.jobs):return QMessageBox.warning(self.window,"Duplicate output","Choose a different file name for this queued job.")
         p=self.output_project()
-        self.jobs.append(self.bind_job(dict(project=p,output=str(output),preset=self.preset(),hardware=self.hardware.currentText(),burn=self.burn.isChecked(),audio=self.audio.isChecked(),state="Queued",elapsed=0.))); self.refresh()
+        self.jobs.append(self.bind_job(dict(project=p,timeline_id=p.active_timeline_id,timeline_name=p.timeline_name,output=str(output),preset=self.preset(),hardware=self.hardware.currentText(),burn=self.burn.isChecked(),audio=self.audio.isChecked(),state="Queued",elapsed=0.))); self.refresh()
     def refresh(self):
         selected=self.list.currentRow(); self.list.clear()
         for index,job in enumerate(self.jobs):
@@ -1174,7 +1188,7 @@ def build_workspace(w):
     w.media_toggle=w.left_panels.buttons['Media']; w.effects_toggle=w.left_panels.buttons['Effects']
     w.media_list=w.media_panel.grid; w.effects_list=w.effects_panel.list
     w.viewer_split=QSplitter(Qt.Horizontal); w.viewer_split.setMinimumHeight(230); w.viewer_split.setChildrenCollapsible(False); w.viewer_split.setHandleWidth(0); w.workspace_split.addWidget(w.viewer_split)
-    viewer=QWidget(); viewer.setObjectName("viewerPanel"); vr=QVBoxLayout(viewer); vr.setContentsMargins(0,0,0,0); vr.setSpacing(0)
+    viewer=QWidget(); w.viewer_panel=viewer; viewer.setObjectName("viewerPanel"); vr=QVBoxLayout(viewer); vr.setContentsMargins(0,0,0,0); vr.setSpacing(0)
     w.viewer_header=QWidget(); w.viewer_header.setFixedHeight(HEADER_HEIGHT)
     viewer_header_layout=QVBoxLayout(w.viewer_header); viewer_header_layout.setContentsMargins(0,0,0,0); viewer_header_layout.setSpacing(0); vr.addWidget(w.viewer_header)
     title_row=QHBoxLayout(); title_row.setContentsMargins(8,3,8,0)
@@ -1186,7 +1200,7 @@ def build_workspace(w):
     w.preview_quality=PreviewQuality(w); head.insertWidget(1,w.preview_quality)
     w.preview.transformChanged.connect(w.viewer_transform_changed); w.preview.captionTransformChanged.connect(w.viewer_caption_changed); w.preview.interactionFinished.connect(lambda _:w.model_changed()); w.preview.itemSelected.connect(w.select_item); w.preview.captionSelected.connect(w.select_caption); w.preview.cropRequested.connect(w.frame_source); w.preview.commandRequested.connect(w.viewer_command)
     controls=QHBoxLayout(); controls.addStretch(); controls.addWidget(tool_button("skip-back",lambda:w.seek(max(0,w.project.playhead-1/w.project.settings.fps)),"Previous frame")); controls.addWidget(tool_button("square",w.stop,"Stop · K")); w.play_button=tool_button("play",w.toggle_play,"Play / Pause · Space"); controls.addWidget(w.play_button); controls.addWidget(tool_button("skip-forward",lambda:w.seek(w.project.playhead+1/w.project.settings.fps),"Next frame")); w.loop_button=tool_button("repeat",lambda checked:setattr(w.transport,"loop",checked),"Loop timeline playback",True); controls.addWidget(w.loop_button); controls.addStretch(); vr.addLayout(controls); w.viewer_split.addWidget(viewer)
-    tl=QWidget(); tl.setObjectName("timelinePanel"); layout=QVBoxLayout(tl); layout.setContentsMargins(0,0,0,0); layout.setSpacing(0); bar=QHBoxLayout(); bar.setContentsMargins(6,4,14,4)
+    tl=QWidget(); w.timeline_panel=tl; tl.setObjectName("timelinePanel"); layout=QVBoxLayout(tl); layout.setContentsMargins(0,0,0,0); layout.setSpacing(0); bar=QHBoxLayout(); w.timeline_bar=bar; bar.setContentsMargins(6,4,14,4)
     w.tool_group=QButtonGroup(w)
     for attr,icon,mode,hint in [("select_tool","mouse-pointer-2","select","Selection · A"),("blade_tool","razor","blade","Cut/Split · B")]:
         b=tool_button(icon,lambda checked=False,m=mode:w.set_timeline_tool(m),hint,True); setattr(w,attr,b); w.tool_group.addButton(b); bar.addWidget(b)
@@ -1204,8 +1218,14 @@ def build_workspace(w):
     w.snap_tool=tool_button("magnet",w.toggle_snapping,"Magnetic Snapping · N",True); w.snap_tool.setChecked(True); bar.addWidget(w.snap_tool); bar.addWidget(w.link_toggle)
     undo_tool=tool_button("rotate-ccw",w.undo,"Undo · Ctrl+Z"); redo_tool=tool_button("rotate-cw",w.redo,"Redo · Ctrl+Shift+Z")
     bar.addWidget(undo_tool); bar.addWidget(redo_tool)
+    w.fullscreen_timeline=tool_button('maximize-2',lambda checked:w.timeline_workspace.toggle(checked),'Fullscreen timeline',True)
+    w.fullscreen_timeline.setAccessibleName('Fullscreen timeline');bar.addWidget(w.fullscreen_timeline)
     w.timeline_edit_tools=[w.select_tool,w.transform_box_tool,w.crop_tool,w.auto_layout_tool,w.blade_tool,w.retime_button,w.link_toggle,w.snap_tool,undo_tool,redo_tool]
-    w.review_badge=QLabel("REVIEW ONLY · Scrub or play to preview"); w.review_badge.setObjectName("reviewBadge"); w.review_badge.hide(); bar.addWidget(w.review_badge); bar.addStretch()
+    w.timeline_edit_tools.append(w.fullscreen_timeline)
+    w.review_badge=QLabel("REVIEW ONLY · Scrub or play to preview"); w.review_badge.setObjectName("reviewBadge"); w.review_badge.hide(); bar.addWidget(w.review_badge); bar.addStretch(1)
+    from .timeline_sessions import TimelineCombo
+    w.timeline_selector=TimelineCombo(w,create=True);bar.addWidget(w.timeline_selector);bar.addStretch(1)
+    w.timeline_edit_tools.append(w.timeline_selector)
     from .widgets import slider_to_zoom,zoom_to_slider
     w.timeline_zoom=SafeSlider(Qt.Horizontal); w.timeline_zoom.setRange(0,1000); w.timeline_zoom.setValue(zoom_to_slider(45)); w.timeline_zoom.setFixedWidth(110)
     bar.addWidget(tool_button("zoom-out",lambda:w.timeline_zoom.setValue(w.timeline_zoom.value()-40),"Timeline zoom out")); bar.addWidget(w.timeline_zoom); bar.addWidget(tool_button("zoom-in",lambda:w.timeline_zoom.setValue(w.timeline_zoom.value()+40),"Timeline zoom in"))
@@ -1248,10 +1268,13 @@ def build_workspace(w):
     w.job_status.setToolTip("Show active and recent background tasks")
     w.job_status.clicked.connect(w.background_tasks.toggle)
     w.statusBar().addPermanentWidget(w.job_progress); w.statusBar().addPermanentWidget(w.job_status)
+    from .timeline_workspace import TimelineWorkspace
+    w.timeline_workspace=TimelineWorkspace(w)
     w.update_job_status(); update_panels(w)
 
 
 def update_panels(w):
+    if getattr(getattr(w,'timeline_workspace',None),'active',False):w.timeline_workspace.update_panels();return
     edit=w.current_page==0
     w.left_stack.setVisible(True); w.right_stack.setVisible(not edit or w.inspector_toggle.isChecked())
 
@@ -1260,6 +1283,7 @@ def set_page(w,page):
     if page not in (0,1):return
     if page!=1 and getattr(getattr(w,'delivery',None),'running',False):
         w.page_group.button(1).setChecked(True); w.statusBar().showMessage('Wait for rendering to finish or cancel it before returning to Edit.',4000); return
+    if hasattr(w,'timeline_workspace'):w.timeline_workspace.before_page(page)
     if page and w.current_page==0:
         w._edit_left_width=w.workspace_split.sizes()[0]; w.left_stack.setFixedWidth(360); w.workspace_split.handle(1).setEnabled(False)
     elif not page and w.current_page!=0:
@@ -1281,9 +1305,11 @@ def set_page(w,page):
     w.statusBar().showMessage("Deliver · Timeline locked. Scrub the playhead or use Space to preview." if page else "Edit · Timeline editing enabled",5000)
     if page==1:
         w.delivery.sync_project_settings()
-        if not w.delivery.name.isModified():w.delivery.name.setText(w.project.name)
+        if not w.delivery.name.isModified():w.delivery.timeline_changed()
         w.delivery.refresh_estimate()
+    if hasattr(w,'timeline_sessions'):w.timeline_sessions.sync()
     update_panels(w)
+    if hasattr(w,'timeline_workspace'):w.timeline_workspace.after_page(page)
 
 
 def update_nav_icons(w, palette: dict = None):

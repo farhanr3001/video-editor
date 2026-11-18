@@ -66,6 +66,8 @@ class AvailabilityUI(unittest.TestCase):
                 settle(lambda:not dialog.voice_availability.checking)
                 self.assertFalse(dialog.generate_btn.isEnabled());self.assertFalse(dialog.preview_btn.isEnabled())
                 for i in range(dialog.voice_combo.count()):
+                    if str(dialog.voice_combo.itemData(i)).startswith('offline:'):
+                        self.assertTrue(dialog.voice_combo.model().item(i).isEnabled());continue
                     self.assertIn('unavailable',dialog.voice_combo.itemText(i))
                     self.assertFalse(dialog.voice_combo.model().item(i).isEnabled())
                 self.assertTrue(dialog.voice_availability.retry.isVisible())

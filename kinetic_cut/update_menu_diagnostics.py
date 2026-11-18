@@ -43,7 +43,7 @@ def run(output):
     from .ui import MainWindow
     window = MainWindow(); window.show(); app.processEvents()
     menus = {a.text():a.menu() for a in window.menuBar().actions()}
-    assert set(menus) == {'File', 'Edit', 'Workflow'}
+    assert set(menus) == {'File', 'Edit', 'Workflow','Help'}
     assert [a.text() for a in menus['Workflow'].actions()] == ['Settings…']
     assert 'Collect project and media…' not in [a.text() for a in menus['File'].actions()]
     assert 'UI Themes…' in [a.text() for a in menus['File'].actions()]

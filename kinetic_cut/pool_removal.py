@@ -14,6 +14,10 @@ def remove(panel,ids,folder):
         if not entries:return False
         paths={source_key(e['media']['path']) for e in entries if e['media'].get('path')}
         media_ids={m.id for m in project.media if m.id in ids or m.path and source_key(m.path) in paths}
+    from .project_timelines import inactive_media_ids
+    if media_ids & inactive_media_ids(project):
+        QMessageBox.information(window,'Media used in another timeline','This media is used in another timeline. Remove its clips there before removing it from the shared Media Pool or Power Bin.')
+        return False
     clips=[i for i in project.timeline if i.media_id in media_ids]
     if any(project.track_states.get(i.track,{}).get('locked') for i in clips):
         QMessageBox.information(window,'Media on locked tracks','Unlock the affected timeline tracks before removing this media.')

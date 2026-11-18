@@ -101,7 +101,7 @@ def create(project,item_ids,caption_ids,name):
         left=project.item_by_id(transition.left_item_id); right=project.item_by_id(transition.right_item_id)
         if (left and left.id in selected_ids and abs(left.start+left.duration-end)>1e-7) or (right and right.id in selected_ids and abs(right.start-start)>1e-7):
             raise ValueError('Select both sides of an interior transition before creating a compound.')
-    child=copy.deepcopy(project); child.name=name.strip() or 'Compound Clip'; child.path=''; child.playhead=0
+    child=project.active_snapshot(); child.name=name.strip() or 'Compound Clip'; child.path=''; child.playhead=0
     child.timeline=[copy.deepcopy(i) for i in selected]; child.captions=[copy.deepcopy(c) for c in captions]
     # Parent transitions use parent time and clip identities. Only complete
     # selected edges belong inside the child; unrelated transitions must remain
