@@ -130,6 +130,14 @@ def run(selftest_output=None, native_window_test=False):
             saved_theme = load_settings().get("ui_theme", "default")
             splash.report(38, "Applying workspace theme"); app.setStyle('Fusion'); app.setStyleSheet(get_theme_stylesheet(saved_theme))
             window=loaded['window'](startup_progress=splash.report); app._kinetic_window=window
+            if selftest_output is None and sys.platform == 'win32':
+                marker = Path(sys.executable).with_name('capture-editing.trace')
+                if marker.is_file():
+                    try:
+                        from .interaction_trace import install as install_editing_trace
+                        install_editing_trace(window, marker.with_name('editing-trace'))
+                    except Exception:
+                        logging.exception('Could not initialize optional editing trace')
             if window_audit is not None:window_audit.allow(window)
             splash.report(100,'Workspace ready'); window.show(); QTimer.singleShot(0,splash.close)
             # No networking during source/isolated diagnostics or normal editing.

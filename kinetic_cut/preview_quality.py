@@ -22,6 +22,7 @@ class PreviewQuality(QComboBox):
         self.inspected_codecs={}
         self.token=None
         self.extra_ids=set()
+        self._timeline_seen=set(); self._document_identity=None; self._job_media_id=None
         self.addItems(['Preview: Full','Preview: Optimized'])
         self.setCurrentIndex(int(w.settings.get('optimized_preview',False)))
         self.setToolTip('Full keeps source resolution and all effects, with background short-GOP seek copies for faster playback.\nOptimized uses 960px previews. Audio and exports always use originals.')
@@ -89,7 +90,16 @@ class PreviewQuality(QComboBox):
     def request(self):
         if getattr(getattr(self.w,'transport',None),'closed',False):return
         w=self.w
-        used={i.media_id for i in w.project.timeline if i.track in w.project.video_tracks}|self.extra_ids
+        identity=w.project.created_at
+        if identity!=self._document_identity:
+            self._document_identity=identity;self._timeline_seen.clear()
+        placed={i.media_id for i in w.project.timeline if i.track in w.project.video_tracks}
+        self._timeline_seen.update(placed)
+        self._timeline_seen.update(i.get('media_id') for row in w.project.other_timelines for i in row['data'].get('timeline',[]))
+        used=placed | (self.extra_ids-self._timeline_seen)
+        # Cuts keep using the same whole-source job/cache. Only removal of the
+        # final video use cancels unfinished preparation; never delete a cache.
+        if self.busy and self._job_media_id not in used:self.cancel()
         from .video_worker import enabled_for
         from .media import proxy_path
         restored=False
@@ -143,6 +153,7 @@ class PreviewQuality(QComboBox):
         snapshot=copy.deepcopy(media)
         self.busy=True
         self.job_kind=kind
+        self._job_media_id=media.id
         token=threading.Event()
         self.token=token
         if kind=='inspect':
@@ -198,6 +209,7 @@ class PreviewQuality(QComboBox):
             self.busy=False
             self.job_kind=''
             self.token=None
+            self._job_media_id=None
             self.request()
 
         worker.signals.result.connect(ready)

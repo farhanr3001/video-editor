@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 from kinetic_cut.model import Project,MediaItem,TimelineItem
 from kinetic_cut import enhance
-from kinetic_cut.enhance_storage import State,families
+from kinetic_cut.enhance_storage import State,families,reference_projects,Storage,IDLE_MS
 
 class StorageTests(unittest.TestCase):
  def test_absent_effect_detection_caches_only_immutable_history(self):
@@ -78,3 +78,72 @@ class StorageTests(unittest.TestCase):
  def test_rapid_project_switch_before_first_sweep_still_tracks_old_frames(self):
   self.state.update([self.p],[]);self.state.update([self.empty()],[])
   self.state.sweep(True);self.assertFalse(self.root.exists())
+
+ def test_saved_cache_reference_reader_does_not_load_complete_projects(self):
+  path=self.base/'saved.kcut';raw=self.p.to_dict()
+  # Non-cache data must never enter project reconstruction on this worker.
+  raw['captions']=[{'text':'large unrelated caption payload'}]*2000
+  raw['timeline'][0]['graphic_data']={'scene':{'nodes':[{'irrelevant':1}]*2000}}
+  path.write_text(json.dumps(raw));expected=families([self.p])[0]
+  with patch.object(Project,'load',side_effect=AssertionError('full project load')):
+   self.assertEqual(families(self.state.saved_projects(path))[0],expected)
+   self.state.update([self.empty()],[path],identify=[self.p]);self.state.sweep(True)
+  self.assertTrue(self.root.exists());saved=self.state.saved_projects(path)[0]
+  self.assertFalse(saved.captions);self.assertFalse(saved.timeline[0].graphic_data)
+
+ def test_saved_reference_cache_reuses_unchanged_file_and_invalidates_on_save(self):
+  path=self.base/'other.kcut';self.p.save(path)
+  with patch.object(Path,'read_text',autospec=True,side_effect=Path.read_text) as read:
+   first=self.state.saved_projects(path);second=self.state.saved_projects(path)
+   self.assertIs(first,second);self.assertEqual(read.call_count,1)
+  self.empty().save(path);self.assertEqual(self.state.saved_projects(path),())
+
+ def test_cached_project_recomputes_family_when_source_file_changes(self):
+  path=self.base/'other.kcut';self.p.save(path);saved=self.state.saved_projects(path)
+  before=families(saved)[0];self.source.write_bytes(b'owner source changed')
+  self.assertIs(self.state.saved_projects(path),saved)
+  self.assertNotEqual(families(saved)[0],before)
+
+ def test_inactive_saved_timeline_protects_enhancement_frames(self):
+  from kinetic_cut.project_timelines import create
+  p=copy.deepcopy(self.p);create(p,'Another timeline');path=self.base/'timelines.kcut';p.save(path)
+  self.assertEqual(families([p])[0],families([self.p])[0])
+  self.assertEqual(families(self.state.saved_projects(path))[0],families([self.p])[0])
+  self.state.update([self.empty()],[path],identify=[self.p]);self.state.sweep(True)
+  self.assertTrue(self.root.exists())
+
+ def test_portable_nested_reference_family_matches_normal_project_load(self):
+  from kinetic_cut.project_timelines import create
+  inner=copy.deepcopy(self.p);create(inner,'Empty nested timeline')
+  wrapper=MediaItem('wrapper','','video','nested',2,16,12);wrapper.compound=inner.to_dict()
+  p=Project(media=[wrapper],timeline=[TimelineItem('outer','wrapper','video_1',0,2)])
+  p.portable_media=True;path=self.base/'portable.kcut';p.save(path)
+  self.assertEqual(families(self.state.saved_projects(path))[0],families([Project.load(path)])[0])
+  self.assertEqual(families(self.state.saved_projects(path))[0],families([self.p])[0])
+
+ def test_unused_compound_and_unenhanced_timeline_do_not_construct_projects(self):
+  raw=self.empty().to_dict();raw['media'][0]['compound']=self.p.to_dict()
+  with patch.object(Project,'from_dict',side_effect=AssertionError('unnecessary reconstruction')):
+   self.assertEqual(tuple(reference_projects(raw)),())
+
+ def test_file_changed_during_reference_read_fails_closed(self):
+  path=self.base/'other.kcut';self.p.save(path);original=Path.read_text
+  def changed(p,*a,**kw):
+   data=original(p,*a,**kw)
+   if p==path:p.write_text(data+' ')
+   return data
+  self.state.update([self.empty()],[path],identify=[self.p])
+  with patch.object(Path,'read_text',changed):report=self.state.sweep(True)
+  self.assertTrue(report['unsafe']);self.assertTrue(self.root.exists())
+
+ def test_cleanup_waits_for_idle_and_does_not_start_during_drag(self):
+  from PySide6.QtCore import QObject
+  from types import SimpleNamespace
+  window=QObject();window.transport=SimpleNamespace(playing=False,scrubbing=False)
+  window.preview=SimpleNamespace(pan_origin=None);window.timeline=SimpleNamespace(drag_mode='move')
+  storage=Storage(window)
+  with patch.object(storage,'capture') as capture:
+   storage.observe();capture.assert_called_once();self.assertEqual(storage.timer.interval(),IDLE_MS)
+  with patch('kinetic_cut.ui.Worker',side_effect=AssertionError('cleanup during drag')):
+   storage.start();self.assertTrue(storage.timer.isActive());self.assertIsNone(storage.job)
+  storage.timer.stop();storage.deleteLater();window.deleteLater()

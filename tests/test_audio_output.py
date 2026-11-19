@@ -37,13 +37,29 @@ class AudioOutputTests(TestCase):
                 output._devices.audioOutputsChanged.emit()
             change.assert_not_called()
 
-    def test_route_listener_is_owned_and_destroyed_with_output(self):
+    def test_players_share_one_application_owned_route_listener(self):
+        first = QAudioOutput(); second = QAudioOutput()
+        self.assertIs(first._devices, second._devices)
+        self.assertIs(first._devices.parent(), self.app)
+
+    def test_destroying_an_output_keeps_shared_listener_and_disconnects_it(self):
         parent = QObject(); output = QAudioOutput(parent); devices = output._devices
-        self.assertEqual(devices.parent(), output)
+        survivor = QAudioOutput()
         parent.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         self.assertFalse(shiboken6.isValid(output))
-        self.assertFalse(shiboken6.isValid(devices))
+        self.assertTrue(shiboken6.isValid(devices))
+        with patch('kinetic_cut.audio_output.QMediaDevices.defaultAudioOutput', return_value=survivor.device()), patch.object(survivor, '_follow_system_output'):
+            devices.audioOutputsChanged.emit()
+
+    def test_many_player_replacements_do_not_create_more_device_watchers(self):
+        first = QAudioOutput(); devices = first._devices
+        with patch('kinetic_cut.audio_output.QMediaDevices', side_effect=AssertionError('A cut created another device watcher')):
+            for _ in range(100):
+                output = QAudioOutput()
+                self.assertIs(output._devices, devices)
+                output.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
     def test_every_audible_player_uses_system_following_output(self):
         root = Path(__file__).resolve().parents[1] / 'kinetic_cut'

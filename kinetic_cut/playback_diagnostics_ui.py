@@ -12,7 +12,10 @@ class EventMonitor(QObject):
         self.timer=QTimer(self);self.timer.setTimerType(Qt.PreciseTimer);self.timer.setInterval(16)
         self.timer.timeout.connect(self.sample);self.timer.start()
     def sample(self):
-        now=time.perf_counter();self.delays.append(max(0.,(now-self.previous)*1000-16.));self.previous=now
+        now=time.perf_counter();delay=max(0.,(now-self.previous)*1000-16.);self.delays.append(delay);self.previous=now
+        if delay>=150.:
+            from .activity_log import record
+            record('event_loop.delay',throttle=.5,milliseconds=round(delay,1))
     def snapshot(self):
         values=sorted(self.delays)
         return dict(samples=len(values),event_delay_p95_ms=round(values[min(len(values)-1,int(len(values)*.95))],3) if values else None,

@@ -1,5 +1,18 @@
 """Keep existing players on the output selected for this app by the OS."""
 from PySide6.QtMultimedia import QAudioOutput as _QAudioOutput, QMediaDevices
+from PySide6.QtCore import QCoreApplication
+
+
+def system_output_devices():
+    # Endpoint monitoring belongs to the application, not each short-lived
+    # decoder. Cuts/moves must not register and tear down Windows device
+    # notifications while replacing players.
+    app = QCoreApplication.instance()
+    devices = getattr(app, '_kinetic_output_devices', None)
+    if devices is None:
+        devices = QMediaDevices(app)
+        app._kinetic_output_devices = devices
+    return devices
 
 
 class QAudioOutput(_QAudioOutput):
@@ -14,7 +27,7 @@ class QAudioOutput(_QAudioOutput):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._devices = QMediaDevices(self)
+        self._devices = system_output_devices()
         self._devices.audioOutputsChanged.connect(self._follow_system_output)
 
     def _follow_system_output(self):
