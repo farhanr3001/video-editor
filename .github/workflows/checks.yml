@@ -36,4 +36,5 @@ jobs:
             build/ci-source/*.log
             build/ci-source/**/*.png
             build/ci-source/**/*.json
+            build/timeline-performance-20261017/pixel-failure/*.png
           retention-days: 7

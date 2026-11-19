@@ -14,8 +14,8 @@ def regular(path):
 
 def managed_regular(path):
     """Accept Windows spelling aliases, but never a redirected directory/file."""
-    path=Path(path)
-    if not path.is_absolute() or '..' in path.parts or not regular(path):return False
+    path=Path(path).absolute()
+    if '..' in path.parts or not regular(path):return False
     try:
         return all(not parent.is_symlink() and not getattr(parent.lstat(),'st_file_attributes',0)&0x400 for parent in path.parents)
     except OSError:return False

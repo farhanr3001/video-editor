@@ -21,6 +21,14 @@ class RecoveryCopies(unittest.TestCase):
             self.assertEqual([r['path'] for r in store.entries()],[path])
         self.assertTrue(path.exists())
 
+    def test_relative_developer_home_remains_supported_without_following_links(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            base=Path(directory);self.assertEqual(base.resolve().parent,Path.cwd().resolve())
+            with patch.object(config,'DATA_DIR',Path(base.name)/'data'):
+                token=store.session();path=store.save(self.project,token);store.finish(token)
+                self.assertEqual([row['path'] for row in store.entries(include_legacy=False)],[path])
+                store.remove(path);self.assertFalse(path.exists())
+
     @unittest.skipUnless(os.name=='nt','Windows path aliases')
     def test_real_short_path_copy_is_listed_and_removable_by_long_spelling(self):
         import ctypes
